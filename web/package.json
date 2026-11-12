@@ -1,0 +1,29 @@
+{
+  "name": "ai-web-free-openui",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build && node scripts/export-prompt.mjs",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@openuidev/lang-core": "^1.1.1",
+    "@openuidev/react-headless": "^0.18.7",
+    "@openuidev/react-lang": "^1.1.1",
+    "@openuidev/react-ui": "^0.18.7",
+    "lucide-react": "^0.511.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "zod": "^3.25.67",
+    "zustand": "^4.5.6"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@vitejs/plugin-react": "^4.5.0",
+    "typescript": "^5.8.3",
+    "vite": "^6.3.5"
+  }
+}

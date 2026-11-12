@@ -1,6 +1,10 @@
 package handler
 
 import (
+	"io/fs"
+	"net/http"
+	"strings"
+
 	"ai-web-free/httpclient/bogdanfinn"
 	"ai-web-free/internal/accounts"
 	"ai-web-free/internal/chatgpt"
@@ -8,6 +12,7 @@ import (
 	"ai-web-free/internal/provider"
 	"ai-web-free/internal/proxy"
 	"ai-web-free/middlewares"
+	"ai-web-free/web"
 
 	"github.com/gin-gonic/gin"
 )
@@ -40,7 +45,33 @@ func RegisterRouter(accountPool *accounts.Pool, proxyPool *proxy.Pool, registry 
 	router := gin.Default()
 	router.Use(middlewares.Cors)
 
-	router.GET("/", func(c *gin.Context) { c.JSON(200, gin.H{"message": "Hello, world!"}) })
+	// ─── 内嵌 Thesys OpenUI React 构建产物 (web/dist) ─────────────
+	distFS, err := fs.Sub(web.StaticFS, "dist")
+	if err == nil {
+		fileServer := http.FileServer(http.FS(distFS))
+		serveIndex := func(c *gin.Context) {
+			indexData, readErr := fs.ReadFile(distFS, "index.html")
+			if readErr != nil {
+				c.JSON(http.StatusOK, gin.H{"message": "Hello, world!"})
+				return
+			}
+			c.Data(http.StatusOK, "text/html; charset=utf-8", indexData)
+		}
+		router.GET("/", func(c *gin.Context) {
+			if strings.Contains(c.GetHeader("Accept"), "application/json") {
+				c.JSON(200, gin.H{"message": "Hello, world!", "service": "ai-web-free"})
+				return
+			}
+			serveIndex(c)
+		})
+		router.GET("/index.html", serveIndex)
+		router.GET("/assets/*filepath", func(c *gin.Context) {
+			fileServer.ServeHTTP(c.Writer, c.Request)
+		})
+	} else {
+		router.GET("/", func(c *gin.Context) { c.JSON(200, gin.H{"message": "Hello, world!"}) })
+	}
+
 	router.GET("/ping", func(c *gin.Context) { c.JSON(200, gin.H{"message": "pong"}) })
 
 	// ─── 管理端 Admin APIs (/admin/api/v1/*) ───────────────────────

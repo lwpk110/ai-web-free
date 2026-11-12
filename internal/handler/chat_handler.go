@@ -19,6 +19,7 @@ import (
 	chatgpt_types "ai-web-free/typings/chatgpt"
 	officialtypes "ai-web-free/typings/official"
 	"ai-web-free/util"
+	"ai-web-free/web"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -58,6 +59,26 @@ func (h *ChatHandler) Nightmare(c *gin.Context) {
 			"code":    "missing_required_parameter",
 		}})
 		return
+	}
+
+	// 当客户端携带 X-OpenUI-Lang: true 且未显式传入 OpenUI System Prompt 时，自动前置注入
+	if strings.EqualFold(c.GetHeader("X-OpenUI-Lang"), "true") || c.GetHeader("X-OpenUI-Lang") == "1" {
+		hasOpenUIPrompt := false
+		for _, m := range original_request.Messages {
+			if m.Role == "system" && strings.Contains(m.Text(), "OpenUI") {
+				hasOpenUIPrompt = true
+				break
+			}
+		}
+		if !hasOpenUIPrompt {
+			if sysPrompt := web.OpenUISystemPrompt(); sysPrompt != "" {
+				sysMsg := officialtypes.APIMessage{
+					Role:    "system",
+					Content: officialtypes.MessageContent{TextValue: sysPrompt},
+				}
+				original_request.Messages = append([]officialtypes.APIMessage{sysMsg}, original_request.Messages...)
+			}
+		}
 	}
 
 	account, _, err := resolveAccount(c, h.accountPool, h.cfg, original_requestHasFiles(original_request))

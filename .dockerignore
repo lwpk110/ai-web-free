@@ -18,8 +18,9 @@ _scratch
 *.pid.lock
 
 bin/
-dist/
+/dist/
 target/
+web/node_modules/
 
 # 保留 README 供 Docker 镜像元数据使用
 *.md
