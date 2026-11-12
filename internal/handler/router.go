@@ -1,10 +1,6 @@
 package handler
 
 import (
-	"io/fs"
-	"net/http"
-	"strings"
-
 	"ai-web-free/httpclient/bogdanfinn"
 	"ai-web-free/internal/accounts"
 	"ai-web-free/internal/chatgpt"
@@ -12,7 +8,6 @@ import (
 	"ai-web-free/internal/provider"
 	"ai-web-free/internal/proxy"
 	"ai-web-free/middlewares"
-	"ai-web-free/web"
 
 	"github.com/gin-gonic/gin"
 )
@@ -45,39 +40,7 @@ func RegisterRouter(accountPool *accounts.Pool, proxyPool *proxy.Pool, registry 
 	router := gin.Default()
 	router.Use(middlewares.Cors)
 
-	// ─── 内嵌 OpenUI 静态网页服务 ──────────────────────────────────
-	subFS, err := fs.Sub(web.StaticFS, ".")
-	if err == nil {
-		fileServer := http.FileServer(http.FS(subFS))
-		router.GET("/", func(c *gin.Context) {
-			// 如果客户端明确请求 JSON，返回健康信息；否则返回 OpenUI 控制台 HTML
-			if strings.Contains(c.GetHeader("Accept"), "application/json") {
-				c.JSON(200, gin.H{"message": "Hello, world!", "service": "ai-web-free"})
-				return
-			}
-			indexData, readErr := web.StaticFS.ReadFile("index.html")
-			if readErr != nil {
-				c.String(http.StatusInternalServerError, "Failed to load OpenUI index.html")
-				return
-			}
-			c.Data(http.StatusOK, "text/html; charset=utf-8", indexData)
-		})
-		router.GET("/index.html", func(c *gin.Context) {
-			indexData, readErr := web.StaticFS.ReadFile("index.html")
-			if readErr != nil {
-				c.String(http.StatusInternalServerError, "Failed to load OpenUI index.html")
-				return
-			}
-			c.Data(http.StatusOK, "text/html; charset=utf-8", indexData)
-		})
-		router.GET("/styles/*filepath", func(c *gin.Context) {
-			fileServer.ServeHTTP(c.Writer, c.Request)
-		})
-		router.GET("/js/*filepath", func(c *gin.Context) {
-			fileServer.ServeHTTP(c.Writer, c.Request)
-		})
-	}
-
+	router.GET("/", func(c *gin.Context) { c.JSON(200, gin.H{"message": "Hello, world!"}) })
 	router.GET("/ping", func(c *gin.Context) { c.JSON(200, gin.H{"message": "pong"}) })
 
 	// ─── 管理端 Admin APIs (/admin/api/v1/*) ───────────────────────
