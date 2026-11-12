@@ -213,7 +213,8 @@ func (h *ImageHandler) Generations(c *gin.Context) {
 				ProgressText: fmt.Sprintf("Generating image %d/%d ...", i+1, imageRequest.N),
 			})
 		}
-		imageResults, upstreamText, err := chatgpt.GeneratePictureConversationImages(imgClient, account, turnStile, imageRequest.Prompt, imageRequest.Model, proxyUrl)
+		effectivePrompt := chatgpt.DecorateImagePrompt(imageRequest.Prompt, imageRequest.Model, imageRequest.Size, imageRequest.Quality)
+		imageResults, upstreamText, err := chatgpt.GeneratePictureConversationImages(imgClient, account, turnStile, effectivePrompt, imageRequest.Model, proxyUrl)
 		if err != nil {
 			if stream {
 				writeImageStreamEvent(c, "image.generation.error", gin.H{

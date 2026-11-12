@@ -381,13 +381,51 @@ func PollImageResults(client httpclient.AuroraHttpClient, account *accounts.Acco
 }
 
 func imageModelSlug(model string) string {
-	if model == "" || strings.HasPrefix(model, "dall-e") {
-		model = "gpt-image-2"
+	lower := strings.ToLower(strings.TrimSpace(model))
+	if lower == "" || strings.HasPrefix(lower, "dall-e") || strings.HasPrefix(lower, "image-") {
+		lower = "gpt-image-2.5"
 	}
-	if model == "gpt-image-2" || strings.HasPrefix(model, "gpt-image") {
+	if lower == "gpt-image-2" || strings.HasPrefix(lower, "gpt-image") {
 		return "auto"
 	}
 	return model
+}
+
+func imageThinkingEffort(model string) string {
+	lower := strings.ToLower(strings.TrimSpace(model))
+	if strings.Contains(lower, "sunburst") {
+		return "extended"
+	}
+	return "standard"
+}
+
+// DecorateImagePrompt 根据模型档位 (gpt-image-2.5-sunburst / flare / 2.6)、尺寸与画质增强生成约束
+func DecorateImagePrompt(prompt, model, size, quality string) string {
+	prompt = strings.TrimSpace(prompt)
+	if prompt == "" {
+		return prompt
+	}
+	var directives []string
+	lowerModel := strings.ToLower(strings.TrimSpace(model))
+	lowerQuality := strings.ToLower(strings.TrimSpace(quality))
+
+	switch strings.TrimSpace(size) {
+	case "1792x1024", "1536x1024":
+		directives = append(directives, "aspect ratio: wide landscape (16:9 / 1792x1024)")
+	case "1024x1792", "1024x1536":
+		directives = append(directives, "aspect ratio: vertical portrait (9:16 / 1024x1792)")
+	}
+
+	if strings.Contains(lowerModel, "sunburst") || lowerQuality == "hd" || lowerQuality == "high" {
+		directives = append(directives, "tier: sunburst high-detail precision composition, studio lighting, rich texture fidelity")
+	} else if strings.Contains(lowerModel, "flare") {
+		directives = append(directives, "tier: flare fast clean generation")
+	}
+
+	if len(directives) == 0 {
+		return prompt
+	}
+	return prompt + "\n\n[Image Spec: " + strings.Join(directives, "; ") + "]"
 }
 
 func imageSystemHints() []string {
@@ -489,7 +527,7 @@ func GeneratePictureConversationImages(client httpclient.AuroraHttpClient, accou
 		"client_contextual_info":               state.ClientContextualInfo(),
 		"paragen_cot_summary_display_override": "allow",
 		"force_parallel_switch":                "auto",
-		"thinking_effort":                      "standard",
+		"thinking_effort":                      imageThinkingEffort(model),
 	}
 	bodyJSON, err := json.Marshal(payload)
 	if err != nil {
@@ -611,7 +649,7 @@ func GeneratePictureConversationImagesWithReferences(client httpclient.AuroraHtt
 		"client_contextual_info":               state.ClientContextualInfo(),
 		"paragen_cot_summary_display_override": "allow",
 		"force_parallel_switch":                "auto",
-		"thinking_effort":                      "standard",
+		"thinking_effort":                      imageThinkingEffort(model),
 	}
 	bodyJSON, err := json.Marshal(payload)
 	if err != nil {

@@ -1,11 +1,18 @@
 package handler
 
 import (
+	"io/fs"
+	"net/http"
+	"strings"
+
 	"ai-web-free/httpclient/bogdanfinn"
 	"ai-web-free/internal/accounts"
 	"ai-web-free/internal/chatgpt"
 	"ai-web-free/internal/config"
+	"ai-web-free/internal/provider"
+	"ai-web-free/internal/proxy"
 	"ai-web-free/middlewares"
+	"ai-web-free/web"
 
 	"github.com/gin-gonic/gin"
 )
@@ -19,15 +26,15 @@ func optionsHandler(c *gin.Context) {
 	})
 }
 
-func RegisterRouter(accountPool *accounts.Pool, cfg *config.Config) *gin.Engine {
+func RegisterRouter(accountPool *accounts.Pool, proxyPool *proxy.Pool, registry *provider.Registry, cfg *config.Config) *gin.Engine {
 	chatHandler := NewChatHandler(accountPool, cfg)
 	imageHandler := NewImageHandler(accountPool, cfg)
 	audioHandler := NewAudioHandler(accountPool, cfg)
 	authHandler := NewAuthHandler(accountPool)
 	modelsHandler := NewModelsHandler(accountPool, cfg)
+	adminHandler := NewAdminHandler(registry, proxyPool, cfg)
 
 	// 初始化基础前置参数（DPL、BasicCookies 等）
-	// 用配置的代理访问 chatgpt.com,否则本机连不上 → BasicCookies 收集不到
 	proxyUrl := cfg.ProxyURL
 	if proxyUrl == "" {
 		proxyUrl = cfg.HTTPProxy
@@ -38,8 +45,53 @@ func RegisterRouter(accountPool *accounts.Pool, cfg *config.Config) *gin.Engine 
 	router := gin.Default()
 	router.Use(middlewares.Cors)
 
-	router.GET("/", func(c *gin.Context) { c.JSON(200, gin.H{"message": "Hello, world!"}) })
+	// ─── 内嵌 OpenUI 静态网页服务 ──────────────────────────────────
+	subFS, err := fs.Sub(web.StaticFS, ".")
+	if err == nil {
+		fileServer := http.FileServer(http.FS(subFS))
+		router.GET("/", func(c *gin.Context) {
+			// 如果客户端明确请求 JSON，返回健康信息；否则返回 OpenUI 控制台 HTML
+			if strings.Contains(c.GetHeader("Accept"), "application/json") {
+				c.JSON(200, gin.H{"message": "Hello, world!", "service": "ai-web-free"})
+				return
+			}
+			indexData, readErr := web.StaticFS.ReadFile("index.html")
+			if readErr != nil {
+				c.String(http.StatusInternalServerError, "Failed to load OpenUI index.html")
+				return
+			}
+			c.Data(http.StatusOK, "text/html; charset=utf-8", indexData)
+		})
+		router.GET("/index.html", func(c *gin.Context) {
+			indexData, readErr := web.StaticFS.ReadFile("index.html")
+			if readErr != nil {
+				c.String(http.StatusInternalServerError, "Failed to load OpenUI index.html")
+				return
+			}
+			c.Data(http.StatusOK, "text/html; charset=utf-8", indexData)
+		})
+		router.GET("/styles/*filepath", func(c *gin.Context) {
+			fileServer.ServeHTTP(c.Writer, c.Request)
+		})
+		router.GET("/js/*filepath", func(c *gin.Context) {
+			fileServer.ServeHTTP(c.Writer, c.Request)
+		})
+	}
+
 	router.GET("/ping", func(c *gin.Context) { c.JSON(200, gin.H{"message": "pong"}) })
+
+	// ─── 管理端 Admin APIs (/admin/api/v1/*) ───────────────────────
+	adminGroup := router.Group("/admin/api/v1")
+	{
+		adminGroup.GET("/overview", adminHandler.Overview)
+		adminGroup.GET("/providers", adminHandler.ListProviders)
+		adminGroup.GET("/providers/:provider/stats", adminHandler.ProviderStats)
+		adminGroup.GET("/providers/:provider/accounts", adminHandler.ListAccounts)
+		adminGroup.POST("/providers/:provider/accounts/import", adminHandler.ImportAccounts)
+		adminGroup.POST("/providers/:provider/accounts/:id/action", adminHandler.AccountAction)
+		adminGroup.POST("/providers/:provider/pool/probe-all", adminHandler.ProbeAllAccounts)
+		adminGroup.POST("/proxies", adminHandler.UpdateProxies)
+	}
 
 	router.POST("/auth/session", authHandler.Session)
 	router.POST("/auth/refresh", authHandler.Refresh)

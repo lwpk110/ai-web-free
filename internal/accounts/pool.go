@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
+	"strings"
 	"sync"
 	"time"
 
@@ -100,6 +102,7 @@ func (p *Pool) Acquire(acctType AccountType) (*Account, error) {
 		if entries[cur].Status == StatusActive {
 			p.cursors[idx] = (cur + 1) % len(entries)
 			entries[cur].TotalCalls++
+			entries[cur].LastUsed = time.Now()
 			return entries[cur], nil
 		}
 	}
@@ -285,4 +288,269 @@ func TokenHashOf(token string) string {
 func tokenHashOf(token string) string {
 	h := sha256.Sum256([]byte(token))
 	return fmt.Sprintf("%x", h[:16])
+}
+
+// ── 号池管理与快照接口 (供 Provider 插件与 Admin UI 使用) ─────────────────
+
+// PoolStats 号池聚合统计指标
+type PoolStats struct {
+	Total       int   `json:"total"`
+	Active      int   `json:"active"`
+	Pending     int   `json:"pending"`
+	Expired     int   `json:"expired"`
+	RateLimited int   `json:"rate_limited"`
+	Disabled    int   `json:"disabled"`
+	Banned      int   `json:"banned"`
+	FreeCount   int   `json:"free_count"`
+	NoAuthCount int   `json:"noauth_count"`
+	PUIDCount   int   `json:"puid_count"`
+	TempCount   int   `json:"temp_count"`
+	TotalCalls  int64 `json:"total_calls"`
+	FailedCalls int64 `json:"failed_calls"`
+}
+
+// AccountSnapshot 账号脱敏视图快照
+type AccountSnapshot struct {
+	ID               string    `json:"id"`
+	Type             string    `json:"type"`
+	Status           string    `json:"status"`
+	Email            string    `json:"email"`
+	PlanType         string    `json:"plan_type"`
+	ChatGPTAccountID string    `json:"chatgpt_account_id"`
+	TeamUserID       string    `json:"team_user_id,omitempty"`
+	TokenPreview     string    `json:"token_preview"`
+	HasRefreshToken  bool      `json:"has_refresh_token"`
+	HasSessionToken  bool      `json:"has_session_token"`
+	IsTemporary      bool      `json:"is_temporary"`
+	Proxy            string    `json:"proxy"`
+	TLSProfile       string    `json:"tls_profile"`
+	TotalCalls       int64     `json:"total_calls"`
+	FailedCalls      int64     `json:"failed_calls"`
+	ExpiresAt        string    `json:"expires_at,omitempty"`
+	RemainingDays    float64   `json:"remaining_days"`
+	LastUsed         string    `json:"last_used,omitempty"`
+	LastChecked      string    `json:"last_checked,omitempty"`
+	LastError        string    `json:"last_error,omitempty"`
+	CreatedAt        string    `json:"created_at"`
+	Capabilities     []string  `json:"capabilities"`
+}
+
+func maskToken(t string) string {
+	if len(t) <= 16 {
+		return t
+	}
+	return t[:8] + "..." + t[len(t)-6:]
+}
+
+func capabilitiesForType(t AccountType) []string {
+	all := []Capability{
+		CapChat, CapResponses, CapToolCalling, CapImageGenerate,
+		CapImageEdit, CapImageVariation, CapTTS, CapTranscribe, CapFileUpload, CapWebSocket,
+	}
+	var out []string
+	for _, c := range all {
+		if t.Satisfies(c) {
+			out = append(out, c.Name)
+		}
+	}
+	return out
+}
+
+func toSnapshot(a *Account) AccountSnapshot {
+	a.SyncJWTMetadata()
+	snap := AccountSnapshot{
+		ID:               a.ID,
+		Type:             a.Type.String(),
+		Status:           a.Status.String(),
+		Email:            a.Email,
+		PlanType:         a.PlanType,
+		ChatGPTAccountID: a.ChatGPTAccountID,
+		TeamUserID:       a.TeamUserID,
+		TokenPreview:     maskToken(a.Token),
+		HasRefreshToken:  a.RefreshToken != "",
+		HasSessionToken:  a.SessionToken != "",
+		IsTemporary:      a.IsTemporary,
+		Proxy:            a.Proxy,
+		TLSProfile:       a.Fingerprint.TLSProfileName,
+		TotalCalls:       a.TotalCalls,
+		FailedCalls:      a.FailedCalls,
+		LastError:        a.LastError,
+		CreatedAt:        a.CreatedAt.Format(time.RFC3339),
+		Capabilities:     capabilitiesForType(a.Type),
+	}
+	if !a.ExpiresAt.IsZero() {
+		snap.ExpiresAt = a.ExpiresAt.Format(time.RFC3339)
+		days := time.Until(a.ExpiresAt).Hours() / 24.0
+		snap.RemainingDays = math.Round(days*10) / 10
+	}
+	if !a.LastUsed.IsZero() {
+		snap.LastUsed = a.LastUsed.Format(time.RFC3339)
+	}
+	if !a.LastChecked.IsZero() {
+		snap.LastChecked = a.LastChecked.Format(time.RFC3339)
+	}
+	return snap
+}
+
+// Stats 统计号池各状态与各类型数量
+func (p *Pool) Stats() PoolStats {
+	p.mu.Lock()
+	var stats PoolStats
+	stats.NoAuthCount = len(p.noauth)
+	stats.FreeCount = len(p.free)
+	stats.PUIDCount = len(p.puid)
+
+	accumulate := func(a *Account) {
+		stats.Total++
+		stats.TotalCalls += a.TotalCalls
+		stats.FailedCalls += a.FailedCalls
+		switch a.Status {
+		case StatusActive:
+			stats.Active++
+		case StatusPending:
+			stats.Pending++
+		case StatusExpired:
+			stats.Expired++
+		case StatusRateLimited:
+			stats.RateLimited++
+		case StatusDisabled:
+			stats.Disabled++
+		case StatusBanned:
+			stats.Banned++
+		}
+	}
+
+	for _, list := range [][]*Account{p.noauth, p.free, p.puid} {
+		for _, a := range list {
+			accumulate(a)
+		}
+	}
+	p.mu.Unlock()
+
+	p.tempMu.RLock()
+	stats.TempCount = len(p.temporary)
+	p.tempMu.RUnlock()
+
+	return stats
+}
+
+// ListSnapshots 按条件过滤返回账号快照列表
+func (p *Pool) ListSnapshots(typeFilter, statusFilter, search string) []AccountSnapshot {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	typeFilter = strings.ToLower(strings.TrimSpace(typeFilter))
+	statusFilter = strings.ToLower(strings.TrimSpace(statusFilter))
+	search = strings.ToLower(strings.TrimSpace(search))
+
+	var out []AccountSnapshot
+	// 优先展示 free 和 puid 登录账号，再展示 noauth
+	for _, list := range [][]*Account{p.free, p.puid, p.noauth} {
+		for _, a := range list {
+			snap := toSnapshot(a)
+			if typeFilter != "" && typeFilter != "all" && snap.Type != typeFilter {
+				continue
+			}
+			if statusFilter != "" && statusFilter != "all" && snap.Status != statusFilter {
+				continue
+			}
+			if search != "" {
+				haystack := strings.ToLower(snap.ID + " " + snap.Email + " " + snap.ChatGPTAccountID + " " + snap.Proxy + " " + snap.TokenPreview)
+				if !strings.Contains(haystack, search) {
+					continue
+				}
+			}
+			out = append(out, snap)
+		}
+	}
+	return out
+}
+
+// GetByID 根据账号 ID（或前缀）查找账号
+func (p *Pool) GetByID(id string) *Account {
+	if id == "" {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, list := range [][]*Account{p.free, p.puid, p.noauth} {
+		for _, a := range list {
+			if a.ID == id || strings.HasPrefix(a.ID, id) {
+				return a
+			}
+		}
+	}
+	return nil
+}
+
+// SetStatus 修改指定账号的状态
+func (p *Pool) SetStatus(id string, status AccountStatus) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, list := range [][]*Account{p.free, p.puid, p.noauth} {
+		for _, a := range list {
+			if a.ID == id || strings.HasPrefix(a.ID, id) {
+				a.Status = status
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// RemoveByID 从号池移除指定账号
+func (p *Pool) RemoveByID(id string) (*Account, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, slicePtr := range []*[]*Account{&p.free, &p.puid, &p.noauth} {
+		list := *slicePtr
+		for i, a := range list {
+			if a.ID == id || strings.HasPrefix(a.ID, id) {
+				*slicePtr = append(list[:i], list[i+1:]...)
+				return a, true
+			}
+		}
+	}
+	return nil, false
+}
+
+// HasChatGPTAccountID 检查是否已存在相同的 ChatGPTAccountID 或 Token
+func (p *Pool) HasChatGPTAccountID(chatGPTID, rawToken string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, list := range [][]*Account{p.free, p.puid, p.noauth} {
+		for _, a := range list {
+			if chatGPTID != "" && a.ChatGPTAccountID == chatGPTID {
+				return true
+			}
+			if rawToken != "" && a.Token == rawToken {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// ExportAccessTokens 导出当前池内所有非临时 free/puid 账号的 access_token 行
+func (p *Pool) ExportAccessTokens() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var lines []string
+	seen := make(map[string]bool)
+	for _, list := range [][]*Account{p.free, p.puid} {
+		for _, a := range list {
+			if a.IsTemporary || a.Token == "" || a.RefreshToken != "" || a.SessionToken != "" {
+				continue
+			}
+			line := a.Token
+			if a.TeamUserID != "" {
+				line += ":" + a.TeamUserID
+			}
+			if !seen[line] {
+				seen[line] = true
+				lines = append(lines, line)
+			}
+		}
+	}
+	return lines
 }

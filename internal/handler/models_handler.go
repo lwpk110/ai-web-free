@@ -65,6 +65,26 @@ func (h *ModelsHandler) ListModels(c *gin.Context) {
 			Created: 0,
 		})
 	}
+	if c.Query("include_builtins") == "true" || c.Query("include_builtins") == "1" {
+		builtins := []string{
+			"gpt-image-2.5",
+			"gpt-image-2.5-sunburst",
+			"gpt-image-2.5-flare",
+			"gpt-image-2.6",
+			"gpt-image-2",
+			"dall-e-3",
+			"gpt-4o-mini-tts",
+			"gpt-4o-transcribe",
+		}
+		for _, id := range builtins {
+			if !seen[id] {
+				seen[id] = true
+				result.Data = append(result.Data, officialtypes.Model{
+					ID: id, Object: "model", OwnedBy: "openai", Created: 0,
+				})
+			}
+		}
+	}
 	c.JSON(http.StatusOK, result)
 }
 

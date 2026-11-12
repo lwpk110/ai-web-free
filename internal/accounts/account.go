@@ -77,6 +77,8 @@ type Account struct {
 	PUID             string
 	TeamUserID       string
 	ChatGPTAccountID string // 来自 JWT: https://api.openai.com/auth.chatgpt_account_id
+	Email            string // 来自 JWT: https://api.openai.com/profile.email
+	PlanType         string // 来自 JWT: chatgpt_plan_type (如 free / plus / team)
 
 	// 隔离单元（每个账号独立）
 	Client      httpclient.AuroraHttpClient // 专属 TLS Client
@@ -89,6 +91,7 @@ type Account struct {
 	// 状态
 	Status    AccountStatus
 	ExpiresAt time.Time
+	LastError string
 
 	// 统计
 	TotalCalls  int64
@@ -113,12 +116,33 @@ type BrowserFingerprint struct {
 // NewAccount 创建新账号
 func NewAccount(id string, acctType AccountType, token string) *Account {
 	now := time.Now()
-	return &Account{
+	acct := &Account{
 		ID:        id,
 		Type:      acctType,
 		Token:     token,
 		Status:    StatusPending,
 		CreatedAt: now,
+	}
+	acct.SyncJWTMetadata()
+	return acct
+}
+
+// SyncJWTMetadata 从当前 Token 解析并同步 JWT 元信息（AccountID、Email、PlanType、ExpiresAt）
+func (a *Account) SyncJWTMetadata() {
+	if a == nil || a.Token == "" {
+		return
+	}
+	if id := ExtractChatGPTAccountID(a.Token); id != "" {
+		a.ChatGPTAccountID = id
+	}
+	if email := ExtractEmail(a.Token); email != "" {
+		a.Email = email
+	}
+	if plan := ExtractPlanType(a.Token); plan != "" {
+		a.PlanType = plan
+	}
+	if exp := ExtractExpiresAt(a.Token); !exp.IsZero() {
+		a.ExpiresAt = exp
 	}
 }
 

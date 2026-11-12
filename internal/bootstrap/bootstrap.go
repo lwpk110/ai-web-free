@@ -15,6 +15,7 @@ import (
 	"ai-web-free/internal/chatgpt"
 	"ai-web-free/internal/config"
 	"ai-web-free/internal/handler"
+	"ai-web-free/internal/provider"
 	"ai-web-free/internal/proxy"
 
 	"github.com/gin-gonic/gin"
@@ -161,8 +162,13 @@ func Init() (*App, error) {
 	stopHealthCheck := accountPool.StartHealthCheck(10*time.Minute, renewFn)
 	stopTempGC := accountPool.StartTempAccountGC(10*time.Minute, 1*time.Minute)
 
+	// 初始化多供应商插件中心
+	chatgptPlugin := provider.NewChatGPTProvider(accountPool, proxyPool, &cfg, renewFn)
+	reg := provider.NewRegistry()
+	provider.RegisterDefaultProviders(reg, chatgptPlugin)
+
 	// 注册路由
-	router := handler.RegisterRouter(accountPool, &cfg)
+	router := handler.RegisterRouter(accountPool, proxyPool, reg, &cfg)
 
 	return &App{
 		Router:      router,

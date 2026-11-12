@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"time"
 )
 
 // ParseJWTClaims 解析 JWT payload claims (不验证签名,只解析第二段)。
@@ -92,5 +93,32 @@ func ExtractPlanType(jwt string) string {
 		return ""
 	}
 	plan, _ := claims["chatgpt_plan_type"].(string)
-	return plan
+	if plan != "" {
+		return plan
+	}
+	if auth, ok := claims["https://api.openai.com/auth"].(map[string]interface{}); ok {
+		if p, ok := auth["chatgpt_plan_type"].(string); ok {
+			return p
+		}
+	}
+	return ""
+}
+
+// ExtractExpiresAt 从 JWT claims 中提取 exp 过期时间。
+func ExtractExpiresAt(jwt string) time.Time {
+	claims, err := ParseJWTClaims(jwt)
+	if err != nil {
+		return time.Time{}
+	}
+	switch v := claims["exp"].(type) {
+	case float64:
+		if v > 0 {
+			return time.Unix(int64(v), 0)
+		}
+	case int64:
+		if v > 0 {
+			return time.Unix(v, 0)
+		}
+	}
+	return time.Time{}
 }

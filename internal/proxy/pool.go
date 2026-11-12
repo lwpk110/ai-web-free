@@ -50,3 +50,21 @@ func (p *Pool) Count() int {
 	defer p.mu.Unlock()
 	return len(p.ipv4List)
 }
+
+// List 返回当前代理池列表副本。
+func (p *Pool) List() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]string, len(p.ipv4List))
+	copy(out, p.ipv4List)
+	return out
+}
+
+// Replace 动态替换代理池列表。
+func (p *Pool) Replace(proxies []string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.ipv4List = make([]string, len(proxies))
+	copy(p.ipv4List, proxies)
+	p.cursor = 0
+}
