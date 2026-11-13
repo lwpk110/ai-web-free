@@ -35,3 +35,4 @@ _third_party/
 !web/**
 web/node_modules/
 !scripts/kami_login.py
+!scripts/test_kami_login.py
