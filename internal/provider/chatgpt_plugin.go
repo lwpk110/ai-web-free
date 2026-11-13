@@ -53,6 +53,8 @@ func (p *ChatGPTProvider) Descriptor() ProviderDescriptor {
 			"session_token",
 			"refresh_token",
 			"free_uuid",
+			"kami",
+			"sub2api_json",
 		},
 		Capabilities: []string{
 			"chat",
@@ -351,6 +353,44 @@ func (p *ChatGPTProvider) ExecuteAccountAction(id, action string) (map[string]in
 			"latency_ms":   latency,
 			"models_count": len(slugs),
 			"models":       slugs,
+		}, nil
+
+	case "totp":
+		if acct.TOTPSecret == "" {
+			return nil, errors.New("该账号未配置 2FA 密钥")
+		}
+		code, remaining, err := accounts.GenerateTOTP(acct.TOTPSecret, time.Now())
+		if err != nil {
+			return nil, err
+		}
+		return map[string]interface{}{
+			"id":                acct.ID,
+			"email":             acct.Email,
+			"totp_code":         code,
+			"remaining_seconds": remaining,
+			"message":           fmt.Sprintf("2FA 动态码: %s (剩余 %ds)", code, remaining),
+		}, nil
+
+	case "login":
+		if acct.Email == "" || acct.Password == "" || acct.TOTPSecret == "" {
+			return nil, errors.New("该账号未配置邮箱/密码/2FA 卡密凭据，无法自动登录")
+		}
+		outcomes, err := p.loginKamiAccounts([]*accounts.Account{acct}, true)
+		if err != nil {
+			acct.LastError = err.Error()
+			return nil, err
+		}
+		_ = p.PersistAccessTokens()
+		outcome := outcomes[strings.ToLower(strings.TrimSpace(acct.Email))]
+		if !outcome.OK {
+			return nil, errors.New(outcome.Error)
+		}
+		return map[string]interface{}{
+			"id":         acct.ID,
+			"email":      acct.Email,
+			"status":     acct.Status.String(),
+			"expires_at": acct.ExpiresAt.Format(time.RFC3339),
+			"message":    fmt.Sprintf("账号 %s 登录提取 Token 成功，已激活进入号池", acct.Email),
 		}, nil
 
 	default:

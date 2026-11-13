@@ -31,10 +31,16 @@ export interface AccountView {
   proxy?: string;
   expires_at?: string;
   remaining_days?: number;
-  has_refresh: boolean;
-  token_masked: string;
+  has_refresh?: boolean;
+  has_refresh_token?: boolean;
+  has_session_token?: boolean;
+  has_kami_credentials?: boolean;
+  token_masked?: string;
+  token_preview?: string;
   last_used_at?: string;
-  fail_count: number;
+  fail_count?: number;
+  failed_calls?: number;
+  last_error?: string;
 }
 
 export async function fetchOverview(): Promise<{
@@ -58,7 +64,7 @@ export async function fetchAccounts(
   const params = new URLSearchParams();
   if (status) params.set("status", status);
   if (type) params.set("type", type);
-  if (search) params.set("search", search);
+  if (search) params.set("q", search);
   const res = await fetch(
     `/admin/api/v1/providers/${provider}/accounts?${params.toString()}`
   );
@@ -69,8 +75,14 @@ export async function fetchAccounts(
 export async function executeAccountAction(
   provider: string,
   accountId: string,
-  action: "probe" | "refresh" | "enable" | "disable" | "delete"
-): Promise<{ ok: boolean; message?: string; account?: AccountView }> {
+  action: "probe" | "refresh" | "enable" | "disable" | "delete" | "totp" | "login"
+): Promise<{
+  ok?: boolean;
+  message?: string;
+  error?: { message?: string };
+  result?: { message?: string; totp_code?: string; remaining_seconds?: number };
+  account?: AccountView;
+}> {
   const res = await fetch(
     `/admin/api/v1/providers/${provider}/accounts/${encodeURIComponent(accountId)}/action`,
     {
@@ -79,12 +91,16 @@ export async function executeAccountAction(
       body: JSON.stringify({ action }),
     }
   );
-  return res.json();
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error?.message || `Action failed: ${res.status}`);
+  }
+  return data;
 }
 
 export async function probeAllAccounts(
   provider = "chatgpt"
-): Promise<{ total: number; active: number; failed: number }> {
+): Promise<{ probed?: number; passed?: number; failed?: number; total?: number; active?: number }> {
   const res = await fetch(
     `/admin/api/v1/providers/${provider}/pool/probe-all`,
     { method: "POST" }
@@ -92,31 +108,65 @@ export async function probeAllAccounts(
   return res.json();
 }
 
+export async function loginKamiAccounts(
+  provider = "chatgpt",
+  headless = true,
+  force = false
+): Promise<{
+  result?: { total: number; success: number; failed: number; message?: string };
+  error?: { message?: string };
+}> {
+  const res = await fetch(
+    `/admin/api/v1/providers/${provider}/accounts/kami-login`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ headless, force }),
+    }
+  );
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error?.message || `Kami login failed: ${res.status}`);
+  }
+  return data;
+}
+
 export async function importAccounts(
   provider: string,
   format: string,
-  rawLines: string[],
-  persist = true
+  rawText: string,
+  persist = true,
+  autoLogin = false
 ): Promise<{
-  imported: number;
-  duplicates: number;
-  failed: number;
-  errors?: string[];
+  result?: {
+    added: number;
+    skipped: number;
+    failed: number;
+    total_pool: number;
+    persisted: boolean;
+    messages?: string[];
+  };
+  error?: { message?: string };
 }> {
-  const credentials = rawLines
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((value) => ({ format, value }));
-
   const res = await fetch(
     `/admin/api/v1/providers/${provider}/accounts/import`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ credentials, persist }),
+      body: JSON.stringify({
+        credential_type: format,
+        raw_text: rawText,
+        persist,
+        auto_login: autoLogin,
+        headless: true,
+      }),
     }
   );
-  return res.json();
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error?.message || `Import failed: ${res.status}`);
+  }
+  return data;
 }
 
 export async function updateProxies(

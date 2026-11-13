@@ -160,6 +160,43 @@ func (h *AdminHandler) AccountAction(c *gin.Context) {
 	})
 }
 
+// LoginKamiAccounts 批量对池内待激活/过期的卡密账号执行浏览器登录提取 Token
+func (h *AdminHandler) LoginKamiAccounts(c *gin.Context) {
+	providerID := c.Param("provider")
+	p, ok := h.registry.Get(providerID)
+	if !ok {
+		c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"message": "未找到供应商插件: " + providerID}})
+		return
+	}
+	type kamiRunner interface {
+		LoginPendingKami(headless, force bool) (map[string]interface{}, error)
+	}
+	runner, ok := p.(kamiRunner)
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "该供应商插件不支持卡密浏览器登录"}})
+		return
+	}
+	var body struct {
+		Headless *bool `json:"headless"`
+		Force    bool  `json:"force"`
+	}
+	_ = c.ShouldBindJSON(&body)
+	headless := true
+	if body.Headless != nil {
+		headless = *body.Headless
+	}
+	res, err := runner.LoginPendingKami(headless, body.Force)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"message": err.Error()}, "stats": p.Stats()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"provider": providerID,
+		"result":   res,
+		"stats":    p.Stats(),
+	})
+}
+
 // ProbeAllAccounts 批量并发测活当前供应商的所有非免登账号
 func (h *AdminHandler) ProbeAllAccounts(c *gin.Context) {
 	providerID := c.Param("provider")

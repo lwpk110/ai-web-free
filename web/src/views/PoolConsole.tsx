@@ -147,6 +147,13 @@ export const PoolConsole: React.FC = () => {
           </button>
           <button
             className="btn-secondary"
+            onClick={handleLoginKami}
+            disabled={loggingInKami}
+          >
+            {loggingInKami ? "🔑 登录提 Token 中..." : "🔑 批量登录卡密"}
+          </button>
+          <button
+            className="btn-secondary"
             onClick={handleProbeAll}
             disabled={probingAll}
           >
@@ -192,7 +199,7 @@ export const PoolConsole: React.FC = () => {
               (stats?.disabled ?? 0) +
               (stats?.banned ?? 0)}
           </div>
-          <div className="kpi-sub">支持 RefreshToken 自动续期</div>
+          <div className="kpi-sub">支持 RefreshToken / 卡密自动续期</div>
         </div>
       </div>
 
@@ -213,6 +220,7 @@ export const PoolConsole: React.FC = () => {
         >
           <option value="">全部状态</option>
           <option value="active">正常 (Active)</option>
+          <option value="pending">待登录 (Pending)</option>
           <option value="rate_limited">限流冷却 (Rate Limited)</option>
           <option value="expired">已过期 (Expired)</option>
           <option value="disabled">已停用 (Disabled)</option>
@@ -253,7 +261,7 @@ export const PoolConsole: React.FC = () => {
               <tr key={acc.id}>
                 <td className="mono">{acc.id}</td>
                 <td className="mono">
-                  {acc.email || acc.chatgpt_account_id || acc.token_masked || "-"}
+                  {acc.email || acc.chatgpt_account_id || acc.token_preview || acc.token_masked || "-"}
                 </td>
                 <td>
                   <span className="tag-type">{acc.type}</span>
@@ -268,17 +276,39 @@ export const PoolConsole: React.FC = () => {
                     ? `剩余 ${acc.remaining_days} 天`
                     : "动态免登会话"}
                 </td>
-                <td>{acc.has_refresh ? "✅ 可自动续期" : "仅 AccessToken"}</td>
+                <td>
+                  {acc.has_kami_credentials
+                    ? "🔐 卡密+2FA"
+                    : acc.has_refresh_token || acc.has_session_token || acc.has_refresh
+                      ? "✅ 可自动续期"
+                      : "仅 AccessToken"}
+                </td>
                 <td className="mono">{acc.proxy || "默认直连/全局代理"}</td>
                 <td>
-                  <div style={{ display: "flex", gap: 6 }}>
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                     <button
                       className="btn-secondary btn-xs"
                       onClick={() => handleAction(acc.id, "probe")}
                     >
                       ⚡ 测活
                     </button>
-                    {acc.has_refresh && (
+                    {acc.has_kami_credentials && (
+                      <>
+                        <button
+                          className="btn-secondary btn-xs"
+                          onClick={() => handleAction(acc.id, "login")}
+                        >
+                          🔑 登录
+                        </button>
+                        <button
+                          className="btn-secondary btn-xs"
+                          onClick={() => handleAction(acc.id, "totp")}
+                        >
+                          🔢 2FA
+                        </button>
+                      </>
+                    )}
+                    {(acc.has_refresh_token || acc.has_session_token || acc.has_refresh) && (
                       <button
                         className="btn-secondary btn-xs"
                         onClick={() => handleAction(acc.id, "refresh")}
@@ -341,6 +371,12 @@ export const PoolConsole: React.FC = () => {
                 value={importFormat}
                 onChange={(e) => setImportFormat(e.target.value)}
               >
+                <option value="kami">
+                  GPT Free 卡密账号 (邮箱----密码----2FA密钥，自动解析 TOTP 并落盘 kami_accounts.txt)
+                </option>
+                <option value="sub2api_json">
+                  Sub2API JSON 数据包 (粘贴 *_sub2api.json 全文，直接激活号池并支持生图)
+                </option>
                 <option value="access_token">
                   Access Token (一行一个 eyJ... JWT，自动解析过期时间与 AccountID 去重并落盘 access_tokens.txt)
                 </option>
@@ -352,10 +388,34 @@ export const PoolConsole: React.FC = () => {
                 </option>
               </select>
             </div>
+            {importFormat === "kami" && (
+              <label
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  marginBottom: 10,
+                  fontSize: 13,
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={autoLogin}
+                  onChange={(e) => setAutoLogin(e.target.checked)}
+                />
+                导入后自动调用 Playwright 无头浏览器登录提取 Token（需运行环境已安装 playwright）
+              </label>
+            )}
             <textarea
               className="console-textarea"
               rows={8}
-              placeholder="每行粘贴一条 Token 凭证..."
+              placeholder={
+                importFormat === "kami"
+                  ? "每行粘贴一条卡密：email@example.com----password----2FA_SECRET"
+                  : importFormat === "sub2api_json"
+                    ? '粘贴 Sub2API JSON 数据包内容 ({ "type": "sub2api-data", "accounts": [...] })'
+                    : "每行粘贴一条 Token 凭证..."
+              }
               value={importText}
               onChange={(e) => setImportText(e.target.value)}
             />
@@ -371,7 +431,7 @@ export const PoolConsole: React.FC = () => {
                 onClick={handleImportSubmit}
                 disabled={importing}
               >
-                {importing ? "正在导入并去重..." : "确认导入并持久化"}
+                {importing ? "正在导入并处理..." : "确认导入并持久化"}
               </button>
             </div>
           </div>

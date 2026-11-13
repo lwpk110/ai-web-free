@@ -26,21 +26,23 @@ type ProviderDescriptor struct {
 
 // ImportRequest 批量导入号池凭据请求
 type ImportRequest struct {
-	CredentialType string   `json:"credential_type"` // "access_token" | "session_token" | "refresh_token" | "free_uuid"
+	CredentialType string   `json:"credential_type"` // "access_token" | "session_token" | "refresh_token" | "free_uuid" | "kami" | "sub2api_json"
 	Tokens         []string `json:"tokens"`          // 凭据行列表
-	RawText        string   `json:"raw_text"`        // 或多行原始文本
+	RawText        string   `json:"raw_text"`        // 或多行原始文本 / JSON
 	Persist        bool     `json:"persist"`         // 是否持久化写回文件
 	GenerateCount  int      `json:"generate_count"`  // 仅当 credential_type == "free_uuid" 且自动生成时使用
+	AutoLogin      bool     `json:"auto_login"`      // 仅当 credential_type == "kami" 时，导入后自动调用 Playwright 登录提取 Token
+	Headless       bool     `json:"headless"`        // Playwright 是否以无头模式运行
 }
 
 // ImportResult 批量导入结果统计
 type ImportResult struct {
-	Added      int      `json:"added"`
-	Skipped    int      `json:"skipped"`
-	Failed     int      `json:"failed"`
-	TotalPool  int      `json:"total_pool"`
-	Persisted  bool     `json:"persisted"`
-	Messages   []string `json:"messages,omitempty"`
+	Added     int      `json:"added"`
+	Skipped   int      `json:"skipped"`
+	Failed    int      `json:"failed"`
+	TotalPool int      `json:"total_pool"`
+	Persisted bool     `json:"persisted"`
+	Messages  []string `json:"messages,omitempty"`
 }
 
 // ProviderPlugin 多供应商免费号池插件统一契约接口

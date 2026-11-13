@@ -130,6 +130,30 @@ func Init() (*App, error) {
 		accs = append(accs, acct)
 	}
 
+	// 4.5 kami_accounts.txt — 卡密账号（邮箱----密码----2FA密钥）
+	for _, k := range accounts.LoadKamiFromFile("kami_accounts.txt") {
+		var matched *accounts.Account
+		for _, existing := range accs {
+			if existing.Type != accounts.TypeNoAuth && strings.EqualFold(strings.TrimSpace(existing.Email), strings.TrimSpace(k.Email)) {
+				matched = existing
+				break
+			}
+		}
+		if matched != nil {
+			matched.Password = k.Password
+			matched.TOTPSecret = k.TOTPSecret
+			continue
+		}
+		acct := accounts.CreateAccount("", accounts.TypeFree, profiles)
+		acct.Email = k.Email
+		acct.Password = k.Password
+		acct.TOTPSecret = k.TOTPSecret
+		acct.Proxy = proxyPool.Allocate()
+		acct.Status = accounts.StatusPending
+		acct.LastError = "待浏览器登录提取 Token"
+		accs = append(accs, acct)
+	}
+
 	// 5. FREE_ACCOUNTS — 自动生成 UUID 账号
 	if cfg.FreeAccounts {
 		for i := 0; i < cfg.FreeAccountsNum; i++ {

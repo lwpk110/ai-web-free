@@ -34,3 +34,4 @@ _third_party/
 # Allow tracking OpenUI React frontend under web/ (except node_modules)
 !web/**
 web/node_modules/
+!scripts/kami_login.py

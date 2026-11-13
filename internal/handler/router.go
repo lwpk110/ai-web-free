@@ -82,6 +82,7 @@ func RegisterRouter(accountPool *accounts.Pool, proxyPool *proxy.Pool, registry 
 		adminGroup.GET("/providers/:provider/stats", adminHandler.ProviderStats)
 		adminGroup.GET("/providers/:provider/accounts", adminHandler.ListAccounts)
 		adminGroup.POST("/providers/:provider/accounts/import", adminHandler.ImportAccounts)
+		adminGroup.POST("/providers/:provider/accounts/kami-login", adminHandler.LoginKamiAccounts)
 		adminGroup.POST("/providers/:provider/accounts/:id/action", adminHandler.AccountAction)
 		adminGroup.POST("/providers/:provider/pool/probe-all", adminHandler.ProbeAllAccounts)
 		adminGroup.POST("/proxies", adminHandler.UpdateProxies)

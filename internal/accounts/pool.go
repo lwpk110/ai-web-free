@@ -18,11 +18,11 @@ var ErrNoAvailable = errors.New("no available account of the requested type")
 // Pool 账号池管理，按类型分三个数组，Acquire 直接取无需遍历
 // 临时账号存放在单独的 map[string]*Account 中,以 token hash 为 key
 type Pool struct {
-	mu       sync.Mutex
-	noauth   []*Account
-	free     []*Account
-	puid     []*Account
-	cursors  [3]int // 0=noauth,1=free,2=puid
+	mu      sync.Mutex
+	noauth  []*Account
+	free    []*Account
+	puid    []*Account
+	cursors [3]int // 0=noauth,1=free,2=puid
 
 	// 临时账号 (外部传入的 accessToken 创建的)
 	tempMu    sync.RWMutex
@@ -198,9 +198,9 @@ func (p *Pool) GetOrCreateTempAccount(token, userAgent string, proxyURL string) 
 
 	// 2) 没命中,创建一个
 	fp := BrowserFingerprint{
-		OaiDeviceID:  uuid.NewString(),
-		OaiSessionID: uuid.NewString(),
-		UserAgent:    userAgent,
+		OaiDeviceID:         uuid.NewString(),
+		OaiSessionID:        uuid.NewString(),
+		UserAgent:           userAgent,
 		ScreenWidth:         1920,
 		ScreenHeight:        1080,
 		HardwareConcurrency: 8,
@@ -311,28 +311,29 @@ type PoolStats struct {
 
 // AccountSnapshot 账号脱敏视图快照
 type AccountSnapshot struct {
-	ID               string    `json:"id"`
-	Type             string    `json:"type"`
-	Status           string    `json:"status"`
-	Email            string    `json:"email"`
-	PlanType         string    `json:"plan_type"`
-	ChatGPTAccountID string    `json:"chatgpt_account_id"`
-	TeamUserID       string    `json:"team_user_id,omitempty"`
-	TokenPreview     string    `json:"token_preview"`
-	HasRefreshToken  bool      `json:"has_refresh_token"`
-	HasSessionToken  bool      `json:"has_session_token"`
-	IsTemporary      bool      `json:"is_temporary"`
-	Proxy            string    `json:"proxy"`
-	TLSProfile       string    `json:"tls_profile"`
-	TotalCalls       int64     `json:"total_calls"`
-	FailedCalls      int64     `json:"failed_calls"`
-	ExpiresAt        string    `json:"expires_at,omitempty"`
-	RemainingDays    float64   `json:"remaining_days"`
-	LastUsed         string    `json:"last_used,omitempty"`
-	LastChecked      string    `json:"last_checked,omitempty"`
-	LastError        string    `json:"last_error,omitempty"`
-	CreatedAt        string    `json:"created_at"`
-	Capabilities     []string  `json:"capabilities"`
+	ID                 string   `json:"id"`
+	Type               string   `json:"type"`
+	Status             string   `json:"status"`
+	Email              string   `json:"email"`
+	PlanType           string   `json:"plan_type"`
+	ChatGPTAccountID   string   `json:"chatgpt_account_id"`
+	TeamUserID         string   `json:"team_user_id,omitempty"`
+	TokenPreview       string   `json:"token_preview"`
+	HasRefreshToken    bool     `json:"has_refresh_token"`
+	HasSessionToken    bool     `json:"has_session_token"`
+	HasKamiCredentials bool     `json:"has_kami_credentials"`
+	IsTemporary        bool     `json:"is_temporary"`
+	Proxy              string   `json:"proxy"`
+	TLSProfile         string   `json:"tls_profile"`
+	TotalCalls         int64    `json:"total_calls"`
+	FailedCalls        int64    `json:"failed_calls"`
+	ExpiresAt          string   `json:"expires_at,omitempty"`
+	RemainingDays      float64  `json:"remaining_days"`
+	LastUsed           string   `json:"last_used,omitempty"`
+	LastChecked        string   `json:"last_checked,omitempty"`
+	LastError          string   `json:"last_error,omitempty"`
+	CreatedAt          string   `json:"created_at"`
+	Capabilities       []string `json:"capabilities"`
 }
 
 func maskToken(t string) string {
@@ -359,24 +360,25 @@ func capabilitiesForType(t AccountType) []string {
 func toSnapshot(a *Account) AccountSnapshot {
 	a.SyncJWTMetadata()
 	snap := AccountSnapshot{
-		ID:               a.ID,
-		Type:             a.Type.String(),
-		Status:           a.Status.String(),
-		Email:            a.Email,
-		PlanType:         a.PlanType,
-		ChatGPTAccountID: a.ChatGPTAccountID,
-		TeamUserID:       a.TeamUserID,
-		TokenPreview:     maskToken(a.Token),
-		HasRefreshToken:  a.RefreshToken != "",
-		HasSessionToken:  a.SessionToken != "",
-		IsTemporary:      a.IsTemporary,
-		Proxy:            a.Proxy,
-		TLSProfile:       a.Fingerprint.TLSProfileName,
-		TotalCalls:       a.TotalCalls,
-		FailedCalls:      a.FailedCalls,
-		LastError:        a.LastError,
-		CreatedAt:        a.CreatedAt.Format(time.RFC3339),
-		Capabilities:     capabilitiesForType(a.Type),
+		ID:                 a.ID,
+		Type:               a.Type.String(),
+		Status:             a.Status.String(),
+		Email:              a.Email,
+		PlanType:           a.PlanType,
+		ChatGPTAccountID:   a.ChatGPTAccountID,
+		TeamUserID:         a.TeamUserID,
+		TokenPreview:       maskToken(a.Token),
+		HasRefreshToken:    a.RefreshToken != "",
+		HasSessionToken:    a.SessionToken != "",
+		HasKamiCredentials: a.Password != "" && a.TOTPSecret != "",
+		IsTemporary:        a.IsTemporary,
+		Proxy:              a.Proxy,
+		TLSProfile:         a.Fingerprint.TLSProfileName,
+		TotalCalls:         a.TotalCalls,
+		FailedCalls:        a.FailedCalls,
+		LastError:          a.LastError,
+		CreatedAt:          a.CreatedAt.Format(time.RFC3339),
+		Capabilities:       capabilitiesForType(a.Type),
 	}
 	if !a.ExpiresAt.IsZero() {
 		snap.ExpiresAt = a.ExpiresAt.Format(time.RFC3339)
@@ -553,4 +555,73 @@ func (p *Pool) ExportAccessTokens() []string {
 		}
 	}
 	return lines
+}
+
+// FindByEmail 根据邮箱查找非临时账号（忽略大小写）
+func (p *Pool) FindByEmail(email string) *Account {
+	target := strings.ToLower(strings.TrimSpace(email))
+	if target == "" {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, list := range [][]*Account{p.free, p.puid} {
+		for _, a := range list {
+			if strings.ToLower(strings.TrimSpace(a.Email)) == target {
+				return a
+			}
+		}
+	}
+	return nil
+}
+
+// HasEmail 检查号池中是否已存在指定邮箱的账号
+func (p *Pool) HasEmail(email string) bool {
+	return p.FindByEmail(email) != nil
+}
+
+// ListKamiCandidates 返回所有配置了卡密凭据（密码+2FA）的账号，用于批量登录提取/续期。
+// 若 onlyNeedLogin 为 true，仅返回 Pending/Expired/无 Token 的账号。
+func (p *Pool) ListKamiCandidates(onlyNeedLogin bool) []*Account {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var out []*Account
+	for _, list := range [][]*Account{p.free, p.puid} {
+		for _, a := range list {
+			if a.Password == "" || a.TOTPSecret == "" {
+				continue
+			}
+			if onlyNeedLogin && a.Status == StatusActive && a.Token != "" {
+				continue
+			}
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// ExportKamiAccounts 导出所有包含卡密凭据的非临时账号
+func (p *Pool) ExportKamiAccounts() []KamiAccount {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var out []KamiAccount
+	seen := make(map[string]bool)
+	for _, list := range [][]*Account{p.free, p.puid} {
+		for _, a := range list {
+			if a.IsTemporary || a.Email == "" || a.Password == "" || a.TOTPSecret == "" {
+				continue
+			}
+			key := strings.ToLower(strings.TrimSpace(a.Email))
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			out = append(out, KamiAccount{
+				Email:      a.Email,
+				Password:   a.Password,
+				TOTPSecret: a.TOTPSecret,
+			})
+		}
+	}
+	return out
 }

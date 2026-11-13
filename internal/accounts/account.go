@@ -35,12 +35,12 @@ func (t AccountType) String() string {
 type AccountStatus int
 
 const (
-	StatusPending    AccountStatus = iota // 初始化中
-	StatusActive                          // 正常
-	StatusExpired                         // Token 过期，可续期
-	StatusRateLimited                     // 被限流，等待冷却
-	StatusDisabled                        // 手动停用
-	StatusBanned                          // 被封禁
+	StatusPending     AccountStatus = iota // 初始化中
+	StatusActive                           // 正常
+	StatusExpired                          // Token 过期，可续期
+	StatusRateLimited                      // 被限流，等待冷却
+	StatusDisabled                         // 手动停用
+	StatusBanned                           // 被封禁
 )
 
 func (s AccountStatus) String() string {
@@ -68,16 +68,18 @@ type Account struct {
 	Type AccountType
 
 	// 认证
-	Token         string // access_token 或 UUID
-	RefreshToken  string // 用于自动续期（/auth/refresh）
-	SessionToken  string // 仅免费账号有，用于续期（/auth/session）
-	IsTemporary   bool   // 外部传入 token 临时创建的账号,会被 GC 清理
+	Token        string // access_token 或 UUID
+	RefreshToken string // 用于自动续期（/auth/refresh）
+	SessionToken string // 仅免费账号有，用于续期（/auth/session）
+	IsTemporary  bool   // 外部传入 token 临时创建的账号,会被 GC 清理
 
 	// 身份
 	PUID             string
 	TeamUserID       string
 	ChatGPTAccountID string // 来自 JWT: https://api.openai.com/auth.chatgpt_account_id
-	Email            string // 来自 JWT: https://api.openai.com/profile.email
+	Email            string // 来自 JWT: https://api.openai.com/profile.email 或卡密导入邮箱
+	Password         string // 卡密账号密码（用于 Playwright 登录提取/续期）
+	TOTPSecret       string // 卡密账号 2FA TOTP Base32 密钥
 	PlanType         string // 来自 JWT: chatgpt_plan_type (如 free / plus / team)
 
 	// 隔离单元（每个账号独立）
