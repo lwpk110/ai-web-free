@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"ai-web-free/internal/accounts"
 	"ai-web-free/internal/audit"
@@ -123,6 +124,89 @@ func TestAdminAuthStatusAndOverviewProtection(t *testing.T) {
 		if _, ok := ov[key]; !ok {
 			t.Fatalf("expected overview key %q, got keys %+v", key, ov)
 		}
+	}
+}
+
+func TestBulkUpdateAccountProxyRebindsSelectedAccounts(t *testing.T) {
+	router, pool, _, auditLog := setupTestAdminRouter(t, "", []string{
+		"http://127.0.0.1:8888",
+		"http://127.0.0.1:8889",
+	})
+
+	req := httptest.NewRequest(http.MethodPost,
+		"/admin/api/v1/providers/chatgpt/accounts/bulk-proxy",
+		strings.NewReader(`{"account_ids":["acc-admin-1"],"proxy_url":"http://127.0.0.1:8889"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	acct := pool.GetByID("acc-admin-1")
+	if acct == nil || acct.Proxy != "http://127.0.0.1:8889" {
+		t.Fatalf("expected selected account to bind requested proxy, got %+v", acct)
+	}
+	entries, _ := auditLog.Query("all", "/admin/api/v1/providers/chatgpt/accounts/bulk-proxy", 10)
+	if len(entries) != 1 || entries[0].Note != "account_proxy_set_bound" {
+		t.Fatalf("expected proxy update audit event, got %+v", entries)
+	}
+
+	req = httptest.NewRequest(http.MethodPost,
+		"/admin/api/v1/providers/chatgpt/accounts/bulk-proxy",
+		strings.NewReader(`{"account_ids":["acc-admin-1"],"proxy_url":""}`))
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected direct egress to be rejected while proxy nodes exist, got %d", w.Code)
+	}
+}
+
+func TestKamiLoginEndpointReturnsPollableAsyncTask(t *testing.T) {
+	router, _, _, _ := setupTestAdminRouter(t, "", nil)
+	req := httptest.NewRequest(http.MethodPost,
+		"/admin/api/v1/providers/chatgpt/accounts/kami-login",
+		strings.NewReader(`{"headless":true,"account_ids":["missing-account-id"]}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 for queued task, got %d: %s", w.Code, w.Body.String())
+	}
+	var startResp struct {
+		Task provider.KamiLoginTask `json:"task"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &startResp); err != nil {
+		t.Fatalf("unmarshal task start response: %v", err)
+	}
+	if startResp.Task.ID == "" || startResp.Task.Total != 1 {
+		t.Fatalf("unexpected task start snapshot: %+v", startResp.Task)
+	}
+
+	deadline := time.Now().Add(time.Second)
+	var task provider.KamiLoginTask
+	for time.Now().Before(deadline) {
+		req = httptest.NewRequest(http.MethodGet,
+			"/admin/api/v1/providers/chatgpt/accounts/kami-login/tasks/"+startResp.Task.ID, nil)
+		w = httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 while polling task, got %d: %s", w.Code, w.Body.String())
+		}
+		var pollResp struct {
+			Task provider.KamiLoginTask `json:"task"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &pollResp); err != nil {
+			t.Fatalf("unmarshal task poll response: %v", err)
+		}
+		task = pollResp.Task
+		if task.Status == "completed" {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if task.Status != "completed" || task.Failed != 1 || len(task.Results) != 1 || task.Results[0].Error != "账号不存在" {
+		t.Fatalf("unexpected async task result: %+v", task)
 	}
 }
 

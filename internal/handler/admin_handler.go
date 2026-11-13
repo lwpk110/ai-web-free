@@ -2,6 +2,7 @@ package handler
 
 import (
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"strconv"
@@ -185,6 +186,111 @@ func (h *AdminHandler) ListAccounts(c *gin.Context) {
 	})
 }
 
+// BulkUpdateAccountProxy applies one proxy binding to a selected account set.
+func (h *AdminHandler) BulkUpdateAccountProxy(c *gin.Context) {
+	providerID := strings.ToLower(strings.TrimSpace(c.Param("provider")))
+	if providerID != "chatgpt" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "当前仅支持 ChatGPT 号池代理编辑"}})
+		return
+	}
+	providerPlugin, ok := h.registry.Get(providerID)
+	if !ok {
+		c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"message": "未找到供应商插件: " + providerID}})
+		return
+	}
+	var body struct {
+		AccountIDs []string `json:"account_ids"`
+		ProxyURL   string   `json:"proxy_url"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "请求 JSON 格式无效: " + err.Error()}})
+		return
+	}
+	ids := make([]string, 0, len(body.AccountIDs))
+	seen := make(map[string]struct{}, len(body.AccountIDs))
+	for _, id := range body.AccountIDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	if len(ids) == 0 || len(ids) > 500 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "请选择 1 到 500 个账号"}})
+		return
+	}
+	proxyURL := strings.TrimSpace(body.ProxyURL)
+	if proxyURL == "" && h.proxyPool != nil && len(h.proxyPool.List()) > 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "当前代理池已有节点，请选择一个健康代理用于账号登录"}})
+		return
+	}
+	if proxyURL != "" {
+		if h.proxyPool == nil || !h.proxyPool.Contains(proxyURL) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "所选代理不在当前代理池中，请刷新代理列表"}})
+			return
+		}
+		if !h.proxyPool.IsHealthy(proxyURL) {
+			c.JSON(http.StatusConflict, gin.H{"error": gin.H{"message": "所选代理当前不可用，请选择健康节点"}})
+			return
+		}
+	}
+	pool := h.accountPool()
+	if pool == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"message": "号池运行时未初始化"}})
+		return
+	}
+
+	type accountProxyResult struct {
+		ID    string `json:"id"`
+		Email string `json:"email"`
+		OK    bool   `json:"ok"`
+		Error string `json:"error,omitempty"`
+	}
+	results := make([]accountProxyResult, 0, len(ids))
+	updated := 0
+	for _, id := range ids {
+		acct := pool.GetByID(id)
+		if acct == nil {
+			results = append(results, accountProxyResult{ID: id, Error: "账号不存在"})
+			continue
+		}
+		result := accountProxyResult{ID: acct.ID, Email: acct.Email}
+		if err := pool.RebindAccountProxy(acct, proxyURL); err != nil {
+			result.Error = "重建账号客户端失败: " + err.Error()
+			log.Printf("[account-proxy] failed account=%s error=%v", acct.Email, err)
+			if auditLog := h.auditLog(); auditLog != nil {
+				auditLog.RecordEvent("/admin/api/v1/providers/"+providerID+"/accounts/bulk-proxy", acct.Email, "", "account_proxy_update_failed", result.Error)
+			}
+		} else {
+			result.OK = true
+			updated++
+			log.Printf("[account-proxy] updated account=%s proxy_bound=%t", acct.Email, proxyURL != "")
+			if auditLog := h.auditLog(); auditLog != nil {
+				note := "account_proxy_set_direct"
+				if proxyURL != "" {
+					note = "account_proxy_set_bound"
+				}
+				auditLog.RecordEvent("/admin/api/v1/providers/"+providerID+"/accounts/bulk-proxy", acct.Email, "", note, "")
+			}
+		}
+		results = append(results, result)
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"provider": providerID,
+		"result": gin.H{
+			"total":   len(ids),
+			"updated": updated,
+			"failed":  len(ids) - updated,
+			"results": results,
+		},
+		"stats": providerPlugin.Stats(),
+	})
+}
+
 // ImportAccounts 批量导入账号凭据
 func (h *AdminHandler) ImportAccounts(c *gin.Context) {
 	providerID := c.Param("provider")
@@ -246,33 +352,74 @@ func (h *AdminHandler) LoginKamiAccounts(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"message": "未找到供应商插件: " + providerID}})
 		return
 	}
-	type kamiRunner interface {
-		LoginPendingKami(headless, force bool) (map[string]interface{}, error)
+	type kamiLoginTaskRunner interface {
+		StartKamiLoginBatch(ids []string, headless bool) (provider.KamiLoginTask, error)
+		StartKamiPendingLogin(force, headless bool) (provider.KamiLoginTask, error)
+		KamiLoginTaskSnapshot(id string) (provider.KamiLoginTask, bool)
 	}
-	runner, ok := p.(kamiRunner)
+	runner, ok := p.(kamiLoginTaskRunner)
 	if !ok {
 		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "该供应商插件不支持卡密浏览器登录"}})
 		return
 	}
 	var body struct {
-		Headless *bool `json:"headless"`
-		Force    bool  `json:"force"`
+		Headless   *bool    `json:"headless"`
+		Force      bool     `json:"force"`
+		AccountIDs []string `json:"account_ids"`
 	}
-	_ = c.ShouldBindJSON(&body)
+	if c.Request.ContentLength > 0 {
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "请求 JSON 格式无效: " + err.Error()}})
+			return
+		}
+	}
 	headless := true
 	if body.Headless != nil {
 		headless = *body.Headless
 	}
-	res, err := runner.LoginPendingKami(headless, body.Force)
+	var task provider.KamiLoginTask
+	var err error
+	if len(body.AccountIDs) > 0 {
+		task, err = runner.StartKamiLoginBatch(body.AccountIDs, headless)
+	} else {
+		task, err = runner.StartKamiPendingLogin(body.Force, headless)
+	}
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"message": err.Error()}, "stats": p.Stats()})
+		log.Printf("[kami-login] batch failed provider=%s error=%v", providerID, err)
+		if auditLog := h.auditLog(); auditLog != nil {
+			auditLog.RecordEvent("/admin/api/v1/providers/"+providerID+"/accounts/kami-login", "", "", "kami_login_batch_failed", err.Error())
+		}
+		status := http.StatusBadRequest
+		if strings.Contains(err.Error(), "已有批量登录任务") {
+			status = http.StatusConflict
+		}
+		c.JSON(status, gin.H{"error": gin.H{"message": err.Error()}})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{
-		"provider": providerID,
-		"result":   res,
-		"stats":    p.Stats(),
+	c.JSON(http.StatusAccepted, gin.H{"provider": providerID, "task": task})
+}
+
+// KamiLoginTask 返回一个异步卡密批量登录任务的增量状态。
+func (h *AdminHandler) KamiLoginTask(c *gin.Context) {
+	providerID := c.Param("provider")
+	p, ok := h.registry.Get(providerID)
+	if !ok {
+		c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"message": "未找到供应商插件: " + providerID}})
+		return
+	}
+	taskRunner, ok := p.(interface {
+		KamiLoginTaskSnapshot(id string) (provider.KamiLoginTask, bool)
 	})
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "该供应商插件不支持异步卡密登录任务"}})
+		return
+	}
+	task, ok := taskRunner.KamiLoginTaskSnapshot(c.Param("taskID"))
+	if !ok {
+		c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"message": "登录任务不存在或已过期"}})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"provider": providerID, "task": task})
 }
 
 // ProbeAllAccounts 批量并发测活当前供应商的所有非免登账号

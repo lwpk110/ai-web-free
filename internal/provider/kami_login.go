@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -16,7 +19,28 @@ import (
 
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/chromedp"
+	"github.com/google/uuid"
 )
+
+type KamiLoginTaskResult struct {
+	AccountID string `json:"account_id"`
+	Email     string `json:"email"`
+	OK        bool   `json:"ok"`
+	Error     string `json:"error,omitempty"`
+}
+
+type KamiLoginTask struct {
+	ID           string                `json:"id"`
+	Status       string                `json:"status"`
+	Total        int                   `json:"total"`
+	Completed    int                   `json:"completed"`
+	Success      int                   `json:"success"`
+	Failed       int                   `json:"failed"`
+	CurrentEmail string                `json:"current_email,omitempty"`
+	Results      []KamiLoginTaskResult `json:"results"`
+	CreatedAt    string                `json:"created_at"`
+	UpdatedAt    string                `json:"updated_at"`
+}
 
 // KamiLoginOutcome 单账号浏览器登录提取结果
 type KamiLoginOutcome struct {
@@ -37,15 +61,43 @@ func resolveChromeExecutable() (string, error) {
 			return envPath, nil
 		}
 	}
-	for _, bin := range []string{"google-chrome", "google-chrome-stable", "chromium", "chromium-browser"} {
+	for _, bin := range []string{"google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "chrome.exe", "chromium.exe"} {
 		if p, err := exec.LookPath(bin); err == nil {
+			return p, nil
+		}
+	}
+	candidates := []string{}
+	switch runtime.GOOS {
+	case "windows":
+		for _, base := range []string{os.Getenv("ProgramFiles"), os.Getenv("ProgramFiles(x86)"), os.Getenv("LocalAppData")} {
+			if base != "" {
+				candidates = append(candidates, filepath.Join(base, "Google", "Chrome", "Application", "chrome.exe"))
+			}
+		}
+	case "darwin":
+		candidates = append(candidates,
+			"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+			"/Applications/Chromium.app/Contents/MacOS/Chromium",
+		)
+		if home, err := os.UserHomeDir(); err == nil {
+			candidates = append(candidates,
+				filepath.Join(home, "Applications", "Google Chrome.app", "Contents", "MacOS", "Google Chrome"),
+				filepath.Join(home, "Applications", "Chromium.app", "Contents", "MacOS", "Chromium"),
+			)
+		}
+	}
+	for _, p := range candidates {
+		if st, err := os.Stat(p); err == nil && !st.IsDir() {
 			return p, nil
 		}
 	}
 	if home, err := os.UserHomeDir(); err == nil {
 		patterns := []string{
 			filepath.Join(home, ".cache", "ms-playwright", "chromium-*", "chrome-linux*", "chrome"),
-			filepath.Join(home, ".cache", "ms-playwright", "chromium-*", "chrome-linux", "chrome"),
+			filepath.Join(home, "AppData", "Local", "ms-playwright", "chromium-*", "chrome-win", "chrome.exe"),
+			filepath.Join(home, "AppData", "Local", "ms-playwright", "chromium-*", "chrome-win64", "chrome.exe"),
+			filepath.Join(home, "Library", "Caches", "ms-playwright", "chromium-*", "chrome-mac", "Chromium.app", "Contents", "MacOS", "Chromium"),
+			filepath.Join(home, "Library", "Caches", "ms-playwright", "chromium-*", "chrome-mac-arm64", "Chromium.app", "Contents", "MacOS", "Chromium"),
 		}
 		for _, pat := range patterns {
 			if matches, err := filepath.Glob(pat); err == nil && len(matches) > 0 {
@@ -53,7 +105,7 @@ func resolveChromeExecutable() (string, error) {
 			}
 		}
 	}
-	return "", errors.New("未找到 Chrome/Chromium 可执行文件，请安装 google-chrome/chromium 或设置 CHROME_PATH")
+	return "", errors.New("未找到 Chrome/Chromium 可执行文件，请安装 Chrome/Chromium、将其加入 PATH 或设置 CHROME_PATH")
 }
 
 // RunKamiPlaywrightLogin 使用纯 Go chromedp (CDP) 驱动本机 Chrome/Chromium 批量登录卡密账号并提取 AccessToken / SessionToken。
@@ -65,7 +117,7 @@ func RunKamiPlaywrightLogin(targets []*accounts.Account, defaultProxy string, he
 	if err != nil {
 		return nil, err
 	}
-	if !headless && os.Getenv("DISPLAY") == "" {
+	if !headless && runtime.GOOS == "linux" && os.Getenv("DISPLAY") == "" {
 		_ = os.Setenv("DISPLAY", ":0")
 	}
 
@@ -74,11 +126,21 @@ func RunKamiPlaywrightLogin(targets []*accounts.Account, defaultProxy string, he
 		if acct == nil || acct.Email == "" || acct.Password == "" || acct.TOTPSecret == "" {
 			continue
 		}
+		if len(out) > 0 {
+			time.Sleep(10 * time.Second)
+		}
 		proxyURL := strings.TrimSpace(acct.Proxy)
 		if proxyURL == "" {
 			proxyURL = strings.TrimSpace(defaultProxy)
 		}
+		startedAt := time.Now()
+		log.Printf("[kami-login] starting account=%s proxy_bound=%t headless=%t", acct.Email, proxyURL != "", headless)
 		outcome := loginSingleAccountCDP(chromePath, acct.Email, acct.Password, acct.TOTPSecret, proxyURL, headless)
+		if outcome.OK {
+			log.Printf("[kami-login] succeeded account=%s elapsed=%s", acct.Email, time.Since(startedAt).Round(time.Second))
+		} else {
+			log.Printf("[kami-login] failed account=%s elapsed=%s error=%s", acct.Email, time.Since(startedAt).Round(time.Second), outcome.Error)
+		}
 		out[strings.ToLower(strings.TrimSpace(acct.Email))] = outcome
 	}
 	return out, nil
@@ -86,17 +148,23 @@ func RunKamiPlaywrightLogin(targets []*accounts.Account, defaultProxy string, he
 
 func loginSingleAccountCDP(chromePath, email, password, totpSecret, proxyURL string, headless bool) KamiLoginOutcome {
 	outcome := KamiLoginOutcome{Email: email}
+	phase := "launch_browser"
+	lastStepError := ""
 
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
 		chromedp.ExecPath(chromePath),
 		chromedp.NoFirstRun,
 		chromedp.NoDefaultBrowserCheck,
-		chromedp.Flag("no-sandbox", true),
+		chromedp.Flag("incognito", true),
 		chromedp.Flag("disable-blink-features", "AutomationControlled"),
-		chromedp.Flag("disable-dev-shm-usage", true),
-		chromedp.UserAgent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"),
 		chromedp.WindowSize(1280, 800),
 	)
+	if runtime.GOOS == "linux" {
+		opts = append(opts,
+			chromedp.Flag("no-sandbox", true),
+			chromedp.Flag("disable-dev-shm-usage", true),
+		)
+	}
 	if headless {
 		opts = append(opts, chromedp.Flag("headless", "new"))
 	} else {
@@ -112,7 +180,11 @@ func loginSingleAccountCDP(chromePath, email, password, totpSecret, proxyURL str
 	ctx, cancel := chromedp.NewContext(allocCtx)
 	defer cancel()
 
-	ctx, timeoutCancel := context.WithTimeout(ctx, 130*time.Second)
+	loginTimeout := 210 * time.Second
+	if !headless {
+		loginTimeout = 360 * time.Second
+	}
+	ctx, timeoutCancel := context.WithTimeout(ctx, loginTimeout)
 	defer timeoutCancel()
 
 	var mu sync.Mutex
@@ -179,6 +251,7 @@ func loginSingleAccountCDP(chromePath, email, password, totpSecret, proxyURL str
 		outcome.Error = fmt.Sprintf("启用网络监听失败: %v", err)
 		return outcome
 	}
+	phase = "open_login"
 	if err := chromedp.Do(ctx, chromedp.Navigate("https://chatgpt.com/auth/login")); err != nil {
 		outcome.Error = fmt.Sprintf("打开登录页失败: %v", err)
 		return outcome
@@ -198,21 +271,42 @@ func loginSingleAccountCDP(chromePath, email, password, totpSecret, proxyURL str
 
 	// 1. 填写邮箱并点击 Continue
 	emailSel := `input[name="username"], input[type="email"], #email-input`
-	if err := waitVisibleAndType(ctx, emailSel, email, 25*time.Second); err == nil {
+	phase = "enter_email"
+	inputTimeout := 25 * time.Second
+	if !headless {
+		inputTimeout = 120 * time.Second
+	}
+	if err := waitVisibleAndType(ctx, emailSel, email, inputTimeout, headless, email); err == nil {
 		time.Sleep(500 * time.Millisecond)
-		_ = clickContinueButton(ctx)
+		if err := clickContinueButton(ctx); err != nil {
+			lastStepError = "提交邮箱失败: " + err.Error()
+		}
+	} else {
+		lastStepError = "邮箱输入框未出现: " + err.Error() + "; " + loginPageState(ctx)
+		log.Printf("[kami-login] email step failed account=%s error=%s", email, lastStepError)
 	}
 
 	// 2. 填写密码并点击 Continue
 	passSel := `input[name="password"], input[type="password"]`
-	if err := waitVisibleAndType(ctx, passSel, password, 25*time.Second); err == nil {
+	phase = "enter_password"
+	if err := waitVisibleAndType(ctx, passSel, password, inputTimeout, headless, email); err == nil {
 		time.Sleep(500 * time.Millisecond)
-		_ = clickContinueButton(ctx)
+		if err := clickContinueButton(ctx); err != nil {
+			lastStepError = "提交密码失败: " + err.Error()
+		}
+	} else {
+		lastStepError = "密码输入框未出现: " + err.Error() + "; " + loginPageState(ctx)
+		log.Printf("[kami-login] password step failed account=%s error=%s", email, lastStepError)
 	}
 
 	// 3. 填写 2FA TOTP
 	totpSel := `input[inputmode="numeric"], input[name="code"], input[autocomplete="one-time-code"], input[placeholder*="code" i]`
-	if err := waitVisible(ctx, totpSel, 12*time.Second); err == nil {
+	phase = "enter_totp"
+	totpTimeout := 12 * time.Second
+	if !headless {
+		totpTimeout = 120 * time.Second
+	}
+	if err := waitVisible(ctx, totpSel, totpTimeout, headless, email); err == nil {
 		if code, _, totpErr := accounts.GenerateTOTP(totpSecret, time.Now()); totpErr == nil && code != "" {
 			_ = chromedp.Do(ctx,
 				chromedp.Focus(chromedp.CSS(totpSel)),
@@ -224,13 +318,21 @@ func loginSingleAccountCDP(chromePath, email, password, totpSecret, proxyURL str
 	}
 
 	// 4. 轮询等待登录完成并提取 Token
-	deadline := time.Now().Add(95 * time.Second)
+	phase = "wait_session_token"
+	loginStartedAt := time.Now()
+	deadline := time.Now().Add(120 * time.Second)
+	sessionProbeAttempted := false
+	lastKnownURL := ""
 	for time.Now().Before(deadline) {
 		if tok, _ := getToken(); tok != "" {
 			break
 		}
 
 		currentURL, _ := chromedp.Run(ctx, chromedp.Location())
+		if currentURL != "" && currentURL != lastKnownURL {
+			lastKnownURL = currentURL
+			log.Printf("[kami-login] page account=%s url=%s", email, sanitizeLoginURL(currentURL))
+		}
 		if strings.Contains(currentURL, "mfa-challenge") {
 			_ = clickContinueButton(ctx)
 		}
@@ -255,14 +357,32 @@ func loginSingleAccountCDP(chromePath, email, password, totpSecret, proxyURL str
 					break
 				}
 			}
+			if !sessionProbeAttempted && time.Since(loginStartedAt) > 15*time.Second {
+				sessionProbeAttempted = true
+				if sessionJSON, err := readSessionFromNewTab(ctx); err == nil {
+					var parsed struct {
+						AccessToken string `json:"accessToken"`
+						User        struct {
+							ID string `json:"id"`
+						} `json:"user"`
+					}
+					if json.Unmarshal([]byte(sessionJSON), &parsed) == nil && parsed.AccessToken != "" {
+						setToken(parsed.AccessToken, parsed.User.ID)
+						break
+					}
+				}
+			}
 		}
 		time.Sleep(2 * time.Second)
 	}
 
 	accessToken, userID := getToken()
 	if accessToken == "" {
-		currentURL, _ := chromedp.Run(ctx, chromedp.Location())
-		outcome.Error = fmt.Sprintf("未能获取到 AccessToken (当前 URL: %s)", currentURL)
+		currentURL, urlErr := chromedp.Run(ctx, chromedp.Location())
+		if currentURL != "" {
+			lastKnownURL = currentURL
+		}
+		outcome.Error = fmt.Sprintf("未能获取到 AccessToken (phase=%s, last_url=%q, url_error=%v, last_step=%s)", phase, sanitizeLoginURL(lastKnownURL), urlErr, lastStepError)
 		return outcome
 	}
 
@@ -296,24 +416,77 @@ func loginSingleAccountCDP(chromePath, email, password, totpSecret, proxyURL str
 	return outcome
 }
 
-func waitVisible(ctx context.Context, selector string, timeout time.Duration) error {
-	cctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	return chromedp.Do(cctx, chromedp.WaitVisible(chromedp.CSS(selector)))
+func sanitizeLoginURL(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed.String()
 }
 
-func waitVisibleAndType(ctx context.Context, selector, value string, timeout time.Duration) error {
+func readSessionFromNewTab(parent context.Context) (string, error) {
+	ctx, cancel := chromedp.NewContext(parent)
+	defer cancel()
+	ctx, timeoutCancel := context.WithTimeout(ctx, 12*time.Second)
+	defer timeoutCancel()
+	if err := chromedp.Do(ctx, chromedp.Navigate("https://chatgpt.com/api/auth/session")); err != nil {
+		return "", err
+	}
+	return chromedp.Run(ctx, chromedp.Evaluate[string]("document.body.innerText"))
+}
+
+func waitVisible(ctx context.Context, selector string, timeout time.Duration, headless bool, email string) error {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	return chromedp.Do(cctx,
-		chromedp.WaitVisible(chromedp.CSS(selector)),
+	selectorJSON, _ := json.Marshal(selector)
+	expression := `(() => {
+		const title = (document.title || '').toLowerCase();
+		const body = (document.body?.innerText || '').toLowerCase();
+		return {
+			visible: Array.from(document.querySelectorAll(` + string(selectorJSON) + `)).some(el => el.offsetParent !== null),
+			challenge: /please wait|请稍候|checking your browser|verify you are human|验证您是人类/.test(title + ' ' + body) || Boolean(document.querySelector('#challenge-form, .cf-browser-verification, iframe[src*="challenges.cloudflare.com"]'))
+		};
+	})()`
+	challengeReported := false
+	for {
+		state, err := chromedp.Run(cctx, chromedp.Evaluate[map[string]bool](expression))
+		if err != nil {
+			return err
+		}
+		if state["visible"] {
+			return nil
+		}
+		if state["challenge"] {
+			if headless {
+				return errors.New("检测到浏览器安全验证页，请关闭无头模式并手动完成验证")
+			}
+			if !challengeReported {
+				log.Printf("[kami-login] waiting for manual browser verification account=%s", email)
+				challengeReported = true
+			}
+		}
+		select {
+		case <-cctx.Done():
+			return cctx.Err()
+		case <-time.After(300 * time.Millisecond):
+		}
+	}
+}
+
+func waitVisibleAndType(ctx context.Context, selector, value string, timeout time.Duration, headless bool, email string) error {
+	if err := waitVisible(ctx, selector, timeout, headless, email); err != nil {
+		return err
+	}
+	return chromedp.Do(ctx,
 		chromedp.Focus(chromedp.CSS(selector)),
 		chromedp.SendKeys(chromedp.CSS(selector), value),
 	)
 }
 
 func clickContinueButton(ctx context.Context) error {
-	_, err := chromedp.Run(ctx, chromedp.Evaluate[bool](`(() => {
+	clicked, err := chromedp.Run(ctx, chromedp.Evaluate[bool](`(() => {
 		const selectors = ['button[type="submit"]', 'button[name="action"][value="default"]'];
 		for (const s of selectors) {
 			const el = document.querySelector(s);
@@ -324,7 +497,34 @@ func clickContinueButton(ctx context.Context) error {
 		if (match) { match.click(); return true; }
 		return false;
 	})()`))
-	return err
+	if err != nil {
+		return err
+	}
+	if !clicked {
+		return errors.New("未找到可点击的继续按钮")
+	}
+	return nil
+}
+
+func loginPageState(ctx context.Context) string {
+	state, err := chromedp.Run(ctx, chromedp.Evaluate[string](`(() => JSON.stringify({
+		title: (document.title || '').slice(0, 80),
+		inputs: Array.from(document.querySelectorAll('input'))
+			.filter(el => el.offsetParent !== null)
+			.slice(0, 8)
+			.map(el => ({type: el.type || '', name: el.name || '', autocomplete: el.autocomplete || '', placeholder: (el.placeholder || '').slice(0, 64)})),
+		buttons: Array.from(document.querySelectorAll('button'))
+			.filter(el => el.offsetParent !== null)
+			.slice(0, 8)
+			.map(el => (el.innerText || '').trim().slice(0, 64))
+	}))()`))
+	if err != nil {
+		return "页面摘要不可用: " + err.Error()
+	}
+	if len(state) > 800 {
+		state = state[:800]
+	}
+	return "页面摘要=" + state
 }
 
 func (p *ChatGPTProvider) importKamiAccounts(rawText string, persist, autoLogin, headless bool) (ImportResult, error) {
@@ -514,8 +714,37 @@ func (p *ChatGPTProvider) loginKamiAccounts(targets []*accounts.Account, headles
 			defaultProxy = p.cfg.HTTPProxy
 		}
 	}
+	for _, acct := range targets {
+		if acct == nil || acct.Proxy != "" {
+			continue
+		}
+		if proxyURL := p.allocateProxy(); proxyURL != "" {
+			if err := p.pool.RebindAccountProxy(acct, proxyURL); err != nil {
+				log.Printf("[kami-login] proxy bind failed account=%s error=%v", acct.Email, err)
+				if p.auditLog != nil {
+					p.auditLog.RecordEvent("/admin/api/v1/providers/chatgpt/accounts/kami-login", acct.Email, "", "kami_login_failed", "proxy bind failed: "+err.Error())
+				}
+				return nil, fmt.Errorf("账号 %s 绑定代理失败: %w", acct.Email, err)
+			}
+		}
+	}
+	if p.auditLog != nil {
+		for _, acct := range targets {
+			if acct != nil {
+				p.auditLog.RecordEvent("/admin/api/v1/providers/chatgpt/accounts/kami-login", acct.Email, "", "kami_login_started", "")
+			}
+		}
+	}
 	outcomes, err := RunKamiPlaywrightLogin(targets, defaultProxy, headless)
 	if err != nil {
+		log.Printf("[kami-login] browser batch failed accounts=%d error=%v", len(targets), err)
+		if p.auditLog != nil {
+			for _, acct := range targets {
+				if acct != nil {
+					p.auditLog.RecordEvent("/admin/api/v1/providers/chatgpt/accounts/kami-login", acct.Email, "", "kami_login_failed", err.Error())
+				}
+			}
+		}
 		return nil, err
 	}
 
@@ -524,6 +753,13 @@ func (p *ChatGPTProvider) loginKamiAccounts(targets []*accounts.Account, headles
 		o, ok := outcomes[key]
 		if !ok {
 			continue
+		}
+		if p.auditLog != nil {
+			action := "kami_login_failed"
+			if o.OK {
+				action = "kami_login_ok"
+			}
+			p.auditLog.RecordEvent("/admin/api/v1/providers/chatgpt/accounts/kami-login", acct.Email, acct.Proxy, action, o.Error)
 		}
 		acct.LastChecked = time.Now()
 		if o.OK && o.AccessToken != "" {
@@ -584,6 +820,216 @@ func (p *ChatGPTProvider) LoginPendingKami(headless, force bool) (map[string]int
 		"failed":  failed,
 		"results": details,
 	}, nil
+}
+
+// StartKamiLoginBatch queues one serialized background login task and returns its initial snapshot.
+func (p *ChatGPTProvider) StartKamiLoginBatch(ids []string, headless bool) (KamiLoginTask, error) {
+	if len(ids) == 0 || len(ids) > 10000 {
+		return KamiLoginTask{}, errors.New("请选择 1 到 10000 个账号")
+	}
+
+	p.kamiLoginMu.Lock()
+	if p.kamiLoginRunning != "" {
+		p.kamiLoginMu.Unlock()
+		return KamiLoginTask{}, errors.New("已有批量登录任务正在运行，请等待完成后再启动新任务")
+	}
+
+	now := time.Now().Format(time.RFC3339)
+	task := &KamiLoginTask{
+		ID:        uuid.NewString(),
+		Status:    "queued",
+		CreatedAt: now,
+		UpdatedAt: now,
+		Results:   make([]KamiLoginTaskResult, 0, len(ids)),
+	}
+	seen := make(map[string]struct{}, len(ids))
+	targets := make([]*accounts.Account, 0, len(ids))
+	for _, rawID := range ids {
+		id := strings.TrimSpace(rawID)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		task.Total++
+		acct := p.pool.GetByID(id)
+		result := KamiLoginTaskResult{AccountID: id}
+		if acct == nil {
+			result.Error = "账号不存在"
+		} else {
+			result.AccountID = acct.ID
+			result.Email = acct.Email
+			switch {
+			case acct.Email == "" || acct.Password == "" || acct.TOTPSecret == "":
+				result.Error = "账号未配置完整卡密凭据"
+			case acct.Status == accounts.StatusDisabled:
+				result.Error = "账号已停用"
+			default:
+				targets = append(targets, acct)
+				continue
+			}
+		}
+		task.Completed++
+		task.Failed++
+		task.Results = append(task.Results, result)
+	}
+	if task.Total == 0 {
+		p.kamiLoginMu.Unlock()
+		return KamiLoginTask{}, errors.New("请选择至少一个账号")
+	}
+	p.kamiLoginTasks[task.ID] = task
+	p.kamiLoginTaskOrder = append(p.kamiLoginTaskOrder, task.ID)
+	if len(p.kamiLoginTaskOrder) > 20 {
+		oldest := p.kamiLoginTaskOrder[0]
+		p.kamiLoginTaskOrder = p.kamiLoginTaskOrder[1:]
+		delete(p.kamiLoginTasks, oldest)
+	}
+	p.kamiLoginRunning = task.ID
+	snapshot := *task
+	snapshot.Results = append([]KamiLoginTaskResult(nil), task.Results...)
+	p.kamiLoginMu.Unlock()
+	if p.auditLog != nil {
+		for _, result := range snapshot.Results {
+			if !result.OK {
+				p.auditLog.RecordEvent("/admin/api/v1/providers/chatgpt/accounts/kami-login", result.Email, "", "kami_login_failed", result.Error)
+			}
+		}
+	}
+
+	go p.runKamiLoginTask(task.ID, targets, headless)
+	return snapshot, nil
+}
+
+// StartKamiPendingLogin starts an async login task for pending/expired card accounts.
+func (p *ChatGPTProvider) StartKamiPendingLogin(force, headless bool) (KamiLoginTask, error) {
+	candidates := p.pool.ListKamiCandidates(!force)
+	ids := make([]string, 0, len(candidates))
+	for _, acct := range candidates {
+		ids = append(ids, acct.ID)
+	}
+	if len(ids) == 0 {
+		return KamiLoginTask{}, errors.New("没有需要登录的卡密账号")
+	}
+	return p.StartKamiLoginBatch(ids, headless)
+}
+
+// KamiLoginTaskSnapshot returns a copied task state safe for concurrent polling.
+func (p *ChatGPTProvider) KamiLoginTaskSnapshot(id string) (KamiLoginTask, bool) {
+	p.kamiLoginMu.Lock()
+	defer p.kamiLoginMu.Unlock()
+	task := p.kamiLoginTasks[id]
+	if task == nil {
+		return KamiLoginTask{}, false
+	}
+	snapshot := *task
+	snapshot.Results = append([]KamiLoginTaskResult(nil), task.Results...)
+	return snapshot, true
+}
+
+func (p *ChatGPTProvider) runKamiLoginTask(taskID string, targets []*accounts.Account, headless bool) {
+	p.updateKamiLoginTask(taskID, func(task *KamiLoginTask) {
+		task.Status = "running"
+	})
+	if p.proxyPool != nil && p.proxyPool.Count() > 0 {
+		probeCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		p.proxyPool.ProbeAll(probeCtx, nil, p.pool.BoundProxyCounts())
+		cancel()
+		p.pool.ReconcileProxies(
+			func(u string) bool { return !p.proxyPool.IsHealthy(u) },
+			func(exclude map[string]bool) string { return p.proxyPool.AllocateHealthy(exclude) },
+		)
+	}
+
+	recordFailure := func(result KamiLoginTaskResult) {
+		log.Printf("[kami-login] failed account=%s error=%s", result.Email, result.Error)
+		if p.auditLog != nil {
+			p.auditLog.RecordEvent("/admin/api/v1/providers/chatgpt/accounts/kami-login", result.Email, "", "kami_login_failed", result.Error)
+		}
+		p.kamiLoginMu.Lock()
+		if task := p.kamiLoginTasks[taskID]; task != nil {
+			task.Results = append(task.Results, result)
+			task.Completed++
+			task.Failed++
+			task.UpdatedAt = time.Now().Format(time.RFC3339)
+		}
+		p.kamiLoginMu.Unlock()
+	}
+
+	for i, acct := range targets {
+		if i > 0 {
+			time.Sleep(10 * time.Second)
+		}
+		if p.proxyPool != nil && p.proxyPool.Count() > 0 {
+			if acct.Proxy == "" {
+				proxyURL := p.proxyPool.AllocateHealthy(nil)
+				if proxyURL == "" || !p.proxyPool.IsHealthy(proxyURL) {
+					recordFailure(KamiLoginTaskResult{AccountID: acct.ID, Email: acct.Email, Error: "代理预检失败：没有健康代理节点，登录未启动"})
+					continue
+				}
+				if err := p.pool.RebindAccountProxy(acct, proxyURL); err != nil {
+					recordFailure(KamiLoginTaskResult{AccountID: acct.ID, Email: acct.Email, Error: "绑定代理失败: " + err.Error()})
+					continue
+				}
+			}
+			if !p.proxyPool.IsHealthy(acct.Proxy) {
+				recordFailure(KamiLoginTaskResult{AccountID: acct.ID, Email: acct.Email, Error: "账号绑定代理未通过连通性预检，登录未启动；请更换健康代理"})
+				continue
+			}
+		}
+		p.updateKamiLoginTask(taskID, func(task *KamiLoginTask) {
+			task.CurrentEmail = acct.Email
+		})
+
+		outcomes, err := p.loginKamiAccounts([]*accounts.Account{acct}, headless)
+		result := KamiLoginTaskResult{AccountID: acct.ID, Email: acct.Email}
+		if err != nil {
+			result.Error = err.Error()
+		} else if outcome, ok := outcomes[strings.ToLower(strings.TrimSpace(acct.Email))]; !ok {
+			result.Error = "浏览器登录未返回账号结果"
+		} else {
+			result.OK = outcome.OK
+			result.Error = outcome.Error
+		}
+		if result.OK {
+			if err := p.PersistAccessTokens(); err != nil {
+				log.Printf("[kami-login] persist access_tokens failed: %v", err)
+			}
+		}
+		p.kamiLoginMu.Lock()
+		if task := p.kamiLoginTasks[taskID]; task != nil {
+			task.Results = append(task.Results, result)
+			task.Completed++
+			if result.OK {
+				task.Success++
+			} else {
+				task.Failed++
+			}
+			task.UpdatedAt = time.Now().Format(time.RFC3339)
+		}
+		p.kamiLoginMu.Unlock()
+	}
+
+	p.kamiLoginMu.Lock()
+	if task := p.kamiLoginTasks[taskID]; task != nil {
+		task.Status = "completed"
+		task.CurrentEmail = ""
+		task.UpdatedAt = time.Now().Format(time.RFC3339)
+	}
+	if p.kamiLoginRunning == taskID {
+		p.kamiLoginRunning = ""
+	}
+	p.kamiLoginMu.Unlock()
+}
+
+func (p *ChatGPTProvider) updateKamiLoginTask(taskID string, update func(*KamiLoginTask)) {
+	p.kamiLoginMu.Lock()
+	defer p.kamiLoginMu.Unlock()
+	if task := p.kamiLoginTasks[taskID]; task != nil {
+		update(task)
+		task.UpdatedAt = time.Now().Format(time.RFC3339)
+	}
 }
 
 // PersistKamiAccounts 将池内带卡密凭据的非临时账号原子写回 kami_accounts.txt。

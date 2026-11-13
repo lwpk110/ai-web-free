@@ -109,3 +109,31 @@ func TestNeedsProactiveRenewAndProxyReconcile(t *testing.T) {
 		t.Fatalf("expected 1 migrated to good-proxy, got migrated=%d proxy=%q", migrated, soon.Proxy)
 	}
 }
+
+func TestRebindAccountProxyKeepsOldBindingWhenClientRebuildFails(t *testing.T) {
+	p := NewPool(nil)
+	acct := CreateAccount("token", TypeFree, DefaultProfiles)
+	acct.Proxy = "http://127.0.0.1:8080"
+
+	if err := p.RebindAccountProxy(acct, "://invalid-proxy"); err == nil {
+		t.Fatal("expected invalid proxy to fail client rebuild")
+	}
+	if acct.Proxy != "http://127.0.0.1:8080" {
+		t.Fatalf("failed rebind changed the existing proxy: %q", acct.Proxy)
+	}
+}
+
+func TestReconcileProxiesKeepsBindingWhenNoHealthyAlternativeExists(t *testing.T) {
+	p := NewPool(nil)
+	acct := CreateAccount("token", TypeFree, DefaultProfiles)
+	acct.Proxy = "http://bad-proxy:8080"
+	p.AddAccount(acct)
+
+	migrated := p.ReconcileProxies(
+		func(u string) bool { return u == acct.Proxy },
+		func(exclude map[string]bool) string { return "" },
+	)
+	if migrated != 0 || acct.Proxy != "http://bad-proxy:8080" {
+		t.Fatalf("expected existing proxy binding to be preserved without a healthy alternative, migrated=%d proxy=%q", migrated, acct.Proxy)
+	}
+}

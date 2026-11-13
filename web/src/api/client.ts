@@ -112,6 +112,19 @@ export interface KamiWorkerStats {
   last_error?: string;
 }
 
+export interface KamiLoginTask {
+  id: string;
+  status: "queued" | "running" | "completed" | "failed" | string;
+  total: number;
+  completed: number;
+  success: number;
+  failed: number;
+  current_email?: string;
+  results: { account_id: string; email: string; ok: boolean; error?: string }[];
+  created_at: string;
+  updated_at: string;
+}
+
 export interface AuditSummary {
   capacity: number;
   buffered_count: number;
@@ -226,6 +239,34 @@ export async function fetchAccounts(
   return res.json();
 }
 
+export async function bulkUpdateAccountProxy(
+  provider: string,
+  accountIds: string[],
+  proxyUrl: string
+): Promise<{
+  provider: string;
+  result: {
+    total: number;
+    updated: number;
+    failed: number;
+    results: { id: string; email: string; ok: boolean; error?: string }[];
+  };
+}> {
+  const res = await adminFetch(
+    `/admin/api/v1/providers/${encodeURIComponent(provider)}/accounts/bulk-proxy`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ account_ids: accountIds, proxy_url: proxyUrl }),
+    }
+  );
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error?.message || `Bulk proxy update failed: HTTP ${res.status}`);
+  }
+  return data;
+}
+
 export type AccountActionType =
   | "probe"
   | "refresh"
@@ -295,28 +336,37 @@ export async function probeAllAccounts(
 export async function loginKamiAccounts(
   provider = "chatgpt",
   headless = true,
-  force = false
+  force = false,
+  accountIds: string[] = []
 ): Promise<{
   provider: string;
-  stats: PoolStats;
-  result?: {
-    total: number;
-    success: number;
-    failed: number;
-    message?: string;
-  };
+  task: KamiLoginTask;
 }> {
   const res = await adminFetch(
     `/admin/api/v1/providers/${encodeURIComponent(provider)}/accounts/kami-login`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ headless, force }),
+      body: JSON.stringify({ headless, force, account_ids: accountIds }),
     }
   );
   const data = await res.json();
   if (!res.ok) {
     throw new Error(data?.error?.message || `Kami login failed: HTTP ${res.status}`);
+  }
+  return data;
+}
+
+export async function fetchKamiLoginTask(
+  provider: string,
+  taskId: string
+): Promise<{ provider: string; task: KamiLoginTask }> {
+  const res = await adminFetch(
+    `/admin/api/v1/providers/${encodeURIComponent(provider)}/accounts/kami-login/tasks/${encodeURIComponent(taskId)}`
+  );
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error?.message || `Fetch login task failed: HTTP ${res.status}`);
   }
   return data;
 }

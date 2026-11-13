@@ -20,21 +20,26 @@ import (
 )
 
 type ChatGPTProvider struct {
-	pool       *accounts.Pool
-	proxyPool  *proxy.Pool
-	cfg        *config.Config
-	renewFn    func(*accounts.Account) bool
-	kamiWorker *KamiRenewWorker
-	auditLog   *audit.RingBuffer
-	fileMu     sync.Mutex
+	pool               *accounts.Pool
+	proxyPool          *proxy.Pool
+	cfg                *config.Config
+	renewFn            func(*accounts.Account) bool
+	kamiWorker         *KamiRenewWorker
+	auditLog           *audit.RingBuffer
+	fileMu             sync.Mutex
+	kamiLoginMu        sync.Mutex
+	kamiLoginTasks     map[string]*KamiLoginTask
+	kamiLoginTaskOrder []string
+	kamiLoginRunning   string
 }
 
 func NewChatGPTProvider(pool *accounts.Pool, proxyPool *proxy.Pool, cfg *config.Config, renewFn func(*accounts.Account) bool) *ChatGPTProvider {
 	return &ChatGPTProvider{
-		pool:      pool,
-		proxyPool: proxyPool,
-		cfg:       cfg,
-		renewFn:   renewFn,
+		pool:           pool,
+		proxyPool:      proxyPool,
+		cfg:            cfg,
+		renewFn:        renewFn,
+		kamiLoginTasks: make(map[string]*KamiLoginTask),
 	}
 }
 

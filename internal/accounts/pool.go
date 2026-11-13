@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -828,10 +829,22 @@ func (p *Pool) RebindAccountProxy(acct *Account, newProxy string) error {
 	if acct == nil {
 		return nil
 	}
+	if strings.TrimSpace(newProxy) != "" {
+		parsed, err := url.Parse(strings.TrimSpace(newProxy))
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+			return fmt.Errorf("invalid proxy url: %q", newProxy)
+		}
+	}
+	candidate := *acct
+	candidate.Proxy = newProxy
+	if err := candidate.InitClient(); err != nil {
+		return err
+	}
 	p.mu.Lock()
-	acct.Proxy = newProxy
+	acct.Proxy = candidate.Proxy
+	acct.Client = candidate.Client
 	p.mu.Unlock()
-	return acct.InitClient()
+	return nil
 }
 
 // ReconcileProxies 遍历号池账号，当绑定代理满足 shouldRebind 时迁移至 pickHealthy 返回的新代理。
@@ -854,7 +867,7 @@ func (p *Pool) ReconcileProxies(shouldRebind func(proxyURL string) bool, pickHea
 	for _, a := range targets {
 		oldProxy := a.Proxy
 		next := pickHealthy(map[string]bool{oldProxy: true})
-		if next == oldProxy {
+		if next == "" || next == oldProxy {
 			continue
 		}
 		if err := p.RebindAccountProxy(a, next); err == nil {

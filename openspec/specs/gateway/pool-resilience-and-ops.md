@@ -4,6 +4,7 @@
 
 - **零 CGO / 纯静态二进制约束**：全部存储、审计、定时调度、浏览器重登均在纯 Go + `chromedp` 体系下实现，不引入 CGO 或外部数据库服务，确保 `CGO_ENABLED=0`（`Dockerfile` 多阶段 `distroless/static-debian12:nonroot`）无缝构建。
 - **粘性防风控优先**：单账号维持独立 TLS 指纹（`bogdanfinn/tls-client`）与固定代理绑定，仅当代理节点不可达或号池异常时触发容灾切换。
+- **禁止代理故障时静默直连**：只有存在健康替代节点时才迁移绑定；全部节点不可用时保留原绑定并让上游请求失败，等待管理员恢复或更换代理。
 
 ---
 
@@ -35,6 +36,8 @@
   - `GET /admin/api/v1/proxies`：返回节点健康快照（含每节点当前绑定账号数）。
   - `POST /admin/api/v1/proxies/probe`：并发探测代理列表连通性与延迟并返回结果。
   - `POST /admin/api/v1/proxies`：更新代理池（支持持久化 `proxies.txt`）并自动校准失效绑定账号。
+  - `POST /admin/api/v1/providers/:provider/accounts/bulk-proxy`：将选中账号统一绑定到健康代理并原子重建各自的 TLS Client；代理池已有节点时禁止把批量激活目标设为直连。绑定在当前运行期生效，重启后按代理池重新初始化。
+  - `POST /admin/api/v1/providers/:provider/accounts/kami-login`：创建单消费者异步卡密登录任务；`GET .../accounts/kami-login/tasks/:taskID` 增量返回进度和逐账号结果。启动浏览器前先探测代理；仅经健康代理登录，代理池无健康节点时逐账号失败并保留原绑定，禁止退化为直连。任务串行运行，每个账号之间至少间隔 `10s`；成功 Token 立即回写，失败结果进入审计日志。任务状态保存在内存中，服务重启后任务历史清空。
 
 ### 2.4 零 CGO 请求审计环形缓冲与可选 JSONL 落盘
 - **组件**：`internal/audit/` 提供线程安全定长 `RingBuffer`（默认保留最近 `1000` 条记录），记录网关请求（时间、Method/Path、Model、命中账号、代理节点、耗时 `ms`、HTTP 状态、`failover_trace`、错误信息）与关键号池运维事件。

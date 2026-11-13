@@ -12,16 +12,21 @@ import {
 } from "lucide-react";
 import {
   executeAccountAction,
+  bulkUpdateAccountProxy,
   fetchAccounts,
+  fetchKamiLoginTask,
   fetchOverview,
+  fetchProxies,
   importAccounts,
   loginKamiAccounts,
   probeAllAccounts,
   type AccountActionType,
   type AccountView,
   type KamiWorkerStats,
+  type KamiLoginTask,
   type PoolStats,
   type ProviderSummary,
+  type ProxyNodeStatus,
 } from "../api/client";
 import {
   formatRemainingCountdown,
@@ -44,6 +49,16 @@ function getAvatarInitial(acc: AccountView): string {
   const src = (acc.email || acc.chatgpt_account_id || acc.id || "A").trim();
   const ch = src.charAt(0).toUpperCase();
   return /[A-Z0-9]/.test(ch) ? ch : "A";
+}
+
+function proxyOptionLabel(node: ProxyNodeStatus, index: number): string {
+  let endpoint = `代理节点 ${index + 1}`;
+  try {
+    endpoint = new URL(node.url).host || endpoint;
+  } catch {
+    // Keep credentials out of the option label when the URL is malformed.
+  }
+  return `${endpoint} · ${node.status === "active" ? "可用" : "冷却"} · ${node.bound_accounts} 个账号`;
 }
 
 function getTtlBar(days?: number): { pct: number; color: string } {
@@ -75,6 +90,16 @@ export const PoolConsole: React.FC<{
   const [loading, setLoading] = useState(false);
   const [probingAll, setProbingAll] = useState(false);
   const [loggingInKami, setLoggingInKami] = useState(false);
+  const [loginTaskId, setLoginTaskId] = useState("");
+  const [loginTaskProvider, setLoginTaskProvider] = useState("");
+  const [loginTask, setLoginTask] = useState<KamiLoginTask | null>(null);
+  const [updatingProxy, setUpdatingProxy] = useState(false);
+  const [headlessLogin, setHeadlessLogin] = useState(true);
+  const [proxyNodes, setProxyNodes] = useState<ProxyNodeStatus[]>([]);
+  const [bulkProxyUrl, setBulkProxyUrl] = useState("");
+  const [selectedAccountIds, setSelectedAccountIds] = useState<Set<string>>(
+    () => new Set()
+  );
   const [actionLoadingKey, setActionLoadingKey] = useState<string | null>(null);
   const [notice, setNotice] = useState<{
     type: "info" | "success" | "error";
@@ -84,11 +109,14 @@ export const PoolConsole: React.FC<{
   const [nowMs, setNowMs] = useState(() => Date.now());
 
   const [showImport, setShowImport] = useState(false);
+  const [showBulkEdit, setShowBulkEdit] = useState(false);
   const [importFormat, setImportFormat] = useState("kami");
   const [importText, setImportText] = useState("");
-  const [autoLogin, setAutoLogin] = useState(true);
   const [generateCount, setGenerateCount] = useState(10);
   const [importing, setImporting] = useState(false);
+  const importCredentialCount = importText
+    .split(/\r?\n/)
+    .filter((line) => line.trim().length > 0).length;
 
   const [totpInfo, setTotpInfo] = useState<{
     accountId: string;
@@ -146,6 +174,83 @@ export const PoolConsole: React.FC<{
   useEffect(() => {
     loadData();
   }, [activeProvider, statusFilter, typeFilter]);
+
+  useEffect(() => {
+    setSelectedAccountIds(new Set());
+  }, [activeProvider, statusFilter, typeFilter]);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchProxies()
+      .then((res) => {
+        if (cancelled) return;
+        setProxyNodes(res.nodes || []);
+        setBulkProxyUrl(
+          (current) => current || res.nodes.find((node) => node.status === "active")?.url || ""
+        );
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!loginTaskId || !loginTaskProvider) return;
+    let cancelled = false;
+    let timer = 0;
+    let lastUpdatedAt = "";
+
+    const poll = async () => {
+      try {
+        const { task } = await fetchKamiLoginTask(loginTaskProvider, loginTaskId);
+        if (cancelled) return;
+        setLoginTask(task);
+        if (task.updated_at !== lastUpdatedAt) {
+          lastUpdatedAt = task.updated_at;
+          if (loginTaskProvider === activeProvider) {
+            const backendStatus =
+              statusFilter === "image_limited" || statusFilter === "renewing"
+                ? ""
+                : statusFilter;
+            const accRes = await fetchAccounts(
+              activeProvider,
+              backendStatus,
+              typeFilter,
+              ""
+            );
+            if (!cancelled) {
+              setStats(accRes.stats);
+              setAccounts(accRes.accounts || []);
+            }
+          }
+        }
+        if (task.status === "completed" || task.status === "failed") {
+          const failures = task.results.filter((item) => !item.ok);
+          const examples = failures
+            .slice(0, 3)
+            .map((item) => `${item.email || item.account_id}: ${item.error || "登录失败"}`);
+          setNotice({
+            type: task.failed > 0 ? "info" : "success",
+            text: `后台登录任务完成：${task.success} 成功，${task.failed} 失败${examples.length ? `；${examples.join("；")}${failures.length > examples.length ? `；另有 ${failures.length - examples.length} 项失败，详见链路日志` : ""}` : ""}`,
+          });
+          setSelectedAccountIds(new Set());
+          setLoginTaskId("");
+          setLoggingInKami(false);
+          return;
+        }
+        timer = window.setTimeout(poll, 1500);
+      } catch {
+        if (!cancelled) timer = window.setTimeout(poll, 3000);
+      }
+    };
+
+    void poll();
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [loginTaskId, loginTaskProvider, activeProvider, statusFilter, typeFilter]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNowMs(Date.now()), 1000);
@@ -273,18 +378,14 @@ export const PoolConsole: React.FC<{
     setLoggingInKami(true);
     setNotice({
       type: "info",
-      text: "正在调用无头 Chrome (CDP) 自动登录待激活/过期卡密账号，请稍候...",
+      text: "正在创建待激活账号后台登录任务...",
     });
     try {
-      const res = await loginKamiAccounts(activeProvider, true, false);
-      const r = res.result;
-      setNotice({
-        type: r && r.failed > 0 ? "info" : "success",
-        text:
-          r?.message ||
-          `卡密登录完成：总计 ${r?.total ?? 0} 个，成功 ${r?.success ?? 0} 个，失败 ${r?.failed ?? 0} 个`,
-      });
-      await loadData();
+      const res = await loginKamiAccounts(activeProvider, headlessLogin, false);
+      setLoginTask(res.task);
+      setLoginTaskProvider(activeProvider);
+      setLoginTaskId(res.task.id);
+      setNotice({ type: "info", text: `后台登录任务已启动：${res.task.total} 个待激活账号。` });
     } catch (e: any) {
       setNotice({
         type: "error",
@@ -292,6 +393,108 @@ export const PoolConsole: React.FC<{
       });
     } finally {
       setLoggingInKami(false);
+    }
+  };
+
+  const eligibleVisibleAccounts = filteredAccounts.filter(
+    (acc) => acc.has_kami_credentials && acc.status !== "disabled"
+  );
+  const selectedCount = selectedAccountIds.size;
+  const loginTaskActive = Boolean(loginTaskId);
+  const proxyUnavailable =
+    proxyNodes.length > 0 && !proxyNodes.some((node) => node.status === "active");
+  const allVisibleSelected =
+    filteredAccounts.length > 0 &&
+    filteredAccounts.every((acc) => selectedAccountIds.has(acc.id));
+
+  const toggleAccountSelection = (id: string) => {
+    if (selectedAccountIds.has(id)) {
+      setSelectedAccountIds((current) => {
+        const next = new Set(current);
+        next.delete(id);
+        return next;
+      });
+      return;
+    }
+    setSelectedAccountIds((current) => new Set(current).add(id));
+  };
+
+  const selectVisibleKamiAccounts = () => {
+    const next = new Set(selectedAccountIds);
+    for (const acc of eligibleVisibleAccounts.filter((item) => item.status !== "active")) {
+      next.add(acc.id);
+    }
+    setSelectedAccountIds(next);
+  };
+
+  const selectVisibleAccounts = () => {
+    const next = new Set(selectedAccountIds);
+    for (const acc of filteredAccounts) {
+      next.add(acc.id);
+    }
+    setSelectedAccountIds(next);
+  };
+
+  const toggleVisibleSelection = () => {
+    setSelectedAccountIds((current) => {
+      const next = new Set(current);
+      if (allVisibleSelected) {
+        filteredAccounts.forEach((acc) => next.delete(acc.id));
+      } else {
+        filteredAccounts.forEach((acc) => next.add(acc.id));
+      }
+      return next;
+    });
+  };
+
+  const handleLoginSelectedKami = async () => {
+    const ids = [...selectedAccountIds];
+    if (!ids.length) return;
+    setLoggingInKami(true);
+    setNotice({
+      type: "info",
+      text: `正在为 ${ids.length} 个账号创建后台登录任务，账号间间隔 10 秒...`,
+    });
+    try {
+      const res = await loginKamiAccounts(activeProvider, headlessLogin, false, ids);
+      setLoginTask(res.task);
+      setLoginTaskProvider(activeProvider);
+      setLoginTaskId(res.task.id);
+      setNotice({ type: "info", text: `后台登录任务已启动：${res.task.total} 个账号已排队。` });
+    } catch (e: any) {
+      setNotice({
+        type: "error",
+        text: `批量重登失败: ${e?.message || "未知错误"}`,
+      });
+    } finally {
+      setLoggingInKami(false);
+    }
+  };
+
+  const handleBulkProxyUpdate = async () => {
+    const ids = [...selectedAccountIds];
+    if (!ids.length) return;
+    setUpdatingProxy(true);
+    try {
+      const res = await bulkUpdateAccountProxy(activeProvider, ids, bulkProxyUrl);
+      const failures = res.result.results
+        .filter((item) => !item.ok)
+        .map((item) => `${item.email || item.id}: ${item.error || "更新失败"}`);
+      setNotice({
+        type: res.result.failed > 0 ? "info" : "success",
+        text: `代理更新完成：${res.result.updated}/${res.result.total} 个账号已重建客户端${failures.length ? `；${failures.join("；")}` : ""}`,
+      });
+      setShowBulkEdit(false);
+      await loadData();
+      const proxyRes = await fetchProxies();
+      setProxyNodes(proxyRes.nodes || []);
+    } catch (e: any) {
+      setNotice({
+        type: "error",
+        text: `批量代理更新失败: ${e?.message || "未知错误"}`,
+      });
+    } finally {
+      setUpdatingProxy(false);
     }
   };
 
@@ -308,8 +511,8 @@ export const PoolConsole: React.FC<{
         credentialType: importFormat,
         rawText: trimmed,
         persist: true,
-        autoLogin: importFormat === "kami" ? autoLogin : false,
-        headless: true,
+        autoLogin: false,
+        headless: headlessLogin,
         generateCount:
           importFormat === "free_uuid" && !trimmed ? generateCount : 0,
       });
@@ -361,12 +564,21 @@ export const PoolConsole: React.FC<{
           <button
             type="button"
             onClick={handleLoginKami}
-            disabled={loggingInKami || Boolean(isPlannedProvider)}
+            disabled={loggingInKami || loginTaskActive || proxyUnavailable || Boolean(isPlannedProvider)}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border z-border z-surface z-ghost-btn font-medium cursor-pointer"
           >
             <LogIn size={13} />
-            <span>{loggingInKami ? "卡密登录中..." : "卡密批量续期"}</span>
+            <span>{loggingInKami ? "创建任务..." : "待激活批量登录"}</span>
           </button>
+          <label className="inline-flex items-center gap-1.5 px-2 py-1.5 border z-border rounded-xl z-text-sec">
+            <input
+              type="checkbox"
+              checked={headlessLogin}
+              onChange={(e) => setHeadlessLogin(e.target.checked)}
+              disabled={loggingInKami || updatingProxy}
+            />
+            无头模式
+          </label>
           <button
             type="button"
             onClick={() => onOpenExport(activeProvider)}
@@ -387,6 +599,12 @@ export const PoolConsole: React.FC<{
           </button>
         </div>
       </div>
+
+      {proxyUnavailable && (
+        <div className="border-l-2 border-amber-500 px-3 py-2 text-xs text-amber-800" role="status">
+          当前代理池没有健康节点，批量登录已暂停。请先测活代理或更新代理列表。
+        </div>
+      )}
 
       {/* Provider Tabs + Kami Queue */}
       <div className="flex flex-wrap items-center justify-between gap-3 border-b z-border text-xs">
@@ -440,6 +658,26 @@ export const PoolConsole: React.FC<{
           text={notice.text}
           onClose={() => setNotice(null)}
         />
+      )}
+
+      {loginTaskActive && loginTask && (
+        <div className="p-card rounded-xl px-3.5 py-3 space-y-2 text-xs" role="status" aria-live="polite">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="font-medium">
+              后台登录任务：{loginTask.completed}/{loginTask.total}
+            </span>
+            <span className="z-text-muted">
+              {loginTask.current_email ? `正在处理 ${loginTask.current_email}` : "等待执行"}
+              {` · ${loginTask.success} 成功 · ${loginTask.failed} 失败`}
+            </span>
+          </div>
+          <progress
+            className="w-full h-1.5 accent-emerald-600"
+            max={Math.max(loginTask.total, 1)}
+            value={loginTask.completed}
+            aria-label="批量登录进度"
+          />
+        </div>
       )}
 
       {isPlannedProvider && activeProviderSummary ? (
@@ -543,6 +781,39 @@ export const PoolConsole: React.FC<{
                   </button>
                 ))}
               </div>
+
+              <button
+                type="button"
+                onClick={selectVisibleKamiAccounts}
+                disabled={
+                  eligibleVisibleAccounts.every((item) => item.status === "active") ||
+                  loginTaskActive
+                }
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl border z-border z-surface z-ghost-btn cursor-pointer disabled:opacity-50"
+              >
+                选择待激活账号
+              </button>
+              <button
+                type="button"
+                onClick={selectVisibleAccounts}
+                disabled={filteredAccounts.length === 0 || loginTaskActive}
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl border z-border z-surface z-ghost-btn cursor-pointer disabled:opacity-50"
+              >
+                全量选择
+              </button>
+              {selectedCount > 0 && (
+                <>
+                  <span className="z-text-muted">已选 {selectedCount}</span>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedAccountIds(new Set())}
+                    disabled={loggingInKami || loginTaskActive || updatingProxy}
+                    className="px-2 py-1.5 rounded-xl z-text-muted z-ghost-btn cursor-pointer"
+                  >
+                    清除选择
+                  </button>
+                </>
+              )}
             </div>
 
             <div className="flex items-center gap-2">
@@ -579,6 +850,42 @@ export const PoolConsole: React.FC<{
             </div>
           </div>
 
+          {selectedCount > 0 && (
+            <div className="flex flex-wrap items-center justify-between gap-2.5 p-card rounded-xl px-3 py-2.5 text-xs">
+              <span className="z-text-muted">已选择 {selectedCount} 个账号</span>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowBulkEdit(true)}
+                  disabled={updatingProxy || loggingInKami || loginTaskActive || Boolean(isPlannedProvider)}
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl border z-border z-surface z-ghost-btn cursor-pointer disabled:opacity-50"
+                >
+                  批量编辑
+                </button>
+                <button
+                  type="button"
+                  onClick={handleLoginSelectedKami}
+                  disabled={
+                    loggingInKami ||
+                    updatingProxy ||
+                    loginTaskActive ||
+                    proxyUnavailable ||
+                    Boolean(isPlannedProvider) ||
+                    selectedCount === 0
+                  }
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl z-primary-btn font-medium cursor-pointer disabled:opacity-50"
+                >
+                  <LogIn size={13} />
+                  <span>
+                    {loggingInKami
+                      ? "登录中..."
+                      : "批量重新登录"}
+                  </span>
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* Linear / Supabase Style Precision Account Table */}
           <div className="p-card rounded-2xl overflow-hidden">
             <div className="overflow-x-auto">
@@ -588,6 +895,15 @@ export const PoolConsole: React.FC<{
                     className="border-b z-border z-text-muted"
                     style={{ background: "var(--bg-input)" }}
                   >
+                    <th className="py-3 px-2 w-9 text-center">
+                      <input
+                        type="checkbox"
+                        checked={allVisibleSelected}
+                        onChange={toggleVisibleSelection}
+                        disabled={filteredAccounts.length === 0 || loginTaskActive}
+                        aria-label="全量选择当前筛选账号"
+                      />
+                    </th>
                     <th className="py-3 px-4 font-medium">账号邮箱 / 身份</th>
                     <th className="py-3 px-3 font-medium">分级健康状态</th>
                     <th className="py-3 px-3 font-medium">粘性出口代理</th>
@@ -623,6 +939,17 @@ export const PoolConsole: React.FC<{
 
                     return (
                       <tr key={acc.id} className="z-row-hover group">
+                        <td className="py-3 px-2 text-center">
+                          <input
+                            type="checkbox"
+                            aria-label={`选择 ${acc.email || acc.id} 进行重新登录`}
+                            checked={selectedAccountIds.has(acc.id)}
+                            disabled={
+                              loggingInKami || updatingProxy || loginTaskActive
+                            }
+                            onChange={() => toggleAccountSelection(acc.id)}
+                          />
+                        </td>
                         <td className="py-3 px-4">
                           <div className="flex items-center gap-2.5">
                             <div
@@ -809,7 +1136,7 @@ export const PoolConsole: React.FC<{
                   {filteredAccounts.length === 0 && (
                     <tr>
                       <td
-                        colSpan={6}
+                        colSpan={7}
                         className="py-10 text-center z-text-muted"
                       >
                         当前号池无匹配账号，可点击右上角「导入卡密 / JSON」添加账号。
@@ -894,6 +1221,13 @@ export const PoolConsole: React.FC<{
 
             <div className="space-y-1.5">
               <label className="font-medium z-text-sec block">凭据内容</label>
+              <span className="z-text-muted">
+                {importFormat === "sub2api_json"
+                  ? "支持完整 Sub2API 导出 JSON"
+                  : importFormat === "free_uuid"
+                    ? `已填写 ${importCredentialCount} 行 UUID`
+                    : `已填写 ${importCredentialCount} 行凭据`}
+              </span>
               <textarea
                 rows={7}
                 value={importText}
@@ -904,16 +1238,9 @@ export const PoolConsole: React.FC<{
             </div>
 
             {importFormat === "kami" && (
-              <label className="flex items-center gap-2 px-3 py-2.5 rounded-xl border z-border z-muted cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={autoLogin}
-                  onChange={(e) => setAutoLogin(e.target.checked)}
-                />
-                <span>
-                  导入后立即启动无头 Chrome (CDP) 自动提取 Access Token 并写入 access_tokens.txt
-                </span>
-              </label>
+              <div className="px-3 py-2.5 rounded-lg border z-border z-muted">
+                导入后可全量选择账号，使用后台批量登录任务；账号按序处理并动态更新状态。
+              </div>
             )}
 
             <div className="flex justify-end gap-2 pt-2 border-t z-border">
@@ -932,6 +1259,92 @@ export const PoolConsole: React.FC<{
                 className="px-4 py-1.5 rounded-xl z-primary-btn font-medium cursor-pointer"
               >
                 {importing ? "正在导入处理..." : "确认导入并持久化"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showBulkEdit && (
+        <div
+          className="fixed inset-0 z-50 bg-black/55 backdrop-blur-xs flex items-center justify-center p-4"
+          onClick={() => !updatingProxy && setShowBulkEdit(false)}
+        >
+          <div
+            className="p-surface z-text rounded-xl max-w-lg w-full p-5 shadow-2xl space-y-4 text-xs"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between pb-3 border-b z-border">
+              <div>
+                <h3 className="text-sm font-semibold">批量编辑账号</h3>
+                <p className="z-text-muted mt-0.5">已选择 {selectedCount} 个账号</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => !updatingProxy && setShowBulkEdit(false)}
+                disabled={updatingProxy}
+                className="p-1 rounded-lg border z-border z-ghost-btn cursor-pointer"
+                aria-label="关闭批量编辑"
+              >
+                <X size={14} />
+              </button>
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="font-medium z-text-sec block" htmlFor="bulk-proxy">
+                出口代理
+              </label>
+              <select
+                id="bulk-proxy"
+                value={bulkProxyUrl}
+                onChange={(e) => setBulkProxyUrl(e.target.value)}
+                disabled={updatingProxy || loginTaskActive}
+                className="w-full px-3 py-2 rounded-lg p-input"
+              >
+                {proxyNodes.length === 0 ? (
+                  <option value="">直连出口（未配置代理）</option>
+                ) : (
+                  <option value="" disabled>选择健康代理</option>
+                )}
+                {proxyNodes.map((node, index) => (
+                  <option key={node.url} value={node.url} disabled={node.status !== "active"}>
+                    {proxyOptionLabel(node, index)}
+                  </option>
+                ))}
+              </select>
+              <p className="z-text-muted">
+                新代理立即应用到所选账号；服务重启后会按代理池重新初始化绑定。
+              </p>
+            </div>
+
+            {proxyNodes.length > 0 && !proxyNodes.some((node) => node.status === "active") && (
+              <p className="text-amber-700">
+                当前没有健康代理节点，请先到代理与模型目录页测活或更新代理池。
+              </p>
+            )}
+
+            <div className="flex justify-end gap-2 pt-2 border-t z-border">
+              <button
+                type="button"
+                disabled={updatingProxy}
+                onClick={() => setShowBulkEdit(false)}
+                className="px-3.5 py-1.5 rounded-lg border z-border z-ghost-btn font-medium cursor-pointer"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                disabled={
+                  updatingProxy ||
+                  loginTaskActive ||
+                  selectedCount === 0 ||
+                  Boolean(isPlannedProvider) ||
+                  (proxyNodes.length > 0 && !bulkProxyUrl)
+                }
+                onClick={handleBulkProxyUpdate}
+                className="px-4 py-1.5 rounded-lg z-primary-btn font-medium cursor-pointer disabled:opacity-50"
+              >
+                {updatingProxy ? "正在更新..." : "应用到所选账号"}
               </button>
             </div>
           </div>

@@ -1,7 +1,11 @@
 package provider
 
 import (
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"ai-web-free/internal/accounts"
 	"ai-web-free/internal/config"
@@ -93,6 +97,65 @@ func TestChatGPTProviderImportAndActions(t *testing.T) {
 	}
 	if p.Stats().Total != 1 {
 		t.Fatalf("expected 1 remaining account")
+	}
+}
+
+func TestKamiLoginBatchTaskUpdatesPreflightResults(t *testing.T) {
+	pool := accounts.NewPool(nil)
+	acct := accounts.CreateAccount("", accounts.TypeFree, accounts.DefaultProfiles)
+	acct.ID = "missing-kami-credentials"
+	acct.Email = "pending@example.com"
+	pool.AddAccount(acct)
+	plugin := NewChatGPTProvider(pool, proxy.NewPool(nil), &config.Config{}, nil)
+
+	task, err := plugin.StartKamiLoginBatch([]string{acct.ID}, true)
+	if err != nil {
+		t.Fatalf("start login task: %v", err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for task.Status != "completed" && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+		task, _ = plugin.KamiLoginTaskSnapshot(task.ID)
+	}
+	if task.Status != "completed" || task.Total != 1 || task.Completed != 1 || task.Failed != 1 {
+		t.Fatalf("unexpected completed task: %+v", task)
+	}
+	if len(task.Results) != 1 || task.Results[0].OK || task.Results[0].Error != "账号未配置完整卡密凭据" {
+		t.Fatalf("expected an incremental preflight failure result, got %+v", task.Results)
+	}
+}
+
+func TestKamiLoginBatchDoesNotStartBrowserWhenProxyPreflightFails(t *testing.T) {
+	proxyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer proxyServer.Close()
+
+	pool := accounts.NewPool(nil)
+	acct := accounts.CreateAccount("access-token", accounts.TypeFree, accounts.DefaultProfiles)
+	acct.ID = "proxy-preflight"
+	acct.Email = "proxy-preflight@example.com"
+	acct.Password = "password"
+	acct.TOTPSecret = "JBSWY3DPEHPK3PXP"
+	acct.Proxy = proxyServer.URL
+	pool.AddAccount(acct)
+	proxyPool := proxy.NewPool([]string{proxyServer.URL})
+	plugin := NewChatGPTProvider(pool, proxyPool, &config.Config{}, nil)
+
+	task, err := plugin.StartKamiLoginBatch([]string{acct.ID}, true)
+	if err != nil {
+		t.Fatalf("start login task: %v", err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for task.Status != "completed" && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+		task, _ = plugin.KamiLoginTaskSnapshot(task.ID)
+	}
+	if task.Status != "completed" || task.Completed != 1 || task.Failed != 1 || len(task.Results) != 1 {
+		t.Fatalf("expected proxy preflight failure result, got %+v", task)
+	}
+	if !strings.Contains(task.Results[0].Error, "代理") || acct.Proxy != proxyServer.URL {
+		t.Fatalf("expected proxy failure without direct egress, result=%+v proxy=%q", task.Results[0], acct.Proxy)
 	}
 }
 
