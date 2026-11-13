@@ -1,7 +1,6 @@
 package provider
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,12 +9,16 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"ai-web-free/internal/accounts"
+
+	"github.com/chromedp/cdproto/network"
+	"github.com/chromedp/chromedp"
 )
 
-// KamiLoginOutcome 单账号 Playwright 登录提取结果
+// KamiLoginOutcome 单账号浏览器登录提取结果
 type KamiLoginOutcome struct {
 	Email            string `json:"email"`
 	OK               bool   `json:"ok"`
@@ -27,124 +30,301 @@ type KamiLoginOutcome struct {
 	Error            string `json:"error,omitempty"`
 }
 
-type kamiWorkerInput struct {
-	Proxy    string            `json:"proxy,omitempty"`
-	Accounts []kamiWorkerEntry `json:"accounts"`
-}
-
-type kamiWorkerEntry struct {
-	Email      string `json:"email"`
-	Password   string `json:"password"`
-	TOTPSecret string `json:"totp_secret"`
-	Proxy      string `json:"proxy,omitempty"`
-}
-
-type kamiWorkerOutput struct {
-	OK      bool               `json:"ok"`
-	Error   string             `json:"error,omitempty"`
-	Results []KamiLoginOutcome `json:"results"`
-}
-
-func resolveKamiScriptPath() (string, error) {
-	candidates := []string{
-		filepath.Join("scripts", "kami_login.py"),
+// resolveChromeExecutable 查找本机可用的 Chrome/Chromium 可执行文件。
+func resolveChromeExecutable() (string, error) {
+	if envPath := strings.TrimSpace(os.Getenv("CHROME_PATH")); envPath != "" {
+		if st, err := os.Stat(envPath); err == nil && !st.IsDir() {
+			return envPath, nil
+		}
 	}
-	if exe, err := os.Executable(); err == nil {
-		candidates = append(candidates, filepath.Join(filepath.Dir(exe), "scripts", "kami_login.py"))
-	}
-	for _, p := range candidates {
-		if st, err := os.Stat(p); err == nil && !st.IsDir() {
+	for _, bin := range []string{"google-chrome", "google-chrome-stable", "chromium", "chromium-browser"} {
+		if p, err := exec.LookPath(bin); err == nil {
 			return p, nil
 		}
 	}
-	return "", errors.New("未找到 scripts/kami_login.py 登录脚本")
+	if home, err := os.UserHomeDir(); err == nil {
+		patterns := []string{
+			filepath.Join(home, ".cache", "ms-playwright", "chromium-*", "chrome-linux*", "chrome"),
+			filepath.Join(home, ".cache", "ms-playwright", "chromium-*", "chrome-linux", "chrome"),
+		}
+		for _, pat := range patterns {
+			if matches, err := filepath.Glob(pat); err == nil && len(matches) > 0 {
+				return matches[len(matches)-1], nil
+			}
+		}
+	}
+	return "", errors.New("未找到 Chrome/Chromium 可执行文件，请安装 google-chrome/chromium 或设置 CHROME_PATH")
 }
 
-// RunKamiPlaywrightLogin 调用 Python Playwright 脚本批量登录卡密账号并提取 AccessToken / SessionToken。
+// RunKamiPlaywrightLogin 使用纯 Go chromedp (CDP) 驱动本机 Chrome/Chromium 批量登录卡密账号并提取 AccessToken / SessionToken。
 func RunKamiPlaywrightLogin(targets []*accounts.Account, defaultProxy string, headless bool) (map[string]KamiLoginOutcome, error) {
 	if len(targets) == 0 {
 		return map[string]KamiLoginOutcome{}, nil
 	}
-	scriptPath, err := resolveKamiScriptPath()
+	chromePath, err := resolveChromeExecutable()
 	if err != nil {
 		return nil, err
 	}
-	pythonBin := "python3"
-	if _, err := exec.LookPath(pythonBin); err != nil {
-		pythonBin = "python"
-		if _, err2 := exec.LookPath(pythonBin); err2 != nil {
-			return nil, errors.New("系统未安装 python3，无法自动执行 Playwright 登录")
-		}
+	if !headless && os.Getenv("DISPLAY") == "" {
+		_ = os.Setenv("DISPLAY", ":0")
 	}
 
-	input := kamiWorkerInput{
-		Proxy:    defaultProxy,
-		Accounts: make([]kamiWorkerEntry, 0, len(targets)),
-	}
-	for _, a := range targets {
-		if a == nil || a.Email == "" || a.Password == "" || a.TOTPSecret == "" {
+	out := make(map[string]KamiLoginOutcome, len(targets))
+	for _, acct := range targets {
+		if acct == nil || acct.Email == "" || acct.Password == "" || acct.TOTPSecret == "" {
 			continue
 		}
-		input.Accounts = append(input.Accounts, kamiWorkerEntry{
-			Email:      a.Email,
-			Password:   a.Password,
-			TOTPSecret: a.TOTPSecret,
-			Proxy:      a.Proxy,
-		})
-	}
-	if len(input.Accounts) == 0 {
-		return map[string]KamiLoginOutcome{}, nil
-	}
-
-	payloadBytes, err := json.Marshal(input)
-	if err != nil {
-		return nil, err
-	}
-
-	timeout := time.Duration(len(input.Accounts)) * 3 * time.Minute
-	if timeout < 3*time.Minute {
-		timeout = 3 * time.Minute
-	}
-	if timeout > 20*time.Minute {
-		timeout = 20 * time.Minute
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-
-	args := []string{scriptPath, "--stdin-json", "--json-output"}
-	if headless {
-		args = append(args, "--headless")
-	}
-	cmd := exec.CommandContext(ctx, pythonBin, args...)
-	cmd.Stdin = bytes.NewReader(payloadBytes)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		errMsg := strings.TrimSpace(stderr.String())
-		if errMsg == "" {
-			errMsg = strings.TrimSpace(stdout.String())
+		proxyURL := strings.TrimSpace(acct.Proxy)
+		if proxyURL == "" {
+			proxyURL = strings.TrimSpace(defaultProxy)
 		}
-		if errMsg == "" {
-			errMsg = err.Error()
-		}
-		return nil, fmt.Errorf("Playwright 登录脚本执行失败: %s", errMsg)
-	}
-
-	var parsed kamiWorkerOutput
-	if err := json.Unmarshal(stdout.Bytes(), &parsed); err != nil {
-		return nil, fmt.Errorf("解析登录脚本输出失败: %w (stdout=%s)", err, strings.TrimSpace(stdout.String()))
-	}
-	if !parsed.OK && parsed.Error != "" {
-		return nil, errors.New(parsed.Error)
-	}
-
-	out := make(map[string]KamiLoginOutcome, len(parsed.Results))
-	for _, r := range parsed.Results {
-		out[strings.ToLower(strings.TrimSpace(r.Email))] = r
+		outcome := loginSingleAccountCDP(chromePath, acct.Email, acct.Password, acct.TOTPSecret, proxyURL, headless)
+		out[strings.ToLower(strings.TrimSpace(acct.Email))] = outcome
 	}
 	return out, nil
+}
+
+func loginSingleAccountCDP(chromePath, email, password, totpSecret, proxyURL string, headless bool) KamiLoginOutcome {
+	outcome := KamiLoginOutcome{Email: email}
+
+	opts := append(chromedp.DefaultExecAllocatorOptions[:],
+		chromedp.ExecPath(chromePath),
+		chromedp.NoFirstRun,
+		chromedp.NoDefaultBrowserCheck,
+		chromedp.Flag("no-sandbox", true),
+		chromedp.Flag("disable-blink-features", "AutomationControlled"),
+		chromedp.Flag("disable-dev-shm-usage", true),
+		chromedp.UserAgent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"),
+		chromedp.WindowSize(1280, 800),
+	)
+	if headless {
+		opts = append(opts, chromedp.Flag("headless", "new"))
+	} else {
+		opts = append(opts, chromedp.Flag("headless", false))
+	}
+	if proxyURL != "" {
+		opts = append(opts, chromedp.ProxyServer(proxyURL))
+	}
+
+	allocCtx, allocCancel := chromedp.NewExecAllocator(context.Background(), opts...)
+	defer allocCancel()
+
+	ctx, cancel := chromedp.NewContext(allocCtx)
+	defer cancel()
+
+	ctx, timeoutCancel := context.WithTimeout(ctx, 130*time.Second)
+	defer timeoutCancel()
+
+	var mu sync.Mutex
+	var capturedAccessToken string
+	var capturedUserID string
+
+	setToken := func(token, userID string) {
+		mu.Lock()
+		defer mu.Unlock()
+		if capturedAccessToken == "" && token != "" {
+			capturedAccessToken = token
+		}
+		if capturedUserID == "" && userID != "" {
+			capturedUserID = userID
+		}
+	}
+	getToken := func() (string, string) {
+		mu.Lock()
+		defer mu.Unlock()
+		return capturedAccessToken, capturedUserID
+	}
+
+	if err := chromedp.Listen(ctx, func(ev any) {
+		switch e := ev.(type) {
+		case *network.EventRequestWillBeSent:
+			for k, v := range e.Request.Headers {
+				if strings.EqualFold(k, "authorization") {
+					if auth, ok := v.(string); ok && strings.HasPrefix(auth, "Bearer ey") {
+						tok := strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
+						if len(tok) > 50 {
+							setToken(tok, "")
+						}
+					}
+				}
+			}
+		case *network.EventResponseReceived:
+			if strings.Contains(e.Response.URL, "/api/auth/session") && e.Response.Status == 200 {
+				reqID := e.RequestID
+				go func() {
+					cctx, ccancel := context.WithTimeout(ctx, 5*time.Second)
+					defer ccancel()
+					res, err := chromedp.Call(cctx, network.GetResponseBody, network.GetResponseBodyParams{RequestID: reqID})
+					if err != nil {
+						return
+					}
+					var sessionResp struct {
+						AccessToken string `json:"accessToken"`
+						User        struct {
+							ID string `json:"id"`
+						} `json:"user"`
+					}
+					if err := json.Unmarshal([]byte(res.Body), &sessionResp); err == nil && sessionResp.AccessToken != "" {
+						setToken(sessionResp.AccessToken, sessionResp.User.ID)
+					}
+				}()
+			}
+		}
+	}); err != nil {
+		outcome.Error = fmt.Sprintf("注册网络监听失败: %v", err)
+		return outcome
+	}
+
+	if _, err := chromedp.Call(ctx, network.Enable, network.EnableParams{}); err != nil {
+		outcome.Error = fmt.Sprintf("启用网络监听失败: %v", err)
+		return outcome
+	}
+	if err := chromedp.Do(ctx, chromedp.Navigate("https://chatgpt.com/auth/login")); err != nil {
+		outcome.Error = fmt.Sprintf("打开登录页失败: %v", err)
+		return outcome
+	}
+
+	// 若落地页有 Log in 按钮则先点击
+	time.Sleep(2 * time.Second)
+	clickedLogin, _ := chromedp.Run(ctx, chromedp.Evaluate[bool](`(() => {
+		const btns = Array.from(document.querySelectorAll('button'));
+		const b = btns.find(el => el.offsetParent !== null && /\blog\s*in\b/i.test(el.innerText || ''));
+		if (b) { b.click(); return true; }
+		return false;
+	})()`))
+	if clickedLogin {
+		time.Sleep(2 * time.Second)
+	}
+
+	// 1. 填写邮箱并点击 Continue
+	emailSel := `input[name="username"], input[type="email"], #email-input`
+	if err := waitVisibleAndType(ctx, emailSel, email, 25*time.Second); err == nil {
+		time.Sleep(500 * time.Millisecond)
+		_ = clickContinueButton(ctx)
+	}
+
+	// 2. 填写密码并点击 Continue
+	passSel := `input[name="password"], input[type="password"]`
+	if err := waitVisibleAndType(ctx, passSel, password, 25*time.Second); err == nil {
+		time.Sleep(500 * time.Millisecond)
+		_ = clickContinueButton(ctx)
+	}
+
+	// 3. 填写 2FA TOTP
+	totpSel := `input[inputmode="numeric"], input[name="code"], input[autocomplete="one-time-code"], input[placeholder*="code" i]`
+	if err := waitVisible(ctx, totpSel, 12*time.Second); err == nil {
+		if code, _, totpErr := accounts.GenerateTOTP(totpSecret, time.Now()); totpErr == nil && code != "" {
+			_ = chromedp.Do(ctx,
+				chromedp.Focus(chromedp.CSS(totpSel)),
+				chromedp.SendKeys(chromedp.CSS(totpSel), code),
+			)
+			time.Sleep(500 * time.Millisecond)
+			_ = clickContinueButton(ctx)
+		}
+	}
+
+	// 4. 轮询等待登录完成并提取 Token
+	deadline := time.Now().Add(95 * time.Second)
+	for time.Now().Before(deadline) {
+		if tok, _ := getToken(); tok != "" {
+			break
+		}
+
+		currentURL, _ := chromedp.Run(ctx, chromedp.Location())
+		if strings.Contains(currentURL, "mfa-challenge") {
+			_ = clickContinueButton(ctx)
+		}
+
+		if strings.Contains(currentURL, "chatgpt.com") && !strings.Contains(currentURL, "auth0") && !strings.Contains(currentURL, "auth.openai.com") {
+			sessionJSON, err := chromedp.Run(ctx, chromedp.Evaluate[string](`(async () => {
+				try {
+					const r = await fetch('/api/auth/session');
+					if (!r.ok) return '';
+					return await r.text();
+				} catch (e) { return ''; }
+			})()`, chromedp.EvalAwaitPromise))
+			if err == nil && strings.Contains(sessionJSON, "accessToken") {
+				var parsed struct {
+					AccessToken string `json:"accessToken"`
+					User        struct {
+						ID string `json:"id"`
+					} `json:"user"`
+				}
+				if jErr := json.Unmarshal([]byte(sessionJSON), &parsed); jErr == nil && parsed.AccessToken != "" {
+					setToken(parsed.AccessToken, parsed.User.ID)
+					break
+				}
+			}
+		}
+		time.Sleep(2 * time.Second)
+	}
+
+	accessToken, userID := getToken()
+	if accessToken == "" {
+		currentURL, _ := chromedp.Run(ctx, chromedp.Location())
+		outcome.Error = fmt.Sprintf("未能获取到 AccessToken (当前 URL: %s)", currentURL)
+		return outcome
+	}
+
+	// 提取 __Secure-next-auth.session-token Cookie
+	var sessionCookie string
+	if cookieRes, err := chromedp.Call(ctx, network.GetCookies, network.GetCookiesParams{URLs: []string{"https://chatgpt.com"}}); err == nil {
+		for _, ck := range cookieRes.Cookies {
+			if ck.Name == "__Secure-next-auth.session-token" && ck.Value != "" {
+				sessionCookie = ck.Value
+				break
+			}
+		}
+	}
+
+	chatGPTAccountID := accounts.ExtractChatGPTAccountID(accessToken)
+	if chatGPTAccountID == "" {
+		chatGPTAccountID = userID
+	}
+	expiresAt := int64(0)
+	if exp := accounts.ExtractExpiresAt(accessToken); !exp.IsZero() {
+		expiresAt = exp.Unix()
+	} else {
+		expiresAt = time.Now().Add(10 * 24 * time.Hour).Unix()
+	}
+
+	outcome.OK = true
+	outcome.AccessToken = accessToken
+	outcome.SessionToken = sessionCookie
+	outcome.ChatGPTAccountID = chatGPTAccountID
+	outcome.ExpiresAt = expiresAt
+	return outcome
+}
+
+func waitVisible(ctx context.Context, selector string, timeout time.Duration) error {
+	cctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	return chromedp.Do(cctx, chromedp.WaitVisible(chromedp.CSS(selector)))
+}
+
+func waitVisibleAndType(ctx context.Context, selector, value string, timeout time.Duration) error {
+	cctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	return chromedp.Do(cctx,
+		chromedp.WaitVisible(chromedp.CSS(selector)),
+		chromedp.Focus(chromedp.CSS(selector)),
+		chromedp.SendKeys(chromedp.CSS(selector), value),
+	)
+}
+
+func clickContinueButton(ctx context.Context) error {
+	_, err := chromedp.Run(ctx, chromedp.Evaluate[bool](`(() => {
+		const selectors = ['button[type="submit"]', 'button[name="action"][value="default"]'];
+		for (const s of selectors) {
+			const el = document.querySelector(s);
+			if (el && el.offsetParent !== null) { el.click(); return true; }
+		}
+		const btns = Array.from(document.querySelectorAll('button'));
+		const match = btns.find(b => b.offsetParent !== null && /^(continue|verify|next|继续|验证|下一步)$/i.test((b.innerText || '').trim()));
+		if (match) { match.click(); return true; }
+		return false;
+	})()`))
+	return err
 }
 
 func (p *ChatGPTProvider) importKamiAccounts(rawText string, persist, autoLogin, headless bool) (ImportResult, error) {

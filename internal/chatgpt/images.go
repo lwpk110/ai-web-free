@@ -122,7 +122,7 @@ func DownloadImageBytes(client httpclient.AuroraHttpClient, url string, account 
 		return nil, err
 	}
 	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("image download failed: %s", string(body))
+		return nil, NewUpstreamError("image download failed", response.StatusCode, string(body))
 	}
 	return body, nil
 }
@@ -254,7 +254,11 @@ func CollectImageResults(response *http.Response, client httpclient.AuroraHttpCl
 			continue
 		}
 		if originalResponse.Error != nil {
-			return results, convID, strings.Join(textParts, ""), fmt.Errorf("image generation error: %v", originalResponse.Error)
+			errMsg := fmt.Sprintf("%v", originalResponse.Error)
+			if LooksLikeImageLimit(http.StatusTooManyRequests, errMsg) {
+				return results, convID, strings.Join(textParts, ""), NewUpstreamError("image generation error", http.StatusTooManyRequests, errMsg)
+			}
+			return results, convID, strings.Join(textParts, ""), fmt.Errorf("image generation error: %s", errMsg)
 		}
 		if originalResponse.ConversationID != convID {
 			if convID == "" {
@@ -302,7 +306,7 @@ func getConversation(client httpclient.AuroraHttpClient, account *accounts.Accou
 		return nil, err
 	}
 	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("get conversation failed: %s", string(body))
+		return nil, NewUpstreamError("get conversation failed", response.StatusCode, string(body))
 	}
 	var result map[string]interface{}
 	if err := json.Unmarshal(body, &result); err != nil {
@@ -367,6 +371,9 @@ func PollImageResults(client httpclient.AuroraHttpClient, account *accounts.Acco
 			continue
 		}
 		if message := findImageGenerationError(conversation); message != "" {
+			if LooksLikeImageLimit(http.StatusTooManyRequests, message) {
+				return nil, NewUpstreamError("image generation limit", http.StatusTooManyRequests, message)
+			}
 			return nil, errors.New(message)
 		}
 		results := collectImageResultsFromConversation(client, account, conversation)
@@ -473,7 +480,7 @@ func prepareImageConversation(client httpclient.AuroraHttpClient, account *accou
 		return "", err
 	}
 	if response.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("prepare image conversation failed: %s", string(body))
+		return "", NewUpstreamError("prepare image conversation failed", response.StatusCode, string(body))
 	}
 	var result struct {
 		ConduitToken string `json:"conduit_token"`
@@ -541,7 +548,7 @@ func GeneratePictureConversationImages(client httpclient.AuroraHttpClient, accou
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(response.Body)
-		return nil, "", fmt.Errorf("image conversation failed: %s", string(body))
+		return nil, "", NewUpstreamError("image conversation failed", response.StatusCode, string(body))
 	}
 	results, conversationID, upstreamText, err := CollectImageResults(response, client, account)
 	if err != nil {
@@ -663,7 +670,7 @@ func GeneratePictureConversationImagesWithReferences(client httpclient.AuroraHtt
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(response.Body)
-		return nil, "", fmt.Errorf("image conversation failed: %s", string(body))
+		return nil, "", NewUpstreamError("image conversation failed", response.StatusCode, string(body))
 	}
 	results, conversationID, upstreamText, err := CollectImageResults(response, client, account)
 	if err != nil {

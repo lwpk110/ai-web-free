@@ -39,6 +39,11 @@ func respondError(c *gin.Context, status int, err error) {
 // 替代旧的 secretFromAuthorization + accessTokenFromRefreshToken
 // 返回 (account, http_status, error)
 func resolveAccount(c *gin.Context, pool *accounts.Pool, cfg *config.Config, needsPaid bool) (*accounts.Account, int, error) {
+	return resolveAccountForCapability(c, pool, cfg, needsPaid, "", nil)
+}
+
+// resolveAccountForCapability 按目标能力与排除列表从号池解析可用账号，外部透传 Token 不受号池退避影响。
+func resolveAccountForCapability(c *gin.Context, pool *accounts.Pool, cfg *config.Config, needsPaid bool, capName string, exclude map[string]bool) (*accounts.Account, int, error) {
 	authHeader := c.GetHeader("Authorization")
 
 	// 提取 Bearer token
@@ -63,12 +68,13 @@ func resolveAccount(c *gin.Context, pool *accounts.Pool, cfg *config.Config, nee
 
 	expected := cfg.Authorization
 
-	// 无 token 或匹配全局密钥 → 先尝试 free,再 fallback 到 noauth
+	// 无 token 或匹配全局密钥 → 先尝试 free,仅当非付费且未开启 exclude 重试时 fallback 到 noauth
 	if token == "" || (expected != "" && token == expected) {
-		acct, err := pool.Acquire(accounts.TypeFree)
+		acct, err := pool.AcquireForCapability(accounts.TypeFree, capName, exclude)
 		if err != nil || acct == nil {
-			// free 池空时(无 session/access/refresh token 账号),fallback 到 noauth(UUID 设备)
-			acct, err = pool.Acquire(accounts.TypeNoAuth)
+			if !needsPaid || len(exclude) == 0 {
+				acct, err = pool.AcquireForCapability(accounts.TypeNoAuth, capName, exclude)
+			}
 		}
 		if err != nil || acct == nil {
 			return nil, http.StatusUnauthorized, ErrNoAvailable

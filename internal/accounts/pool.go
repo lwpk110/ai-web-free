@@ -83,6 +83,15 @@ func (p *Pool) AddAccount(acct *Account) {
 
 // Acquire 从对应类型数组中轮询获取一个可用账号
 func (p *Pool) Acquire(acctType AccountType) (*Account, error) {
+	return p.AcquireForCapability(acctType, "", nil)
+}
+
+func isImageCapability(capName string) bool {
+	return capName == CapImageGenerate.Name || capName == CapImageEdit.Name || capName == CapImageVariation.Name
+}
+
+// AcquireForCapability 按账号类型与能力轮询获取可用账号，跳过 exclude、全能力冷却及对应生图冷却中的账号。
+func (p *Pool) AcquireForCapability(acctType AccountType, capName string, exclude map[string]bool) (*Account, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -96,15 +105,33 @@ func (p *Pool) Acquire(acctType AccountType) (*Account, error) {
 		return nil, ErrNoAvailable
 	}
 
+	now := time.Now()
+	needImage := isImageCapability(capName)
 	entries := *slice
 	for i := 0; i < len(entries); i++ {
 		cur := (p.cursors[idx] + i) % len(entries)
-		if entries[cur].Status == StatusActive {
-			p.cursors[idx] = (cur + 1) % len(entries)
-			entries[cur].TotalCalls++
-			entries[cur].LastUsed = time.Now()
-			return entries[cur], nil
+		a := entries[cur]
+		if exclude != nil && exclude[a.ID] {
+			continue
 		}
+		// 冷却期届满时惰性恢复，避免请求侧必须等待后台巡检周期
+		if a.Status == StatusRateLimited && !a.IsInCooldown(now) {
+			a.Status = StatusActive
+			a.CooldownUntil = time.Time{}
+		}
+		if a.Status != StatusActive {
+			continue
+		}
+		if a.IsInCooldown(now) {
+			continue
+		}
+		if needImage && a.IsImageInCooldown(now) {
+			continue
+		}
+		p.cursors[idx] = (cur + 1) % len(entries)
+		a.TotalCalls++
+		a.LastUsed = now
+		return a, nil
 	}
 
 	return nil, ErrNoAvailable
@@ -117,6 +144,18 @@ func (p *Pool) Release(acct *Account, result error) {
 
 // ReportFailure 标记账号为过期，Acquire 时自动跳过，后续健康检查会尝试续期
 func (p *Pool) ReportFailure(acct *Account) bool {
+	return p.MarkExpired(acct, acctErrOrKeep(acct))
+}
+
+func acctErrOrKeep(acct *Account) string {
+	if acct == nil {
+		return ""
+	}
+	return acct.LastError
+}
+
+// MarkExpired 将账号标记为过期并递增失败计数。
+func (p *Pool) MarkExpired(acct *Account, reason string) bool {
 	if acct == nil {
 		return false
 	}
@@ -124,7 +163,34 @@ func (p *Pool) ReportFailure(acct *Account) bool {
 	defer p.mu.Unlock()
 	acct.Status = StatusExpired
 	acct.FailedCalls++
+	if reason != "" {
+		acct.LastError = reason
+	}
 	return true
+}
+
+// ReportRateLimit 根据限流作用域置入全能力冷却（StatusRateLimited）或仅生图局部冷却。
+func (p *Pool) ReportRateLimit(acct *Account, imageOnly bool, cooldown time.Duration, reason string) {
+	if acct == nil {
+		return
+	}
+	if cooldown <= 0 {
+		cooldown = 5 * time.Minute
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := time.Now()
+	until := now.Add(cooldown)
+	acct.FailedCalls++
+	if reason != "" {
+		acct.LastError = reason
+	}
+	if imageOnly {
+		acct.ImageCooldownUntil = until
+		return
+	}
+	acct.CooldownUntil = until
+	acct.Status = StatusRateLimited
 }
 
 // ExpiredAccounts 返回所有过期账号（用于健康检查）
@@ -167,14 +233,40 @@ func (p *Pool) StartHealthCheck(interval time.Duration, renew TokenRenewer) func
 }
 
 func (p *Pool) runHealthCheck(renew TokenRenewer) {
+	if recovered := p.RecoverCooldowns(); recovered > 0 {
+		log.Printf("[health] recovered %d account(s) from rate-limit cooldown", recovered)
+	}
+	if renew == nil {
+		return
+	}
+
+	seen := make(map[string]bool)
+	candidates := make([]*Account, 0)
 	for _, acct := range p.ExpiredAccounts() {
-		if acct.Status == StatusExpired && renew != nil {
-			if renew(acct) {
-				p.mu.Lock()
-				acct.Status = StatusActive
-				p.mu.Unlock()
-				log.Printf("[health] account %s renewed successfully", acct.ID[:8])
+		if acct != nil && !seen[acct.ID] {
+			seen[acct.ID] = true
+			candidates = append(candidates, acct)
+		}
+	}
+	for _, acct := range p.NeedsProactiveRenew(24 * time.Hour) {
+		if acct != nil && !seen[acct.ID] {
+			seen[acct.ID] = true
+			candidates = append(candidates, acct)
+		}
+	}
+
+	for _, acct := range candidates {
+		if renew(acct) {
+			p.mu.Lock()
+			acct.Status = StatusActive
+			acct.CooldownUntil = time.Time{}
+			acct.LastError = ""
+			p.mu.Unlock()
+			idShort := acct.ID
+			if len(idShort) > 8 {
+				idShort = idShort[:8]
 			}
+			log.Printf("[health] account %s renewed successfully", idShort)
 		}
 	}
 }
@@ -294,19 +386,20 @@ func tokenHashOf(token string) string {
 
 // PoolStats 号池聚合统计指标
 type PoolStats struct {
-	Total       int   `json:"total"`
-	Active      int   `json:"active"`
-	Pending     int   `json:"pending"`
-	Expired     int   `json:"expired"`
-	RateLimited int   `json:"rate_limited"`
-	Disabled    int   `json:"disabled"`
-	Banned      int   `json:"banned"`
-	FreeCount   int   `json:"free_count"`
-	NoAuthCount int   `json:"noauth_count"`
-	PUIDCount   int   `json:"puid_count"`
-	TempCount   int   `json:"temp_count"`
-	TotalCalls  int64 `json:"total_calls"`
-	FailedCalls int64 `json:"failed_calls"`
+	Total        int   `json:"total"`
+	Active       int   `json:"active"`
+	Pending      int   `json:"pending"`
+	Expired      int   `json:"expired"`
+	RateLimited  int   `json:"rate_limited"`
+	ImageLimited int   `json:"image_limited"`
+	Disabled     int   `json:"disabled"`
+	Banned       int   `json:"banned"`
+	FreeCount    int   `json:"free_count"`
+	NoAuthCount  int   `json:"noauth_count"`
+	PUIDCount    int   `json:"puid_count"`
+	TempCount    int   `json:"temp_count"`
+	TotalCalls   int64 `json:"total_calls"`
+	FailedCalls  int64 `json:"failed_calls"`
 }
 
 // AccountSnapshot 账号脱敏视图快照
@@ -323,11 +416,17 @@ type AccountSnapshot struct {
 	HasSessionToken    bool     `json:"has_session_token"`
 	HasKamiCredentials bool     `json:"has_kami_credentials"`
 	IsTemporary        bool     `json:"is_temporary"`
+	ImageLimited       bool     `json:"image_limited"`
 	Proxy              string   `json:"proxy"`
 	TLSProfile         string   `json:"tls_profile"`
 	TotalCalls         int64    `json:"total_calls"`
 	FailedCalls        int64    `json:"failed_calls"`
 	ExpiresAt          string   `json:"expires_at,omitempty"`
+	CooldownUntil      string   `json:"cooldown_until,omitempty"`
+	ImageCooldownUntil string   `json:"image_cooldown_until,omitempty"`
+	RenewState         string   `json:"renew_state,omitempty"`
+	RenewCooldownUntil string   `json:"renew_cooldown_until,omitempty"`
+	LastRenewError     string   `json:"last_renew_error,omitempty"`
 	RemainingDays      float64  `json:"remaining_days"`
 	LastUsed           string   `json:"last_used,omitempty"`
 	LastChecked        string   `json:"last_checked,omitempty"`
@@ -359,6 +458,7 @@ func capabilitiesForType(t AccountType) []string {
 
 func toSnapshot(a *Account) AccountSnapshot {
 	a.SyncJWTMetadata()
+	now := time.Now()
 	snap := AccountSnapshot{
 		ID:                 a.ID,
 		Type:               a.Type.String(),
@@ -372,10 +472,13 @@ func toSnapshot(a *Account) AccountSnapshot {
 		HasSessionToken:    a.SessionToken != "",
 		HasKamiCredentials: a.Password != "" && a.TOTPSecret != "",
 		IsTemporary:        a.IsTemporary,
+		ImageLimited:       a.IsImageInCooldown(now),
 		Proxy:              a.Proxy,
 		TLSProfile:         a.Fingerprint.TLSProfileName,
 		TotalCalls:         a.TotalCalls,
 		FailedCalls:        a.FailedCalls,
+		RenewState:         a.RenewState,
+		LastRenewError:     a.LastRenewError,
 		LastError:          a.LastError,
 		CreatedAt:          a.CreatedAt.Format(time.RFC3339),
 		Capabilities:       capabilitiesForType(a.Type),
@@ -384,6 +487,15 @@ func toSnapshot(a *Account) AccountSnapshot {
 		snap.ExpiresAt = a.ExpiresAt.Format(time.RFC3339)
 		days := time.Until(a.ExpiresAt).Hours() / 24.0
 		snap.RemainingDays = math.Round(days*10) / 10
+	}
+	if a.IsInCooldown(now) {
+		snap.CooldownUntil = a.CooldownUntil.Format(time.RFC3339)
+	}
+	if a.IsImageInCooldown(now) {
+		snap.ImageCooldownUntil = a.ImageCooldownUntil.Format(time.RFC3339)
+	}
+	if !a.RenewCooldownUntil.IsZero() && now.Before(a.RenewCooldownUntil) {
+		snap.RenewCooldownUntil = a.RenewCooldownUntil.Format(time.RFC3339)
 	}
 	if !a.LastUsed.IsZero() {
 		snap.LastUsed = a.LastUsed.Format(time.RFC3339)
@@ -401,11 +513,15 @@ func (p *Pool) Stats() PoolStats {
 	stats.NoAuthCount = len(p.noauth)
 	stats.FreeCount = len(p.free)
 	stats.PUIDCount = len(p.puid)
+	now := time.Now()
 
 	accumulate := func(a *Account) {
 		stats.Total++
 		stats.TotalCalls += a.TotalCalls
 		stats.FailedCalls += a.FailedCalls
+		if a.IsImageInCooldown(now) {
+			stats.ImageLimited++
+		}
 		switch a.Status {
 		case StatusActive:
 			stats.Active++
@@ -621,6 +737,143 @@ func (p *Pool) ExportKamiAccounts() []KamiAccount {
 				Password:   a.Password,
 				TOTPSecret: a.TOTPSecret,
 			})
+		}
+	}
+	return out
+}
+
+// RecoverCooldowns 将冷却期已届满的账号恢复为可用状态，并返回恢复计数。
+func (p *Pool) RecoverCooldowns() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := time.Now()
+	recovered := 0
+	for _, list := range [][]*Account{p.noauth, p.free, p.puid} {
+		for _, a := range list {
+			if !a.ImageCooldownUntil.IsZero() && !a.IsImageInCooldown(now) {
+				a.ImageCooldownUntil = time.Time{}
+			}
+			if a.Status == StatusRateLimited && !a.IsInCooldown(now) {
+				a.Status = StatusActive
+				a.CooldownUntil = time.Time{}
+				a.LastError = ""
+				recovered++
+			}
+		}
+	}
+	return recovered
+}
+
+// NeedsProactiveRenew 返回需要提前/自动续期的卡密账号（过期、缺 Token 或距离到期不足 within）。
+func (p *Pool) NeedsProactiveRenew(within time.Duration) []*Account {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := time.Now()
+	var out []*Account
+	for _, list := range [][]*Account{p.free, p.puid} {
+		for _, a := range list {
+			if a.IsTemporary || a.Password == "" || a.TOTPSecret == "" {
+				continue
+			}
+			// 若具备 refresh/session 凭据，则走常规刷新链路
+			if a.RefreshToken != "" || a.SessionToken != "" {
+				continue
+			}
+			if a.Status == StatusDisabled || a.Status == StatusBanned {
+				continue
+			}
+			if a.RenewState == "queued" || a.RenewState == "running" {
+				continue
+			}
+			if !a.RenewCooldownUntil.IsZero() && now.Before(a.RenewCooldownUntil) {
+				continue
+			}
+			due := a.Status == StatusExpired || a.Token == ""
+			if !due && within > 0 && !a.ExpiresAt.IsZero() && a.ExpiresAt.Sub(now) < within {
+				due = true
+			}
+			if due {
+				out = append(out, a)
+			}
+		}
+	}
+	return out
+}
+
+// BoundProxyCounts 统计每个代理 URL 当前绑定的账号数量（含临时账号）。
+func (p *Pool) BoundProxyCounts() map[string]int {
+	counts := make(map[string]int)
+	p.mu.Lock()
+	for _, list := range [][]*Account{p.noauth, p.free, p.puid} {
+		for _, a := range list {
+			if a.Proxy != "" {
+				counts[a.Proxy]++
+			}
+		}
+	}
+	p.mu.Unlock()
+
+	p.tempMu.RLock()
+	for _, a := range p.temporary {
+		if a != nil && a.Proxy != "" {
+			counts[a.Proxy]++
+		}
+	}
+	p.tempMu.RUnlock()
+	return counts
+}
+
+// RebindAccountProxy 为账号切换代理并重建 TLS 客户端。
+func (p *Pool) RebindAccountProxy(acct *Account, newProxy string) error {
+	if acct == nil {
+		return nil
+	}
+	p.mu.Lock()
+	acct.Proxy = newProxy
+	p.mu.Unlock()
+	return acct.InitClient()
+}
+
+// ReconcileProxies 遍历号池账号，当绑定代理满足 shouldRebind 时迁移至 pickHealthy 返回的新代理。
+func (p *Pool) ReconcileProxies(shouldRebind func(proxyURL string) bool, pickHealthy func(exclude map[string]bool) string) int {
+	if shouldRebind == nil || pickHealthy == nil {
+		return 0
+	}
+	p.mu.Lock()
+	var targets []*Account
+	for _, list := range [][]*Account{p.free, p.puid, p.noauth} {
+		for _, a := range list {
+			if a.Proxy != "" && shouldRebind(a.Proxy) {
+				targets = append(targets, a)
+			}
+		}
+	}
+	p.mu.Unlock()
+
+	migrated := 0
+	for _, a := range targets {
+		oldProxy := a.Proxy
+		next := pickHealthy(map[string]bool{oldProxy: true})
+		if next == oldProxy {
+			continue
+		}
+		if err := p.RebindAccountProxy(a, next); err == nil {
+			migrated++
+		}
+	}
+	return migrated
+}
+
+// AllPersistentAccounts 返回所有非临时 Free/PUID 账号（用于导出等批处理）。
+func (p *Pool) AllPersistentAccounts() []*Account {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]*Account, 0, len(p.free)+len(p.puid))
+	for _, list := range [][]*Account{p.free, p.puid} {
+		for _, a := range list {
+			if !a.IsTemporary {
+				out = append(out, a)
+			}
 		}
 	}
 	return out

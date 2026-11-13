@@ -91,9 +91,17 @@ type Account struct {
 	WSSActor interface{} // *WSSActor — 避免 import 循环
 
 	// 状态
-	Status    AccountStatus
-	ExpiresAt time.Time
-	LastError string
+	Status             AccountStatus
+	ExpiresAt          time.Time
+	CooldownUntil      time.Time
+	ImageCooldownUntil time.Time
+	LastError          string
+
+	// 卡密自动续期状态
+	RenewState         string
+	RenewCooldownUntil time.Time
+	RenewFailures      int
+	LastRenewError     string
 
 	// 统计
 	TotalCalls  int64
@@ -101,6 +109,16 @@ type Account struct {
 	LastUsed    time.Time
 	LastChecked time.Time
 	CreatedAt   time.Time
+}
+
+// IsInCooldown reports whether the account is currently in full-request cooldown.
+func (a *Account) IsInCooldown(now time.Time) bool {
+	return !a.CooldownUntil.IsZero() && now.Before(a.CooldownUntil)
+}
+
+// IsImageInCooldown reports whether the account is currently in image-generation cooldown.
+func (a *Account) IsImageInCooldown(now time.Time) bool {
+	return !a.ImageCooldownUntil.IsZero() && now.Before(a.ImageCooldownUntil)
 }
 
 // BrowserFingerprint 浏览器指纹（所有参数自洽配套）

@@ -7,6 +7,7 @@ import (
 
 	"ai-web-free/httpclient/bogdanfinn"
 	"ai-web-free/internal/accounts"
+	"ai-web-free/internal/audit"
 	"ai-web-free/internal/chatgpt"
 	"ai-web-free/internal/config"
 	"ai-web-free/internal/provider"
@@ -26,13 +27,48 @@ func optionsHandler(c *gin.Context) {
 	})
 }
 
+// RouterDeps 聚合 RegisterRouterWithDeps 所需的运行时依赖。
+type RouterDeps struct {
+	AccountPool *accounts.Pool
+	ProxyPool   *proxy.Pool
+	Registry    *provider.Registry
+	Config      *config.Config
+	KamiWorker  *provider.KamiRenewWorker
+	AuditLog    *audit.RingBuffer
+}
+
 func RegisterRouter(accountPool *accounts.Pool, proxyPool *proxy.Pool, registry *provider.Registry, cfg *config.Config) *gin.Engine {
+	return RegisterRouterWithDeps(RouterDeps{
+		AccountPool: accountPool,
+		ProxyPool:   proxyPool,
+		Registry:    registry,
+		Config:      cfg,
+	})
+}
+
+func RegisterRouterWithDeps(deps RouterDeps) *gin.Engine {
+	accountPool := deps.AccountPool
+	proxyPool := deps.ProxyPool
+	registry := deps.Registry
+	cfg := deps.Config
+
+	rt := &GatewayRuntime{
+		AccountPool: accountPool,
+		ProxyPool:   proxyPool,
+		KamiWorker:  deps.KamiWorker,
+		AuditLog:    deps.AuditLog,
+		Config:      cfg,
+	}
 	chatHandler := NewChatHandler(accountPool, cfg)
 	imageHandler := NewImageHandler(accountPool, cfg)
 	audioHandler := NewAudioHandler(accountPool, cfg)
 	authHandler := NewAuthHandler(accountPool)
 	modelsHandler := NewModelsHandler(accountPool, cfg)
 	adminHandler := NewAdminHandler(registry, proxyPool, cfg)
+	chatHandler.SetRuntime(rt)
+	imageHandler.SetRuntime(rt)
+	audioHandler.SetRuntime(rt)
+	adminHandler.SetRuntime(rt)
 
 	// 初始化基础前置参数（DPL、BasicCookies 等）
 	proxyUrl := cfg.ProxyURL
@@ -75,17 +111,27 @@ func RegisterRouter(accountPool *accounts.Pool, proxyPool *proxy.Pool, registry 
 	router.GET("/ping", func(c *gin.Context) { c.JSON(200, gin.H{"message": "pong"}) })
 
 	// ─── 管理端 Admin APIs (/admin/api/v1/*) ───────────────────────
+	adminToken := ""
+	if cfg != nil {
+		adminToken = cfg.AdminToken
+	}
 	adminGroup := router.Group("/admin/api/v1")
+	adminGroup.Use(middlewares.AdminAuthorization(adminToken))
 	{
+		adminGroup.GET("/auth/status", adminHandler.AuthStatus)
 		adminGroup.GET("/overview", adminHandler.Overview)
+		adminGroup.GET("/logs", adminHandler.ListLogs)
+		adminGroup.GET("/proxies", adminHandler.ListProxies)
+		adminGroup.POST("/proxies/probe", adminHandler.ProbeProxies)
+		adminGroup.POST("/proxies", adminHandler.UpdateProxies)
 		adminGroup.GET("/providers", adminHandler.ListProviders)
 		adminGroup.GET("/providers/:provider/stats", adminHandler.ProviderStats)
 		adminGroup.GET("/providers/:provider/accounts", adminHandler.ListAccounts)
+		adminGroup.GET("/providers/:provider/export", adminHandler.ExportAccounts)
 		adminGroup.POST("/providers/:provider/accounts/import", adminHandler.ImportAccounts)
 		adminGroup.POST("/providers/:provider/accounts/kami-login", adminHandler.LoginKamiAccounts)
 		adminGroup.POST("/providers/:provider/accounts/:id/action", adminHandler.AccountAction)
 		adminGroup.POST("/providers/:provider/pool/probe-all", adminHandler.ProbeAllAccounts)
-		adminGroup.POST("/proxies", adminHandler.UpdateProxies)
 	}
 
 	router.POST("/auth/session", authHandler.Session)

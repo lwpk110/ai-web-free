@@ -1,15 +1,20 @@
 package handler
 
 import (
+	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"ai-web-free/internal/accounts"
+	"ai-web-free/internal/audit"
 	"ai-web-free/internal/config"
 	"ai-web-free/internal/provider"
 	"ai-web-free/internal/proxy"
+	"ai-web-free/middlewares"
 
 	"github.com/gin-gonic/gin"
 )
@@ -18,6 +23,7 @@ type AdminHandler struct {
 	registry  *provider.Registry
 	proxyPool *proxy.Pool
 	cfg       *config.Config
+	runtime   *GatewayRuntime
 	startedAt time.Time
 }
 
@@ -30,7 +36,64 @@ func NewAdminHandler(reg *provider.Registry, proxyPool *proxy.Pool, cfg *config.
 	}
 }
 
-// Overview 返回网关全局总览、代理池状态及所有供应商插件统计
+// SetRuntime 注入运维句柄所需的号池、队列与审计运行态。
+func (h *AdminHandler) SetRuntime(rt *GatewayRuntime) {
+	h.runtime = rt
+}
+
+func (h *AdminHandler) accountPool() *accounts.Pool {
+	if h.runtime != nil {
+		return h.runtime.AccountPool
+	}
+	return nil
+}
+
+func (h *AdminHandler) auditLog() *audit.RingBuffer {
+	if h.runtime != nil {
+		return h.runtime.AuditLog
+	}
+	return nil
+}
+
+func (h *AdminHandler) kamiWorker() *provider.KamiRenewWorker {
+	if h.runtime != nil && h.runtime.KamiWorker != nil {
+		return h.runtime.KamiWorker
+	}
+	if h.registry != nil {
+		if p, ok := h.registry.Get("chatgpt"); ok {
+			if cg, ok := p.(*provider.ChatGPTProvider); ok {
+				return cg.KamiWorker()
+			}
+		}
+	}
+	return nil
+}
+
+func (h *AdminHandler) boundProxyCounts() map[string]int {
+	if pool := h.accountPool(); pool != nil {
+		return pool.BoundProxyCounts()
+	}
+	return map[string]int{}
+}
+
+func buildProxySummary(nodes []proxy.NodeStatus) gin.H {
+	active := 0
+	cooling := 0
+	for _, n := range nodes {
+		if n.Status == "cooling" {
+			cooling++
+		} else {
+			active++
+		}
+	}
+	return gin.H{
+		"total":   len(nodes),
+		"active":  active,
+		"cooling": cooling,
+	}
+}
+
+// Overview 返回网关全局总览、代理池健康摘要、卡密队列状态及供应商插件统计。
 func (h *AdminHandler) Overview(c *gin.Context) {
 	descriptors := h.registry.ListDescriptors()
 	providerSummaries := make([]gin.H, 0, len(descriptors))
@@ -47,9 +110,20 @@ func (h *AdminHandler) Overview(c *gin.Context) {
 	}
 
 	var proxies []string
+	var proxyNodes []proxy.NodeStatus
 	if h.proxyPool != nil {
 		proxies = h.proxyPool.List()
+		proxyNodes = h.proxyPool.Snapshots(h.boundProxyCounts())
+	} else {
+		proxies = []string{}
+		proxyNodes = []proxy.NodeStatus{}
 	}
+
+	kamiStats := provider.KamiWorkerStats{}
+	if kw := h.kamiWorker(); kw != nil {
+		kamiStats = kw.Stats()
+	}
+	_, auditSummary := h.auditLog().Query("all", "", 1)
 
 	c.JSON(http.StatusOK, gin.H{
 		"service":                "ai-web-free",
@@ -57,10 +131,14 @@ func (h *AdminHandler) Overview(c *gin.Context) {
 		"uptime_seconds":         int64(time.Since(h.startedAt).Seconds()),
 		"started_at":             h.startedAt.Format(time.RFC3339),
 		"auth_enabled":           h.cfg != nil && h.cfg.Authorization != "",
+		"admin_auth_required":    h.cfg != nil && h.cfg.AdminToken != "",
 		"external_token_enabled": h.cfg != nil && h.cfg.EnableExternalToken,
 		"stream_mode":            h.cfg != nil && h.cfg.StreamMode,
 		"proxies_count":          len(proxies),
 		"proxies":                proxies,
+		"proxies_summary":        buildProxySummary(proxyNodes),
+		"kami_worker":            kamiStats,
+		"audit_summary":          auditSummary,
 		"providers":              providerSummaries,
 	})
 }
@@ -255,7 +333,7 @@ func (h *AdminHandler) ProbeAllAccounts(c *gin.Context) {
 	})
 }
 
-// UpdateProxies 动态更新代理池
+// UpdateProxies 动态更新代理池并校准失效绑定账号。
 func (h *AdminHandler) UpdateProxies(c *gin.Context) {
 	var body struct {
 		RawText string   `json:"raw_text"`
@@ -283,6 +361,13 @@ func (h *AdminHandler) UpdateProxies(c *gin.Context) {
 	if h.proxyPool != nil {
 		h.proxyPool.Replace(list)
 	}
+	migrated := 0
+	if pool := h.accountPool(); pool != nil && h.proxyPool != nil {
+		migrated = pool.ReconcileProxies(
+			func(u string) bool { return !h.proxyPool.Contains(u) || !h.proxyPool.IsHealthy(u) },
+			func(excl map[string]bool) string { return h.proxyPool.AllocateHealthy(excl) },
+		)
+	}
 	if body.Persist {
 		content := strings.Join(list, "\n")
 		if len(list) > 0 {
@@ -290,8 +375,147 @@ func (h *AdminHandler) UpdateProxies(c *gin.Context) {
 		}
 		_ = os.WriteFile("proxies.txt", []byte(content), 0644)
 	}
+	if logBuf := h.auditLog(); logBuf != nil {
+		logBuf.RecordEvent("/admin/api/v1/proxies", "", "", fmt.Sprintf("updated_%d_migrated_%d", len(list), migrated), "")
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"proxies_count": len(list),
 		"proxies":       list,
+		"migrated":      migrated,
 	})
+}
+
+// AuthStatus 返回 ADMIN_TOKEN 鉴权状态（自身免鉴权以便前端锁屏解锁流程）。
+func (h *AdminHandler) AuthStatus(c *gin.Context) {
+	expected := ""
+	if h.cfg != nil {
+		expected = strings.TrimSpace(h.cfg.AdminToken)
+	}
+	authRequired := expected != ""
+	unlocked := !authRequired || middlewares.MatchAdminToken(expected, middlewares.ExtractAdminToken(c))
+	c.JSON(http.StatusOK, gin.H{
+		"auth_required": authRequired,
+		"unlocked":      unlocked,
+	})
+}
+
+// ListProxies 返回代理池节点健康矩阵（含每节点绑定账号数与熔断状态）。
+func (h *AdminHandler) ListProxies(c *gin.Context) {
+	if h.proxyPool == nil {
+		c.JSON(http.StatusOK, gin.H{
+			"summary": buildProxySummary(nil),
+			"nodes":   []proxy.NodeStatus{},
+		})
+		return
+	}
+	nodes := h.proxyPool.Snapshots(h.boundProxyCounts())
+	c.JSON(http.StatusOK, gin.H{
+		"summary": buildProxySummary(nodes),
+		"nodes":   nodes,
+	})
+}
+
+// ProbeProxies 并发探测代理节点连通性与延迟并返回最新健康矩阵。
+func (h *AdminHandler) ProbeProxies(c *gin.Context) {
+	if h.proxyPool == nil {
+		c.JSON(http.StatusOK, gin.H{
+			"summary": buildProxySummary(nil),
+			"nodes":   []proxy.NodeStatus{},
+		})
+		return
+	}
+	nodes := h.proxyPool.ProbeAll(c.Request.Context(), proxy.DefaultProbeFunc, h.boundProxyCounts())
+	if pool := h.accountPool(); pool != nil {
+		migrated := pool.ReconcileProxies(
+			func(u string) bool { return !h.proxyPool.IsHealthy(u) },
+			func(excl map[string]bool) string { return h.proxyPool.AllocateHealthy(excl) },
+		)
+		if migrated > 0 {
+			nodes = h.proxyPool.Snapshots(h.boundProxyCounts())
+		}
+	}
+	if logBuf := h.auditLog(); logBuf != nil {
+		logBuf.RecordEvent("/admin/api/v1/proxies/probe", "", "", fmt.Sprintf("probed_%d", len(nodes)), "")
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"summary": buildProxySummary(nodes),
+		"nodes":   nodes,
+	})
+}
+
+// ListLogs 查询请求与号池运维环形审计日志。
+func (h *AdminHandler) ListLogs(c *gin.Context) {
+	filter := c.DefaultQuery("filter", "all")
+	pathFilter := c.Query("path")
+	limit := 100
+	if rawLimit := strings.TrimSpace(c.Query("limit")); rawLimit != "" {
+		if n, err := strconv.Atoi(rawLimit); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	entries, summary := h.auditLog().Query(filter, pathFilter, limit)
+	c.JSON(http.StatusOK, gin.H{
+		"summary": summary,
+		"entries": entries,
+	})
+}
+
+// ExportAccounts 导出指定供应商账号池（支持 sub2api_json / access_tokens / kami，默认脱敏密钥）。
+func (h *AdminHandler) ExportAccounts(c *gin.Context) {
+	providerID := strings.ToLower(strings.TrimSpace(c.Param("provider")))
+	if providerID != "chatgpt" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "当前仅支持导出 chatgpt 供应商号池"}})
+		return
+	}
+	pool := h.accountPool()
+	if pool == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"message": "号池运行时未初始化"}})
+		return
+	}
+
+	format := strings.ToLower(strings.TrimSpace(c.DefaultQuery("format", "sub2api_json")))
+	includeSecrets := c.Query("include_secrets") == "true" || c.Query("include_secrets") == "1"
+	download := c.Query("download") == "true" || c.Query("download") == "1"
+
+	switch format {
+	case "sub2api_json":
+		bundle := accounts.BuildSub2APIJSON(pool.AllPersistentAccounts(), includeSecrets)
+		if download {
+			c.Header("Content-Disposition", `attachment; filename="aurora_sub2api.json"`)
+		}
+		c.JSON(http.StatusOK, bundle)
+
+	case "access_tokens":
+		tokens := pool.ExportAccessTokens()
+		body := strings.Join(tokens, "\n")
+		if len(tokens) > 0 {
+			body += "\n"
+		}
+		if download {
+			c.Header("Content-Disposition", `attachment; filename="access_tokens.txt"`)
+		}
+		c.Data(http.StatusOK, "text/plain; charset=utf-8", []byte(body))
+
+	case "kami":
+		kamiAccts := pool.ExportKamiAccounts()
+		var body string
+		if includeSecrets {
+			body = accounts.FormatKamiLines(kamiAccts)
+		} else {
+			c.Header("X-Secrets-Redacted", "true")
+			var b strings.Builder
+			for _, ka := range kamiAccts {
+				b.WriteString(ka.Email)
+				b.WriteString("----******----******\n")
+			}
+			body = b.String()
+		}
+		if download {
+			c.Header("Content-Disposition", `attachment; filename="kami_accounts.txt"`)
+		}
+		c.Data(http.StatusOK, "text/plain; charset=utf-8", []byte(body))
+
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "不支持的导出格式: " + format}})
+	}
 }

@@ -11,6 +11,7 @@ import (
 	"ai-web-free/httpclient"
 	bogdanfinn "ai-web-free/httpclient/bogdanfinn"
 	"ai-web-free/internal/accounts"
+	"ai-web-free/internal/audit"
 	"ai-web-free/internal/browserfp"
 	"ai-web-free/internal/chatgpt"
 	"ai-web-free/internal/config"
@@ -173,6 +174,8 @@ func Init() (*App, error) {
 
 	accountPool := accounts.NewPool(accs)
 
+	var kamiWorker *provider.KamiRenewWorker
+
 	// 启动健康检查（每 10 分钟续期过期 token）
 	renewFn := func(acct *accounts.Account) bool {
 		if acct.RefreshToken != "" {
@@ -180,6 +183,9 @@ func Init() (*App, error) {
 		}
 		if acct.SessionToken != "" {
 			return exchangeSessionToken(acct)
+		}
+		if cfg.KamiAutoRenew && kamiWorker != nil && acct.Password != "" && acct.TOTPSecret != "" {
+			kamiWorker.Enqueue(acct, "health_check")
 		}
 		return false
 	}
@@ -191,8 +197,48 @@ func Init() (*App, error) {
 	reg := provider.NewRegistry()
 	provider.RegisterDefaultProviders(reg, chatgptPlugin)
 
-	// 注册路由
-	router := handler.RegisterRouter(accountPool, proxyPool, reg, &cfg)
+	// 注册路由与生产级号池运维组件
+	defaultProxy := cfg.ProxyURL
+	if defaultProxy == "" {
+		defaultProxy = cfg.HTTPProxy
+	}
+	if defaultProxy == "" && len(proxies) > 0 {
+		defaultProxy = proxies[0]
+	}
+	auditLog := audit.NewRingBuffer(1000, cfg.AuditLogFile, cfg.AuditLogMaxMB)
+	kamiWorker = provider.NewKamiRenewWorker(accountPool, defaultProxy, true, chatgptPlugin.PersistAccessTokens, auditLog)
+	chatgptPlugin.SetAuditLog(auditLog)
+	chatgptPlugin.SetKamiWorker(kamiWorker)
+	stopKamiScan := func() {}
+	if cfg.KamiAutoRenew {
+		kamiWorker.Start()
+		scanStop := make(chan struct{})
+		stopKamiScan = func() { close(scanStop) }
+		go func() {
+			firstScan := time.NewTimer(15 * time.Second)
+			ticker := time.NewTicker(10 * time.Minute)
+			defer firstScan.Stop()
+			defer ticker.Stop()
+			for {
+				select {
+				case <-scanStop:
+					return
+				case <-firstScan.C:
+					kamiWorker.EnqueueDue(24 * time.Hour)
+				case <-ticker.C:
+					kamiWorker.EnqueueDue(24 * time.Hour)
+				}
+			}
+		}()
+	}
+	router := handler.RegisterRouterWithDeps(handler.RouterDeps{
+		AccountPool: accountPool,
+		ProxyPool:   proxyPool,
+		Registry:    reg,
+		Config:      &cfg,
+		KamiWorker:  kamiWorker,
+		AuditLog:    auditLog,
+	})
 
 	return &App{
 		Router:      router,
@@ -201,6 +247,8 @@ func Init() (*App, error) {
 		Cleanup: func() {
 			stopHealthCheck()
 			stopTempGC()
+			stopKamiScan()
+			kamiWorker.Stop()
 		},
 	}, nil
 }

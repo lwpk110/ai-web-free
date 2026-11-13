@@ -1,25 +1,161 @@
+const ADMIN_TOKEN_STORAGE_KEY = "aurora_admin_token";
+
+export class AdminUnauthorizedError extends Error {
+  constructor(message = "管理端已启用 ADMIN_TOKEN 保护，请先解锁") {
+    super(message);
+    this.name = "AdminUnauthorizedError";
+  }
+}
+
+export function getStoredAdminToken(): string {
+  try {
+    return window.sessionStorage.getItem(ADMIN_TOKEN_STORAGE_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+
+export function setStoredAdminToken(token: string): void {
+  try {
+    const trimmed = token.trim();
+    if (trimmed) {
+      window.sessionStorage.setItem(ADMIN_TOKEN_STORAGE_KEY, trimmed);
+    } else {
+      window.sessionStorage.removeItem(ADMIN_TOKEN_STORAGE_KEY);
+    }
+  } catch {
+    // ignore storage errors
+  }
+}
+
+function buildAdminHeaders(extra?: HeadersInit): Headers {
+  const headers = new Headers(extra);
+  const token = getStoredAdminToken();
+  if (token) {
+    headers.set("X-Admin-Token", token);
+  }
+  return headers;
+}
+
+async function adminFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  const res = await fetch(input, {
+    ...init,
+    headers: buildAdminHeaders(init?.headers),
+  });
+  if (res.status === 401) {
+    window.dispatchEvent(new Event("admin-unauthorized"));
+    throw new AdminUnauthorizedError();
+  }
+  return res;
+}
+
 export interface ProviderDescriptor {
   id: string;
   name: string;
-  icon: string;
+  vendor: string;
+  status: "enabled" | "planned" | string;
+  version: string;
   description: string;
-  enabled: boolean;
   supported_account_types: string[];
   credential_formats: string[];
   capabilities: string[];
+  featured_models?: string[];
 }
 
 export interface PoolStats {
-  provider: string;
   total: number;
   active: number;
-  rate_limited: number;
+  pending: number;
   expired: number;
+  rate_limited: number;
+  image_limited: number;
   disabled: number;
   banned: number;
-  by_type: Record<string, number>;
-  proxy_count: number;
-  updated_at: string;
+  free_count: number;
+  noauth_count: number;
+  puid_count: number;
+  temp_count: number;
+  total_calls: number;
+  failed_calls: number;
+}
+
+export interface ProviderSummary {
+  descriptor: ProviderDescriptor;
+  stats: PoolStats;
+}
+
+export interface ProxySummary {
+  total: number;
+  active: number;
+  cooling: number;
+}
+
+export interface ProxyNodeStatus {
+  url: string;
+  status: "active" | "cooling" | "unknown" | string;
+  latency_ms: number;
+  consecutive_errors: number;
+  total_failures: number;
+  last_checked?: string;
+  last_error?: string;
+  cooldown_until?: string;
+  bound_accounts: number;
+}
+
+export interface KamiWorkerStats {
+  running: boolean;
+  running_email?: string;
+  queue_length: number;
+  total_succeeded: number;
+  total_failed: number;
+  last_run_at?: string;
+  last_error?: string;
+}
+
+export interface AuditSummary {
+  capacity: number;
+  buffered_count: number;
+  total_requests: number;
+  failed_requests: number;
+  failover_recovered: number;
+  total_events: number;
+  file_logging: boolean;
+  log_file?: string;
+}
+
+export interface AuditEntry {
+  id: string;
+  timestamp: string;
+  kind: "request" | "event" | string;
+  method?: string;
+  path?: string;
+  model?: string;
+  account_id?: string;
+  account_email?: string;
+  proxy?: string;
+  status?: number;
+  duration_ms?: number;
+  failover_trace?: string;
+  attempt_count?: number;
+  error?: string;
+  note?: string;
+}
+
+export interface OverviewResponse {
+  service: string;
+  version: string;
+  uptime_seconds: number;
+  started_at: string;
+  auth_enabled: boolean;
+  admin_auth_required?: boolean;
+  external_token_enabled: boolean;
+  stream_mode: boolean;
+  proxies_count: number;
+  proxies: string[];
+  proxies_summary?: ProxySummary;
+  kami_worker?: KamiWorkerStats;
+  audit_summary?: AuditSummary;
+  providers: ProviderSummary[];
 }
 
 export interface AccountView {
@@ -28,30 +164,47 @@ export interface AccountView {
   chatgpt_account_id?: string;
   type: string;
   status: string;
-  proxy?: string;
-  expires_at?: string;
-  remaining_days?: number;
-  has_refresh?: boolean;
+  plan_type?: string;
+  token_preview?: string;
   has_refresh_token?: boolean;
   has_session_token?: boolean;
   has_kami_credentials?: boolean;
-  token_masked?: string;
-  token_preview?: string;
-  last_used_at?: string;
-  fail_count?: number;
+  is_temporary?: boolean;
+  image_limited?: boolean;
+  cooldown_until?: string;
+  image_cooldown_until?: string;
+  renew_state?: string;
+  renew_cooldown_until?: string;
+  last_renew_error?: string;
+  proxy?: string;
+  tls_profile?: string;
+  total_calls?: number;
   failed_calls?: number;
+  expires_at?: string;
+  remaining_days?: number;
+  last_used?: string;
+  last_checked?: string;
+  created_at?: string;
   last_error?: string;
+  capabilities?: string[];
 }
 
-export async function fetchOverview(): Promise<{
-  default_provider: string;
-  providers: ProviderDescriptor[];
-  stats: Record<string, PoolStats>;
-  proxy_count: number;
-  proxies: string[];
-}> {
-  const res = await fetch("/admin/api/v1/overview");
-  if (!res.ok) throw new Error(`Overview failed: ${res.status}`);
+export async function fetchAuthStatus(
+  overrideToken?: string
+): Promise<{ auth_required: boolean; unlocked: boolean }> {
+  const headers: Record<string, string> = {};
+  const token = overrideToken ?? getStoredAdminToken();
+  if (token) {
+    headers["X-Admin-Token"] = token;
+  }
+  const res = await fetch("/admin/api/v1/auth/status", { headers });
+  if (!res.ok) throw new Error(`Auth status failed: HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function fetchOverview(): Promise<OverviewResponse> {
+  const res = await adminFetch("/admin/api/v1/overview");
+  if (!res.ok) throw new Error(`Overview failed: HTTP ${res.status}`);
   return res.json();
 }
 
@@ -60,31 +213,52 @@ export async function fetchAccounts(
   status = "",
   type = "",
   search = ""
-): Promise<{ accounts: AccountView[]; stats: PoolStats }> {
+): Promise<{ provider: string; accounts: AccountView[]; stats: PoolStats }> {
   const params = new URLSearchParams();
   if (status) params.set("status", status);
   if (type) params.set("type", type);
   if (search) params.set("q", search);
-  const res = await fetch(
-    `/admin/api/v1/providers/${provider}/accounts?${params.toString()}`
+  const qs = params.toString();
+  const res = await adminFetch(
+    `/admin/api/v1/providers/${encodeURIComponent(provider)}/accounts${qs ? `?${qs}` : ""}`
   );
-  if (!res.ok) throw new Error(`Fetch accounts failed: ${res.status}`);
+  if (!res.ok) throw new Error(`Fetch accounts failed: HTTP ${res.status}`);
   return res.json();
 }
+
+export type AccountActionType =
+  | "probe"
+  | "refresh"
+  | "enable"
+  | "disable"
+  | "delete"
+  | "totp"
+  | "login";
 
 export async function executeAccountAction(
   provider: string,
   accountId: string,
-  action: "probe" | "refresh" | "enable" | "disable" | "delete" | "totp" | "login"
+  action: AccountActionType
 ): Promise<{
-  ok?: boolean;
-  message?: string;
-  error?: { message?: string };
-  result?: { message?: string; totp_code?: string; remaining_seconds?: number };
-  account?: AccountView;
+  provider: string;
+  stats: PoolStats;
+  result: {
+    id?: string;
+    ok?: boolean;
+    status?: string;
+    latency_ms?: number;
+    models_count?: number;
+    error?: string;
+    message?: string;
+    email?: string;
+    totp_code?: string;
+    remaining_seconds?: number;
+    expires_at?: string;
+    deleted?: boolean;
+  };
 }> {
-  const res = await fetch(
-    `/admin/api/v1/providers/${provider}/accounts/${encodeURIComponent(accountId)}/action`,
+  const res = await adminFetch(
+    `/admin/api/v1/providers/${encodeURIComponent(provider)}/accounts/${encodeURIComponent(accountId)}/action`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -93,19 +267,29 @@ export async function executeAccountAction(
   );
   const data = await res.json();
   if (!res.ok) {
-    throw new Error(data?.error?.message || `Action failed: ${res.status}`);
+    throw new Error(data?.error?.message || `Action failed: HTTP ${res.status}`);
   }
   return data;
 }
 
 export async function probeAllAccounts(
   provider = "chatgpt"
-): Promise<{ probed?: number; passed?: number; failed?: number; total?: number; active?: number }> {
-  const res = await fetch(
-    `/admin/api/v1/providers/${provider}/pool/probe-all`,
+): Promise<{
+  provider: string;
+  probed: number;
+  passed: number;
+  failed: number;
+  stats: PoolStats;
+}> {
+  const res = await adminFetch(
+    `/admin/api/v1/providers/${encodeURIComponent(provider)}/pool/probe-all`,
     { method: "POST" }
   );
-  return res.json();
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error?.message || `Probe failed: HTTP ${res.status}`);
+  }
+  return data;
 }
 
 export async function loginKamiAccounts(
@@ -113,11 +297,17 @@ export async function loginKamiAccounts(
   headless = true,
   force = false
 ): Promise<{
-  result?: { total: number; success: number; failed: number; message?: string };
-  error?: { message?: string };
+  provider: string;
+  stats: PoolStats;
+  result?: {
+    total: number;
+    success: number;
+    failed: number;
+    message?: string;
+  };
 }> {
-  const res = await fetch(
-    `/admin/api/v1/providers/${provider}/accounts/kami-login`,
+  const res = await adminFetch(
+    `/admin/api/v1/providers/${encodeURIComponent(provider)}/accounts/kami-login`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -126,19 +316,23 @@ export async function loginKamiAccounts(
   );
   const data = await res.json();
   if (!res.ok) {
-    throw new Error(data?.error?.message || `Kami login failed: ${res.status}`);
+    throw new Error(data?.error?.message || `Kami login failed: HTTP ${res.status}`);
   }
   return data;
 }
 
-export async function importAccounts(
-  provider: string,
-  format: string,
-  rawText: string,
-  persist = true,
-  autoLogin = false
-): Promise<{
-  result?: {
+export async function importAccounts(params: {
+  provider: string;
+  credentialType: string;
+  rawText: string;
+  persist?: boolean;
+  autoLogin?: boolean;
+  headless?: boolean;
+  generateCount?: number;
+}): Promise<{
+  provider: string;
+  stats: PoolStats;
+  result: {
     added: number;
     skipped: number;
     failed: number;
@@ -146,38 +340,151 @@ export async function importAccounts(
     persisted: boolean;
     messages?: string[];
   };
-  error?: { message?: string };
 }> {
-  const res = await fetch(
-    `/admin/api/v1/providers/${provider}/accounts/import`,
+  const res = await adminFetch(
+    `/admin/api/v1/providers/${encodeURIComponent(params.provider)}/accounts/import`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        credential_type: format,
-        raw_text: rawText,
-        persist,
-        auto_login: autoLogin,
-        headless: true,
+        credential_type: params.credentialType,
+        raw_text: params.rawText,
+        persist: params.persist ?? true,
+        auto_login: params.autoLogin ?? false,
+        headless: params.headless ?? true,
+        generate_count: params.generateCount ?? 0,
       }),
     }
   );
   const data = await res.json();
   if (!res.ok) {
-    throw new Error(data?.error?.message || `Import failed: ${res.status}`);
+    throw new Error(data?.error?.message || `Import failed: HTTP ${res.status}`);
+  }
+  return data;
+}
+
+export async function exportAccounts(params: {
+  provider?: string;
+  format: "sub2api_json" | "access_tokens" | "kami";
+  includeSecrets?: boolean;
+  download?: boolean;
+}): Promise<{
+  filename: string;
+  content: string;
+  contentType: string;
+  redacted: boolean;
+}> {
+  const provider = params.provider || "chatgpt";
+  const qs = new URLSearchParams({
+    format: params.format,
+    include_secrets: params.includeSecrets ? "true" : "false",
+    download: params.download ? "true" : "false",
+  });
+  const res = await adminFetch(
+    `/admin/api/v1/providers/${encodeURIComponent(provider)}/export?${qs.toString()}`
+  );
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(errText || `Export failed: HTTP ${res.status}`);
+  }
+  const contentType = res.headers.get("content-type") || "text/plain";
+  const redacted = res.headers.get("X-Secrets-Redacted") === "true";
+  const raw = await res.text();
+  const content = contentType.includes("application/json")
+    ? JSON.stringify(JSON.parse(raw), null, 2)
+    : raw;
+  const filename =
+    params.format === "sub2api_json"
+      ? "aurora_sub2api.json"
+      : params.format === "access_tokens"
+        ? "access_tokens.txt"
+        : "kami_accounts.txt";
+  return { filename, content, contentType, redacted };
+}
+
+export async function fetchProxies(): Promise<{
+  summary: ProxySummary;
+  nodes: ProxyNodeStatus[];
+}> {
+  const res = await adminFetch("/admin/api/v1/proxies");
+  if (!res.ok) throw new Error(`Fetch proxies failed: HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function probeProxies(): Promise<{
+  summary: ProxySummary;
+  nodes: ProxyNodeStatus[];
+}> {
+  const res = await adminFetch("/admin/api/v1/proxies/probe", {
+    method: "POST",
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error?.message || `Probe proxies failed: HTTP ${res.status}`);
   }
   return data;
 }
 
 export async function updateProxies(
-  proxies: string[]
-): Promise<{ ok: boolean; count: number }> {
-  const res = await fetch("/admin/api/v1/proxies", {
+  proxies: string[],
+  persist = true
+): Promise<{
+  proxies_count: number;
+  proxies: string[];
+  migrated: number;
+}> {
+  const res = await adminFetch("/admin/api/v1/proxies", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ proxies }),
+    body: JSON.stringify({ proxies, persist }),
   });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error?.message || `Update proxies failed: HTTP ${res.status}`);
+  }
+  return data;
+}
+
+export async function fetchLogs(params?: {
+  filter?: string;
+  path?: string;
+  limit?: number;
+}): Promise<{
+  summary: AuditSummary;
+  entries: AuditEntry[];
+}> {
+  const qs = new URLSearchParams();
+  if (params?.filter) qs.set("filter", params.filter);
+  if (params?.path) qs.set("path", params.path);
+  if (params?.limit) qs.set("limit", String(params.limit));
+  const query = qs.toString();
+  const res = await adminFetch(`/admin/api/v1/logs${query ? `?${query}` : ""}`);
+  if (!res.ok) throw new Error(`Fetch logs failed: HTTP ${res.status}`);
   return res.json();
+}
+
+export async function fetchModelsCatalog(
+  apiKey?: string
+): Promise<Array<{ id: string; owned_by?: string }>> {
+  const headers: Record<string, string> = {};
+  if (apiKey?.trim()) {
+    headers["Authorization"] = `Bearer ${apiKey.trim()}`;
+  }
+  const res = await fetch("/v1/models?include_builtins=true", { headers });
+  if (!res.ok) {
+    let errMsg = `HTTP ${res.status}`;
+    try {
+      const errBody = await res.json();
+      errMsg =
+        errBody?.error?.message ||
+        (typeof errBody?.error === "string" ? errBody.error : errMsg);
+    } catch {
+      // ignore non-json error body
+    }
+    throw new Error(errMsg);
+  }
+  const data = await res.json();
+  return Array.isArray(data?.data) ? data.data : [];
 }
 
 export async function generateImage(params: {

@@ -207,3 +207,51 @@ func TestListModelsMiddlewareExternalToken(t *testing.T) {
 		t.Fatalf("external account request = %+v", client)
 	}
 }
+
+func TestListModelsIncludeBuiltins(t *testing.T) {
+	client := &modelsTestClient{
+		status: 200,
+		body:   `{"models":[{"slug":"gpt-5-6"},{"slug":"gpt-image-2.5"}]}`,
+	}
+	acct := modelTestAccount(accounts.TypeFree, client)
+	h := NewModelsHandler(accounts.NewPool([]*accounts.Account{acct}), &config.Config{})
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/models?include_builtins=true", nil)
+	h.ListModels(c)
+
+	if w.Code != 200 {
+		t.Fatalf("status = %d: %s", w.Code, w.Body.String())
+	}
+	var got struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	counts := map[string]int{}
+	for _, m := range got.Data {
+		counts[m.ID]++
+	}
+	for _, want := range []string{
+		"gpt-5-6",
+		"gpt-image-2.5",
+		"gpt-image-2.5-sunburst",
+		"gpt-image-2.5-flare",
+		"gpt-image-2.6",
+		"gpt-image-1",
+		"dall-e-3",
+		"gpt-4o-mini-tts",
+		"tts-1",
+		"tts-1-hd",
+		"gpt-4o-transcribe",
+		"whisper-1",
+	} {
+		if counts[want] != 1 {
+			t.Errorf("model %q count = %d, want 1 (body=%s)", want, counts[want], w.Body.String())
+		}
+	}
+}

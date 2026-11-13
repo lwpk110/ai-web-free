@@ -23,10 +23,23 @@ import (
 type ImageHandler struct {
 	accountPool *accounts.Pool
 	cfg         *config.Config
+	runtime     *GatewayRuntime
 }
 
 func NewImageHandler(pool *accounts.Pool, cfg *config.Config) *ImageHandler {
 	return &ImageHandler{accountPool: pool, cfg: cfg}
+}
+
+// SetRuntime 注入网关共享的容灾、代理健康与审计运行时。
+func (h *ImageHandler) SetRuntime(rt *GatewayRuntime) {
+	h.runtime = rt
+}
+
+func (h *ImageHandler) ensureRuntime() *GatewayRuntime {
+	if h.runtime != nil {
+		return h.runtime
+	}
+	return &GatewayRuntime{AccountPool: h.accountPool, Config: h.cfg}
 }
 
 // ─── Image stream types ──────────────────────────────────────────
@@ -154,188 +167,331 @@ func (h *ImageHandler) Generations(c *gin.Context) {
 		imageRequest.ResponseFormat = "b64_json"
 	}
 
-	account, _, err := resolveAccount(c, h.accountPool, h.cfg, true)
-	if err != nil {
-		c.JSON(400, gin.H{"error": gin.H{
-			"message": err.Error(),
-			"type":    "authorization_error",
-			"param":   "Authorization",
-			"code":    400,
-		}})
-		return
-	}
-	if account == nil || account.Token == "" {
-		c.JSON(400, gin.H{"error": "Images API requires a logged-in ChatGPT access token."})
-		c.Abort()
-		return
-	}
-	if !account.Type.Satisfies(accounts.CapImageGenerate) {
-		c.JSON(403, gin.H{"error": "Images API requires a logged-in ChatGPT account."})
-		return
-	}
-
-	proxyUrl := account.Proxy
-	var imgClient *bogdanfinn.TlsClient
-	if c, ok := account.Client.(*bogdanfinn.TlsClient); ok && c != nil {
-		imgClient = c
-	} else {
-		imgClient = setupClientWithProxy(proxyUrl)
-		imgClient.SetCookies("https://chatgpt.com", chatgpt.BasicCookies)
-	}
-	turnStile, status, err := chatgpt.InitSentinel(imgClient, account, proxyUrl, 0)
-	if err != nil {
-		if status == http.StatusUnauthorized {
-			h.accountPool.ReportFailure(account)
-		}
-		c.JSON(status, gin.H{
-			"message": err.Error(),
-			"type":    "InitTurnStile_request_error",
-			"param":   err,
-			"code":    status,
-		})
-		return
-	}
-
+	effectivePrompt := chatgpt.DecorateImagePrompt(imageRequest.Prompt, imageRequest.Model, imageRequest.Size, imageRequest.Quality)
 	stream := requestStreamFlag(c, imageRequest.Stream)
-	if stream {
-		writeImageStreamHeader(c)
-	}
+	h.executeImagePipeline(c, imagePipelineSpec{
+		Capability:     accounts.CapImageGenerate.Name,
+		Model:          imageRequest.Model,
+		Prompt:         effectivePrompt,
+		RevisedPrompt:  imageRequest.Prompt,
+		N:              imageRequest.N,
+		ResponseFormat: imageRequest.ResponseFormat,
+		Stream:         stream,
+	})
+}
 
-	var data []officialtypes.ImageGenerationData
-	for i := 0; i < imageRequest.N; i++ {
-		if stream {
-			writeImageStreamEvent(c, "image.generation.chunk", imageStreamChunk{
-				Object:       "image.generation.chunk",
-				Index:        i,
-				Total:        imageRequest.N,
-				Created:      0,
-				Model:        imageRequest.Model,
-				ProgressText: fmt.Sprintf("Generating image %d/%d ...", i+1, imageRequest.N),
-			})
+type imagePipelineSpec struct {
+	Capability     string
+	Model          string
+	Prompt         string
+	RevisedPrompt  string
+	N              int
+	ResponseFormat string
+	Stream         bool
+	AsVariation    bool
+	IsEditFlow     bool
+	Sources        []editImageInput
+}
+
+type imageAttemptBundle struct {
+	client     *bogdanfinn.TlsClient
+	turnStile  *chatgpt.TurnStile
+	references []chatgpt.ImageEditReference
+	items      []officialtypes.ImageGenerationData
+}
+
+func ensureImageClient(acct *accounts.Account) *bogdanfinn.TlsClient {
+	if acct != nil {
+		if c, ok := acct.Client.(*bogdanfinn.TlsClient); ok && c != nil {
+			return c
 		}
-		effectivePrompt := chatgpt.DecorateImagePrompt(imageRequest.Prompt, imageRequest.Model, imageRequest.Size, imageRequest.Quality)
-		imageResults, upstreamText, err := chatgpt.GeneratePictureConversationImages(imgClient, account, turnStile, effectivePrompt, imageRequest.Model, proxyUrl)
-		if err != nil {
-			if stream {
-				writeImageStreamEvent(c, "image.generation.error", gin.H{
-					"object":  "image.generation.error",
-					"index":   i,
-					"total":   imageRequest.N,
-					"message": err.Error(),
-				})
-				writeImageStreamDone(c)
-				return
-			}
-			c.JSON(500, gin.H{"error": gin.H{
-				"message": err.Error(),
-				"type":    "image_generation_error",
-				"param":   nil,
-				"code":    "image_generation_error",
-			}})
-			return
+		client := setupClientWithProxy(acct.Proxy)
+		client.SetCookies("https://chatgpt.com", chatgpt.BasicCookies)
+		return client
+	}
+	client := setupClientWithProxy("")
+	client.SetCookies("https://chatgpt.com", chatgpt.BasicCookies)
+	return client
+}
+
+func materializeImageResults(
+	imgClient *bogdanfinn.TlsClient,
+	account *accounts.Account,
+	imageResults []chatgpt.ImageGenerationResult,
+	revisedPrompt string,
+	responseFormat string,
+	maxTotal int,
+	currentCount int,
+) ([]officialtypes.ImageGenerationData, error) {
+	items := make([]officialtypes.ImageGenerationData, 0, len(imageResults))
+	for _, imageResult := range imageResults {
+		item := officialtypes.ImageGenerationData{
+			RevisedPrompt: revisedPrompt,
 		}
-		for _, imageResult := range imageResults {
-			item := officialtypes.ImageGenerationData{
-				RevisedPrompt: imageRequest.Prompt,
-			}
-			if imageRequest.ResponseFormat == "b64_json" {
-				if imageResult.B64JSON != "" {
-					item.B64JSON = imageResult.B64JSON
-				} else if imageResult.URL != "" {
-					imageBytes, err := chatgpt.DownloadImageBytes(imgClient, imageResult.URL, account)
-					if err != nil {
-						if stream {
-							writeImageStreamEvent(c, "image.generation.error", gin.H{
-								"object":  "image.generation.error",
-								"index":   i,
-								"total":   imageRequest.N,
-								"message": err.Error(),
-							})
-							writeImageStreamDone(c)
-							return
-						}
-						c.JSON(500, gin.H{"error": gin.H{
-							"message": err.Error(),
-							"type":    "image_download_error",
-							"param":   nil,
-							"code":    "image_download_error",
-						}})
-						return
-					}
-					item.B64JSON = base64.StdEncoding.EncodeToString(imageBytes)
+		if responseFormat == "b64_json" {
+			if imageResult.B64JSON != "" {
+				item.B64JSON = imageResult.B64JSON
+			} else if imageResult.URL != "" {
+				imageBytes, err := chatgpt.DownloadImageBytes(imgClient, imageResult.URL, account)
+				if err != nil {
+					return nil, err
 				}
-			} else {
-				item.URL = imageResult.URL
-				if item.URL == "" && imageResult.B64JSON != "" {
-					item.B64JSON = imageResult.B64JSON
-				}
+				item.B64JSON = base64.StdEncoding.EncodeToString(imageBytes)
 			}
-			data = append(data, item)
-			if stream {
-				writeImageStreamEvent(c, "image.generation.result", imageStreamResult{
-					Object:  "image.generation.result",
-					Index:   len(data) - 1,
-					Total:   imageRequest.N,
-					Created: 0,
-					Model:   imageRequest.Model,
-					Data:    []officialtypes.ImageGenerationData{item},
-				})
-			}
-			if len(data) >= imageRequest.N {
-				break
+		} else {
+			item.URL = imageResult.URL
+			if item.URL == "" && imageResult.B64JSON != "" {
+				item.B64JSON = imageResult.B64JSON
 			}
 		}
-		if len(imageResults) == 0 && upstreamText != "" {
-			if stream {
-				writeImageStreamEvent(c, "image.generation.error", gin.H{
-					"object":  "image.generation.error",
-					"index":   i,
-					"total":   imageRequest.N,
-					"message": "No image result found in response: " + upstreamText,
-				})
-				writeImageStreamDone(c)
-				return
-			}
-			c.JSON(500, gin.H{"error": gin.H{
-				"message": "No image result found in response: " + upstreamText,
-				"type":    "image_generation_error",
-				"param":   nil,
-				"code":    "image_generation_error",
-			}})
-			return
-		}
-		if len(data) >= imageRequest.N {
+		items = append(items, item)
+		if maxTotal > 0 && currentCount+len(items) >= maxTotal {
 			break
 		}
 	}
-	if len(data) == 0 {
-		if stream {
-			writeImageStreamEvent(c, "image.generation.error", gin.H{
-				"object":  "image.generation.error",
-				"message": "No image result found in response",
-			})
-			writeImageStreamDone(c)
+	return items, nil
+}
+
+func (h *ImageHandler) executeImagePipeline(c *gin.Context, spec imagePipelineSpec) {
+	rt := h.ensureRuntime()
+	res, err := rt.RunWithFailover(c, h.accountPool, h.cfg, FailoverOptions{
+		NeedsPaid:  true,
+		Capability: spec.Capability,
+		Model:      spec.Model,
+		IsImage:    true,
+	}, func(acct *accounts.Account, _ *bogdanfinn.TlsClient) AttemptOutcome {
+		if acct.Token == "" {
+			return AttemptOutcome{StatusCode: 400, Err: errMissingAccessToken}
+		}
+		if !AccountSatisfies(acct, accounts.CapImageGenerate.Name) || !AccountSatisfies(acct, spec.Capability) {
+			return AttemptOutcome{StatusCode: 403, Err: errAccountCapDenied}
+		}
+		imgClient := ensureImageClient(acct)
+		turnStile, status, callErr := chatgpt.InitSentinel(imgClient, acct, acct.Proxy, 0)
+		if callErr != nil {
+			if status == http.StatusUnauthorized {
+				h.accountPool.MarkExpired(acct, callErr.Error())
+			}
+			return AttemptOutcome{StatusCode: status, Err: callErr}
+		}
+
+		var references []chatgpt.ImageEditReference
+		if spec.IsEditFlow {
+			references = make([]chatgpt.ImageEditReference, 0, len(spec.Sources))
+			for _, src := range spec.Sources {
+				uploaded, upStatus, upErr := chatgpt.UploadFile(imgClient, acct, acct.Proxy, src.Filename, src.ContentType, src.Data)
+				if upErr != nil {
+					return AttemptOutcome{
+						StatusCode: upStatus,
+						Err:        chatgpt.NewUpstreamError("upload image failed ("+src.Filename+")", upStatus, upErr.Error()),
+					}
+				}
+				references = append(references, chatgpt.ImageEditReference{
+					FileID:   uploaded.FileID,
+					Width:    uploaded.Width,
+					Height:   uploaded.Height,
+					Size:     int(uploaded.Bytes),
+					MimeType: uploaded.MimeType,
+					Filename: uploaded.Filename,
+				})
+			}
+		}
+
+		var imageResults []chatgpt.ImageGenerationResult
+		var upstreamText string
+		var genErr error
+		if spec.IsEditFlow {
+			imageResults, upstreamText, genErr = chatgpt.GeneratePictureConversationImagesWithReferences(imgClient, acct, turnStile, spec.Prompt, spec.Model, acct.Proxy, references)
+		} else {
+			imageResults, upstreamText, genErr = chatgpt.GeneratePictureConversationImages(imgClient, acct, turnStile, spec.Prompt, spec.Model, acct.Proxy)
+		}
+		if genErr != nil {
+			return AttemptOutcome{Err: genErr}
+		}
+		if len(imageResults) == 0 {
+			if chatgpt.LooksLikeImageLimit(http.StatusTooManyRequests, upstreamText) {
+				return AttemptOutcome{
+					StatusCode: http.StatusTooManyRequests,
+					Err:        chatgpt.NewUpstreamError("image generation limit", http.StatusTooManyRequests, upstreamText),
+				}
+			}
+			msg := "No image result found in response"
+			if upstreamText != "" {
+				msg = "No image result found in response: " + upstreamText
+			}
+			return AttemptOutcome{StatusCode: 500, Err: fmt.Errorf("%s", msg)}
+		}
+		items, dlErr := materializeImageResults(imgClient, acct, imageResults, spec.RevisedPrompt, spec.ResponseFormat, spec.N, 0)
+		if dlErr != nil {
+			return AttemptOutcome{StatusCode: 500, Err: dlErr}
+		}
+		return AttemptOutcome{
+			Payload: imageAttemptBundle{
+				client:     imgClient,
+				turnStile:  turnStile,
+				references: references,
+				items:      items,
+			},
+			StatusCode: 200,
+		}
+	})
+	if err != nil {
+		errStatus := res.Outcome.StatusCode
+		if uStatus, _, ok := chatgpt.ExtractUpstreamStatus(err); ok && uStatus > 0 {
+			errStatus = uStatus
+		}
+		if errStatus <= 0 {
+			errStatus = 500
+		}
+		if err == errMissingAccessToken {
+			c.JSON(400, gin.H{"error": "Images API requires a logged-in ChatGPT access token."})
+			rt.RecordAudit(c, spec.Model, res, 400, err)
 			return
 		}
-		c.JSON(500, gin.H{"error": gin.H{
-			"message": "No image result found in response",
+		if err == errAccountCapDenied {
+			c.JSON(403, gin.H{"error": "Images API requires a logged-in ChatGPT account."})
+			rt.RecordAudit(c, spec.Model, res, 403, err)
+			return
+		}
+		if res.Attempts == 0 {
+			respondError(c, 400, err)
+			rt.RecordAudit(c, spec.Model, res, 400, err)
+			return
+		}
+		c.JSON(errStatus, gin.H{"error": gin.H{
+			"message": err.Error(),
 			"type":    "image_generation_error",
 			"param":   nil,
 			"code":    "image_generation_error",
 		}})
+		rt.RecordAudit(c, spec.Model, res, errStatus, err)
 		return
 	}
-	if stream {
+
+	account := res.Account
+	bundle := res.Outcome.Payload.(imageAttemptBundle)
+	data := make([]officialtypes.ImageGenerationData, 0, spec.N)
+	data = append(data, bundle.items...)
+
+	if spec.Stream {
+		writeImageStreamHeader(c)
+		writeImageStreamEvent(c, "image.generation.chunk", imageStreamChunk{
+			Object:       "image.generation.chunk",
+			Index:        0,
+			Total:        spec.N,
+			Created:      0,
+			Model:        spec.Model,
+			ProgressText: fmt.Sprintf("Generating image 1/%d ...", spec.N),
+		})
+		for idx, item := range bundle.items {
+			writeImageStreamEvent(c, "image.generation.result", imageStreamResult{
+				Object:  "image.generation.result",
+				Index:   idx,
+				Total:   spec.N,
+				Created: 0,
+				Model:   spec.Model,
+				Data:    []officialtypes.ImageGenerationData{item},
+			})
+		}
+	}
+
+	for i := 1; i < spec.N && len(data) < spec.N; i++ {
+		if spec.Stream {
+			writeImageStreamEvent(c, "image.generation.chunk", imageStreamChunk{
+				Object:       "image.generation.chunk",
+				Index:        i,
+				Total:        spec.N,
+				Created:      0,
+				Model:        spec.Model,
+				ProgressText: fmt.Sprintf("Generating image %d/%d ...", i+1, spec.N),
+			})
+		}
+		var imageResults []chatgpt.ImageGenerationResult
+		var upstreamText string
+		var genErr error
+		if spec.IsEditFlow {
+			imageResults, upstreamText, genErr = chatgpt.GeneratePictureConversationImagesWithReferences(bundle.client, account, bundle.turnStile, spec.Prompt, spec.Model, account.Proxy, bundle.references)
+		} else {
+			imageResults, upstreamText, genErr = chatgpt.GeneratePictureConversationImages(bundle.client, account, bundle.turnStile, spec.Prompt, spec.Model, account.Proxy)
+		}
+		if genErr != nil {
+			h.writeImageFailure(c, spec.Stream, i, spec.N, "image_generation_error", genErr)
+			rt.RecordAudit(c, spec.Model, res, 500, genErr)
+			return
+		}
+		items, dlErr := materializeImageResults(bundle.client, account, imageResults, spec.RevisedPrompt, spec.ResponseFormat, spec.N, len(data))
+		if dlErr != nil {
+			h.writeImageFailure(c, spec.Stream, i, spec.N, "image_download_error", dlErr)
+			rt.RecordAudit(c, spec.Model, res, 500, dlErr)
+			return
+		}
+		for _, item := range items {
+			data = append(data, item)
+			if spec.Stream {
+				writeImageStreamEvent(c, "image.generation.result", imageStreamResult{
+					Object:  "image.generation.result",
+					Index:   len(data) - 1,
+					Total:   spec.N,
+					Created: 0,
+					Model:   spec.Model,
+					Data:    []officialtypes.ImageGenerationData{item},
+				})
+			}
+		}
+		if len(imageResults) == 0 && upstreamText != "" {
+			errMsg := fmt.Errorf("No image result found in response: %s", upstreamText)
+			h.writeImageFailure(c, spec.Stream, i, spec.N, "image_generation_error", errMsg)
+			rt.RecordAudit(c, spec.Model, res, 500, errMsg)
+			return
+		}
+	}
+
+	if len(data) == 0 {
+		noImgErr := fmt.Errorf("No image result found in response")
+		h.writeImageFailure(c, spec.Stream, 0, spec.N, "image_generation_error", noImgErr)
+		rt.RecordAudit(c, spec.Model, res, 500, noImgErr)
+		return
+	}
+
+	rt.RecordAudit(c, spec.Model, res, 200, nil)
+	if spec.Stream {
 		writeImageStreamEvent(c, "image.generation.completed", imageStreamCompleted{
 			Object:  "image.generation.completed",
 			Created: 0,
-			Model:   imageRequest.Model,
+			Model:   spec.Model,
 			Data:    data,
 		})
 		writeImageStreamDone(c)
 		return
 	}
+	if spec.IsEditFlow {
+		if spec.AsVariation {
+			c.JSON(200, officialtypes.NewImageVariationResponse(data))
+		} else {
+			c.JSON(200, officialtypes.NewImageEditResponse(data))
+		}
+		return
+	}
 	c.JSON(200, officialtypes.NewImageGenerationResponse(data))
+}
+
+func (h *ImageHandler) writeImageFailure(c *gin.Context, stream bool, idx, total int, errType string, err error) {
+	if stream {
+		writeImageStreamEvent(c, "image.generation.error", gin.H{
+			"object":  "image.generation.error",
+			"index":   idx,
+			"total":   total,
+			"message": err.Error(),
+		})
+		writeImageStreamDone(c)
+		return
+	}
+	c.JSON(500, gin.H{"error": gin.H{
+		"message": err.Error(),
+		"type":    errType,
+		"param":   nil,
+		"code":    errType,
+	}})
 }
 
 // ─── Image Edit / Variation types ────────────────────────────────
@@ -870,232 +1026,20 @@ func (h *ImageHandler) runImageEditFlow(c *gin.Context, asVariation bool) {
 	}
 	stream = requestStreamFlag(c, stream)
 
-	account, _, err := resolveAccount(c, h.accountPool, h.cfg, true)
-	if err != nil {
-		c.JSON(400, gin.H{"error": gin.H{
-			"message": err.Error(),
-			"type":    "authorization_error",
-			"param":   "Authorization",
-			"code":    400,
-		}})
-		return
-	}
-	if account == nil || account.Token == "" {
-		c.JSON(400, gin.H{"error": "Images API requires a logged-in ChatGPT access token."})
-		c.Abort()
-		return
-	}
-	if !account.Type.Satisfies(accounts.CapImageGenerate) {
-		c.JSON(403, gin.H{"error": "Images API requires a logged-in ChatGPT account."})
-		return
-	}
+	capName := accounts.CapImageEdit.Name
 	if asVariation {
-		if !account.Type.Satisfies(accounts.CapImageVariation) {
-			c.JSON(403, gin.H{"error": "Image variation requires a logged-in ChatGPT account."})
-			return
-		}
-	} else {
-		if !account.Type.Satisfies(accounts.CapImageEdit) {
-			c.JSON(403, gin.H{"error": "Image edit requires a logged-in ChatGPT account."})
-			return
-		}
+		capName = accounts.CapImageVariation.Name
 	}
-
-	proxyUrl := account.Proxy
-	var editClient *bogdanfinn.TlsClient
-	if c, ok := account.Client.(*bogdanfinn.TlsClient); ok && c != nil {
-		editClient = c
-	} else {
-		editClient = setupClientWithProxy(proxyUrl)
-		editClient.SetCookies("https://chatgpt.com", chatgpt.BasicCookies)
-	}
-	turnStile, status, err := chatgpt.InitSentinel(editClient, account, proxyUrl, 0)
-	if err != nil {
-		if status == http.StatusUnauthorized {
-			h.accountPool.ReportFailure(account)
-		}
-		c.JSON(status, gin.H{
-			"message": err.Error(),
-			"type":    "InitTurnStile_request_error",
-			"param":   err,
-			"code":    status,
-		})
-		return
-	}
-
-	if stream {
-		writeImageStreamHeader(c)
-	}
-
-	// 1) 上传所有源图
-	references := make([]chatgpt.ImageEditReference, 0, len(imageSources))
-	for idx, src := range imageSources {
-		uploaded, upStatus, upErr := chatgpt.UploadFile(editClient, account, proxyUrl, src.Filename, src.ContentType, src.Data)
-		if upErr != nil {
-			if stream {
-				writeImageStreamEvent(c, "image.generation.error", gin.H{
-					"object":  "image.generation.error",
-					"index":   idx,
-					"message": "upload image failed: " + upErr.Error(),
-				})
-				writeImageStreamDone(c)
-				return
-			}
-			c.JSON(upStatus, gin.H{"error": gin.H{
-				"message": "upload image failed: " + upErr.Error(),
-				"type":    "image_upload_error",
-				"param":   fmt.Sprintf("image[%d]", idx),
-				"code":    "image_upload_error",
-			}})
-			return
-		}
-		references = append(references, chatgpt.ImageEditReference{
-			FileID:   uploaded.FileID,
-			Width:    uploaded.Width,
-			Height:   uploaded.Height,
-			Size:     int(uploaded.Bytes),
-			MimeType: uploaded.MimeType,
-			Filename: uploaded.Filename,
-		})
-	}
-
-	// 2) 调起带 reference 的 image conversation,循环 n 次以满足 N
-	var data []officialtypes.ImageGenerationData
-	for i := 0; i < n; i++ {
-		if stream {
-			writeImageStreamEvent(c, "image.generation.chunk", imageStreamChunk{
-				Object:       "image.generation.chunk",
-				Index:        i,
-				Total:        n,
-				Created:      0,
-				Model:        model,
-				ProgressText: fmt.Sprintf("Generating image %d/%d ...", i+1, n),
-			})
-		}
-		imageResults, upstreamText, err := chatgpt.GeneratePictureConversationImagesWithReferences(editClient, account, turnStile, prompt, model, proxyUrl, references)
-		if err != nil {
-			if stream {
-				writeImageStreamEvent(c, "image.generation.error", gin.H{
-					"object":  "image.generation.error",
-					"index":   i,
-					"total":   n,
-					"message": err.Error(),
-				})
-				writeImageStreamDone(c)
-				return
-			}
-			c.JSON(500, gin.H{"error": gin.H{
-				"message": err.Error(),
-				"type":    "image_generation_error",
-				"param":   nil,
-				"code":    "image_generation_error",
-			}})
-			return
-		}
-		for _, imageResult := range imageResults {
-			item := officialtypes.ImageGenerationData{
-				RevisedPrompt: prompt,
-			}
-			if responseFormat == "b64_json" {
-				if imageResult.B64JSON != "" {
-					item.B64JSON = imageResult.B64JSON
-				} else if imageResult.URL != "" {
-					imageBytes, err := chatgpt.DownloadImageBytes(editClient, imageResult.URL, account)
-					if err != nil {
-						if stream {
-							writeImageStreamEvent(c, "image.generation.error", gin.H{
-								"object":  "image.generation.error",
-								"index":   i,
-								"total":   n,
-								"message": err.Error(),
-							})
-							writeImageStreamDone(c)
-							return
-						}
-						c.JSON(500, gin.H{"error": gin.H{
-							"message": err.Error(),
-							"type":    "image_download_error",
-							"param":   nil,
-							"code":    "image_download_error",
-						}})
-						return
-					}
-					item.B64JSON = base64.StdEncoding.EncodeToString(imageBytes)
-				}
-			} else {
-				item.URL = imageResult.URL
-				if item.URL == "" && imageResult.B64JSON != "" {
-					item.B64JSON = imageResult.B64JSON
-				}
-			}
-			data = append(data, item)
-			if stream {
-				writeImageStreamEvent(c, "image.generation.result", imageStreamResult{
-					Object:  "image.generation.result",
-					Index:   len(data) - 1,
-					Total:   n,
-					Created: 0,
-					Model:   model,
-					Data:    []officialtypes.ImageGenerationData{item},
-				})
-			}
-			if len(data) >= n {
-				break
-			}
-		}
-		if len(imageResults) == 0 && upstreamText != "" {
-			if stream {
-				writeImageStreamEvent(c, "image.generation.error", gin.H{
-					"object":  "image.generation.error",
-					"index":   i,
-					"total":   n,
-					"message": "No image result found in response: " + upstreamText,
-				})
-				writeImageStreamDone(c)
-				return
-			}
-			c.JSON(500, gin.H{"error": gin.H{
-				"message": "No image result found in response: " + upstreamText,
-				"type":    "image_generation_error",
-				"param":   nil,
-				"code":    "image_generation_error",
-			}})
-			return
-		}
-		if len(data) >= n {
-			break
-		}
-	}
-	if len(data) == 0 {
-		if stream {
-			writeImageStreamEvent(c, "image.generation.error", gin.H{
-				"object":  "image.generation.error",
-				"message": "No image result found in response",
-			})
-			writeImageStreamDone(c)
-			return
-		}
-		c.JSON(500, gin.H{"error": gin.H{
-			"message": "No image result found in response",
-			"type":    "image_generation_error",
-			"param":   nil,
-			"code":    "image_generation_error",
-		}})
-		return
-	}
-	if stream {
-		writeImageStreamEvent(c, "image.generation.completed", imageStreamCompleted{
-			Object:  "image.generation.completed",
-			Created: 0,
-			Model:   model,
-			Data:    data,
-		})
-		writeImageStreamDone(c)
-		return
-	}
-	if asVariation {
-		c.JSON(200, officialtypes.NewImageVariationResponse(data))
-	} else {
-		c.JSON(200, officialtypes.NewImageEditResponse(data))
-	}
+	h.executeImagePipeline(c, imagePipelineSpec{
+		Capability:     capName,
+		Model:          model,
+		Prompt:         prompt,
+		RevisedPrompt:  prompt,
+		N:              n,
+		ResponseFormat: responseFormat,
+		Stream:         stream,
+		AsVariation:    asVariation,
+		IsEditFlow:     true,
+		Sources:        imageSources,
+	})
 }

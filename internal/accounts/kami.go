@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 )
 
 // KamiAccount 表示单条标准卡密账号凭据（邮箱----密码----2FA密钥）。
@@ -136,4 +137,51 @@ func ParseSub2APIJSON(raw string) (*Sub2APIData, error) {
 		return nil, fmt.Errorf("sub2api json contains no accounts")
 	}
 	return &data, nil
+}
+
+// BuildSub2APIJSON 从账号列表生成 Sub2API 导入包；includeSecrets 为 false 时自动脱敏明文密码与 2FA 密钥。
+func BuildSub2APIJSON(accts []*Account, includeSecrets bool) Sub2APIData {
+	data := Sub2APIData{
+		Type:       "sub2api-data",
+		Version:    1,
+		ExportedAt: time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
+		Accounts:   make([]Sub2APIAccount, 0, len(accts)),
+	}
+	for _, a := range accts {
+		if a == nil || a.IsTemporary {
+			continue
+		}
+		name := strings.TrimSpace(a.Email)
+		if name == "" {
+			name = a.ID
+		}
+		var expUnix int64
+		if !a.ExpiresAt.IsZero() {
+			expUnix = a.ExpiresAt.Unix()
+		}
+		extra := Sub2APIExtra{
+			Email: a.Email,
+		}
+		if includeSecrets {
+			extra.Password = a.Password
+			extra.TOTPSecret = a.TOTPSecret
+		}
+		data.Accounts = append(data.Accounts, Sub2APIAccount{
+			Name:        name,
+			Platform:    "openai",
+			Type:        "oauth",
+			Concurrency: 10,
+			Priority:    1,
+			Credentials: Sub2APICredentials{
+				RefreshToken:     a.RefreshToken,
+				AccessToken:      a.Token,
+				IDToken:          "",
+				SessionToken:     a.SessionToken,
+				ChatGPTAccountID: a.ChatGPTAccountID,
+				ExpiresAt:        expUnix,
+			},
+			Extra: extra,
+		})
+	}
+	return data
 }

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"ai-web-free/internal/accounts"
+	"ai-web-free/internal/audit"
 	"ai-web-free/internal/chatgpt"
 	"ai-web-free/internal/config"
 	"ai-web-free/internal/proxy"
@@ -19,11 +20,13 @@ import (
 )
 
 type ChatGPTProvider struct {
-	pool      *accounts.Pool
-	proxyPool *proxy.Pool
-	cfg       *config.Config
-	renewFn   func(*accounts.Account) bool
-	fileMu    sync.Mutex
+	pool       *accounts.Pool
+	proxyPool  *proxy.Pool
+	cfg        *config.Config
+	renewFn    func(*accounts.Account) bool
+	kamiWorker *KamiRenewWorker
+	auditLog   *audit.RingBuffer
+	fileMu     sync.Mutex
 }
 
 func NewChatGPTProvider(pool *accounts.Pool, proxyPool *proxy.Pool, cfg *config.Config, renewFn func(*accounts.Account) bool) *ChatGPTProvider {
@@ -33,6 +36,21 @@ func NewChatGPTProvider(pool *accounts.Pool, proxyPool *proxy.Pool, cfg *config.
 		cfg:       cfg,
 		renewFn:   renewFn,
 	}
+}
+
+// SetKamiWorker 绑定卡密后台自动续期队列。
+func (p *ChatGPTProvider) SetKamiWorker(w *KamiRenewWorker) {
+	p.kamiWorker = w
+}
+
+// KamiWorker 返回已绑定的卡密后台自动续期队列。
+func (p *ChatGPTProvider) KamiWorker() *KamiRenewWorker {
+	return p.kamiWorker
+}
+
+// SetAuditLog 绑定请求与号池运维审计缓冲。
+func (p *ChatGPTProvider) SetAuditLog(a *audit.RingBuffer) {
+	p.auditLog = a
 }
 
 func (p *ChatGPTProvider) Descriptor() ProviderDescriptor {
@@ -112,6 +130,21 @@ func (p *ChatGPTProvider) ImportCredentials(req ImportRequest) (ImportResult, er
 	credType := strings.ToLower(strings.TrimSpace(req.CredentialType))
 	if credType == "" {
 		credType = "access_token"
+	}
+
+	if credType == "kami" {
+		raw := req.RawText
+		if strings.TrimSpace(raw) == "" && len(req.Tokens) > 0 {
+			raw = strings.Join(req.Tokens, "\n")
+		}
+		return p.importKamiAccounts(raw, req.Persist, req.AutoLogin, req.Headless)
+	}
+	if credType == "sub2api_json" {
+		raw := req.RawText
+		if strings.TrimSpace(raw) == "" && len(req.Tokens) > 0 {
+			raw = strings.Join(req.Tokens, "\n")
+		}
+		return p.importSub2APIJSON(raw, req.Persist)
 	}
 
 	var lines []string
@@ -272,8 +305,10 @@ func (p *ChatGPTProvider) ExecuteAccountAction(id, action string) (map[string]in
 
 	switch action {
 	case "enable":
-		p.pool.SetStatus(acct.ID, accounts.StatusActive)
+		acct.CooldownUntil = time.Time{}
+		acct.ImageCooldownUntil = time.Time{}
 		acct.LastError = ""
+		p.pool.SetStatus(acct.ID, accounts.StatusActive)
 		return map[string]interface{}{
 			"id":     acct.ID,
 			"status": accounts.StatusActive.String(),
@@ -325,9 +360,12 @@ func (p *ChatGPTProvider) ExecuteAccountAction(id, action string) (map[string]in
 		if err != nil {
 			acct.LastError = fmt.Sprintf("HTTP %d: %v", httpStatus, err)
 			if httpStatus == 401 || httpStatus == 403 {
-				p.pool.SetStatus(acct.ID, accounts.StatusExpired)
+				p.pool.MarkExpired(acct, acct.LastError)
+				if p.kamiWorker != nil {
+					p.kamiWorker.Enqueue(acct, "probe_unauthorized")
+				}
 			} else if httpStatus == 429 {
-				p.pool.SetStatus(acct.ID, accounts.StatusRateLimited)
+				p.pool.ReportRateLimit(acct, false, 5*time.Minute, acct.LastError)
 			}
 			return map[string]interface{}{
 				"id":          acct.ID,
@@ -339,6 +377,8 @@ func (p *ChatGPTProvider) ExecuteAccountAction(id, action string) (map[string]in
 			}, nil
 		}
 		acct.LastError = ""
+		acct.CooldownUntil = time.Time{}
+		acct.ImageCooldownUntil = time.Time{}
 		p.pool.SetStatus(acct.ID, accounts.StatusActive)
 		var slugs []string
 		for _, m := range models {

@@ -18,10 +18,23 @@ import (
 type AudioHandler struct {
 	accountPool *accounts.Pool
 	cfg         *config.Config
+	runtime     *GatewayRuntime
 }
 
 func NewAudioHandler(pool *accounts.Pool, cfg *config.Config) *AudioHandler {
 	return &AudioHandler{accountPool: pool, cfg: cfg}
+}
+
+// SetRuntime 注入网关共享的容灾、代理健康与审计运行时。
+func (h *AudioHandler) SetRuntime(rt *GatewayRuntime) {
+	h.runtime = rt
+}
+
+func (h *AudioHandler) ensureRuntime() *GatewayRuntime {
+	if h.runtime != nil {
+		return h.runtime
+	}
+	return &GatewayRuntime{AccountPool: h.accountPool, Config: h.cfg}
 }
 
 // ── TTS ──
@@ -75,55 +88,86 @@ func (h *AudioHandler) TTS(c *gin.Context) {
 		return
 	}
 
-	account, _, err := resolveAccount(c, h.accountPool, h.cfg, true)
+	ttsModel := "tts-1"
+	rt := h.ensureRuntime()
+	res, err := rt.RunWithFailover(c, h.accountPool, h.cfg, FailoverOptions{
+		NeedsPaid:  true,
+		Capability: accounts.CapTTS.Name,
+		Model:      ttsModel,
+	}, func(acct *accounts.Account, client *bogdanfinn.TlsClient) AttemptOutcome {
+		if acct.Token == "" {
+			return AttemptOutcome{StatusCode: 400, Err: errMissingAccessToken}
+		}
+		if !acct.Type.Satisfies(accounts.CapTTS) {
+			return AttemptOutcome{StatusCode: 403, Err: errAccountCapDenied}
+		}
+		translated := chatgptrequestconverter.ConvertTTSAPIRequest(original_request.Input)
+		state := chatgpt.NewChatClientState()
+		state.ConversationID = translated.ConversationID
+		state.ParentMessageID = translated.ParentMessageID
+		resp, wsConn, _, status, callErr := conversationClientOrder(&client, acct, translated, acct.Proxy, false, state, h.accountPool)
+		return AttemptOutcome{
+			Response:   resp,
+			WSConn:     wsConn,
+			Payload:    client,
+			StatusCode: status,
+			Err:        callErr,
+		}
+	})
 	if err != nil {
-		c.JSON(400, gin.H{"error": gin.H{
+		errStatus := res.Outcome.StatusCode
+		if errStatus <= 0 {
+			errStatus = 400
+		}
+		if err == errMissingAccessToken {
+			c.JSON(400, gin.H{"error": "TTS requires a logged-in ChatGPT access token."})
+			rt.RecordAudit(c, ttsModel, res, 400, err)
+			return
+		}
+		if err == errAccountCapDenied {
+			c.JSON(403, gin.H{"error": "TTS requires a logged-in ChatGPT account."})
+			rt.RecordAudit(c, ttsModel, res, 403, err)
+			return
+		}
+		errType := "request_conversion_error"
+		errParam := interface{}("model")
+		codeVal := interface{}("request_conversion_error")
+		if res.Attempts == 0 {
+			errType = "authorization_error"
+			errParam = "Authorization"
+			codeVal = 400
+		}
+		c.JSON(errStatus, gin.H{"error": gin.H{
 			"message": err.Error(),
-			"type":    "authorization_error",
-			"param":   "Authorization",
-			"code":    400,
+			"type":    errType,
+			"param":   errParam,
+			"code":    codeVal,
 		}})
-		return
-	}
-	if account == nil || account.Token == "" {
-		c.JSON(400, gin.H{"error": "TTS requires a logged-in ChatGPT access token."})
-		return
-	}
-	if !account.Type.Satisfies(accounts.CapTTS) {
-		c.JSON(403, gin.H{"error": "TTS requires a logged-in ChatGPT account."})
+		rt.RecordAudit(c, ttsModel, res, errStatus, err)
 		return
 	}
 
+	account := res.Account
+	client, _ := res.Outcome.Payload.(*bogdanfinn.TlsClient)
+	if client == nil {
+		client = EnsureAccountClient(account)
+	}
 	proxyUrl := account.Proxy
-	client := setupClientWithProxy(proxyUrl)
-
-	// Convert the chat request to a ChatGPT request
-	translated_request := chatgptrequestconverter.ConvertTTSAPIRequest(original_request.Input)
-	clientState := chatgpt.NewChatClientState()
-	clientState.ConversationID = translated_request.ConversationID
-	clientState.ParentMessageID = translated_request.ParentMessageID
-
-	response, wsConn, _, status, err := conversationClientOrder(&client, account, translated_request, proxyUrl, false, clientState, h.accountPool)
-	if err != nil {
-		c.JSON(status, gin.H{"error": gin.H{
-			"message": err.Error(),
-			"type":    "request_conversion_error",
-			"param":   "model",
-			"code":    "request_conversion_error",
-		}})
-		return
-	}
+	response := res.Outcome.Response
+	wsConn := res.Outcome.WSConn
 	defer response.Body.Close()
 	if chatgpt.Handle_request_error(c, response) {
 		if wsConn != nil {
 			wsConn.Close()
 		}
+		rt.RecordAudit(c, ttsModel, res, response.StatusCode, FailoverStatusError(res, response.StatusCode))
 		return
 	}
 
 	msgId, convId := chatgpt.HandlerTTS(response, original_request.Input)
 	if msgId == "" || convId == "" {
 		c.JSON(500, gin.H{"error": "failed to get TTS message id"})
+		rt.RecordAudit(c, ttsModel, res, 500, FailoverStatusError(res, 500))
 		return
 	}
 	defer chatgpt.RemoveConversation(client, account, convId, proxyUrl)
@@ -144,8 +188,10 @@ func (h *AudioHandler) TTS(c *gin.Context) {
 			"param":   nil,
 			"code":    status,
 		}})
+		rt.RecordAudit(c, ttsModel, res, status, err)
 		return
 	}
+	rt.RecordAudit(c, ttsModel, res, 200, nil)
 	c.Data(200, ttsTypeMap[format], data)
 }
 
@@ -247,56 +293,70 @@ func (h *AudioHandler) handleTranscription(c *gin.Context, isTranslation bool) {
 		return
 	}
 
-	account, _, err := resolveAccount(c, h.accountPool, h.cfg, true)
-	if err != nil {
-		c.JSON(400, gin.H{"error": gin.H{
-			"message": err.Error(),
-			"type":    "authorization_error",
-			"param":   "Authorization",
-			"code":    400,
-		}})
-		return
+	modelName := c.PostForm("model")
+	if modelName == "" {
+		modelName = "whisper-1"
 	}
-	if account == nil || account.Token == "" {
-		c.JSON(400, gin.H{"error": gin.H{
-			"message": "Audio transcription requires a logged-in ChatGPT access token.",
-			"type":    "invalid_request_error",
-			"param":   "file",
-			"code":    "missing_access_token",
-		}})
-		return
-	}
-	if !account.Type.Satisfies(accounts.CapTranscribe) {
-		c.JSON(403, gin.H{"error": "Audio transcription requires a logged-in ChatGPT account."})
-		return
-	}
-
-	proxyUrl := account.Proxy
 	mimeType := fileHeader.Header.Get("Content-Type")
 	if mimeType == "" {
 		mimeType = "audio/mpeg"
 	}
 
-	// 使用账号绑定的 Client(有指纹 + 代理);不存在则新建
-	client, ok := account.Client.(*bogdanfinn.TlsClient)
-	if !ok || client == nil {
-		client = bogdanfinn.NewStdClient()
-		client.SetCookies("https://chatgpt.com", chatgpt.BasicCookies)
-		if proxyUrl != "" {
-			client.SetProxy(proxyUrl)
+	rt := h.ensureRuntime()
+	res, err := rt.RunWithFailover(c, h.accountPool, h.cfg, FailoverOptions{
+		NeedsPaid:  true,
+		Capability: accounts.CapTranscribe.Name,
+		Model:      modelName,
+	}, func(acct *accounts.Account, client *bogdanfinn.TlsClient) AttemptOutcome {
+		if acct.Token == "" {
+			return AttemptOutcome{StatusCode: 400, Err: errMissingAccessToken}
 		}
-	}
-
-	text, status, err := chatgpt.TranscribeAudio(client, account, proxyUrl, audioData, fileHeader.Filename, mimeType, language)
+		if !acct.Type.Satisfies(accounts.CapTranscribe) {
+			return AttemptOutcome{StatusCode: 403, Err: errAccountCapDenied}
+		}
+		text, status, callErr := chatgpt.TranscribeAudio(client, acct, acct.Proxy, audioData, fileHeader.Filename, mimeType, language)
+		return AttemptOutcome{Payload: text, StatusCode: status, Err: callErr}
+	})
 	if err != nil {
-		c.JSON(status, gin.H{"error": gin.H{
+		errStatus := res.Outcome.StatusCode
+		if errStatus <= 0 {
+			errStatus = 400
+		}
+		errType := "transcription_error"
+		if errStatus == 400 || errStatus == 401 || errStatus == 403 {
+			if err == errMissingAccessToken {
+				c.JSON(400, gin.H{"error": gin.H{
+					"message": "Audio transcription requires a logged-in ChatGPT access token.",
+					"type":    "invalid_request_error",
+					"param":   "file",
+					"code":    "missing_access_token",
+				}})
+			} else if err == errAccountCapDenied {
+				c.JSON(403, gin.H{"error": "Audio transcription requires a logged-in ChatGPT account."})
+			} else {
+				errType = "authorization_error"
+				c.JSON(errStatus, gin.H{"error": gin.H{
+					"message": err.Error(),
+					"type":    errType,
+					"param":   "Authorization",
+					"code":    errStatus,
+				}})
+			}
+			rt.RecordAudit(c, modelName, res, errStatus, err)
+			return
+		}
+		c.JSON(errStatus, gin.H{"error": gin.H{
 			"message": err.Error(),
-			"type":    "transcription_error",
+			"type":    errType,
 			"param":   nil,
 			"code":    "transcription_error",
 		}})
+		rt.RecordAudit(c, modelName, res, errStatus, err)
 		return
 	}
+
+	text, _ := res.Outcome.Payload.(string)
+	rt.RecordAudit(c, modelName, res, 200, nil)
 
 	switch responseFormat {
 	case "json":

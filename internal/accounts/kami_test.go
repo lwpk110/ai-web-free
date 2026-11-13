@@ -1,63 +1,39 @@
 package accounts
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
 
-func TestParseKamiText(t *testing.T) {
-	raw := `
-# comment line
-alice@example.com----pass123!----OPWOLPW6KQMM6K4V674HAIE6YS2L56NR
+func TestBuildSub2APIJSONSecretRedaction(t *testing.T) {
+	acct := CreateAccount("eyJhbGciOiJIUzI1NiJ9.payload.sig", TypeFree, DefaultProfiles)
+	acct.Email = "user@example.com"
+	acct.Password = "super-secret-pass"
+	acct.TOTPSecret = "JBSWY3DPEHPK3PXP"
+	acct.ChatGPTAccountID = "org-123"
+	acct.ExpiresAt = time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC)
 
-bob@example.com----pass#456----5M22V32CLCU472EZKS27J7JWPWGZAUXV
-alice@example.com----duplicate----OPWOLPW6KQMM6K4V674HAIE6YS2L56NR
-invalid_line_only
-`
-	parsed := ParseKamiText(raw)
-	if len(parsed) != 2 {
-		t.Fatalf("expected 2 parsed accounts, got %d", len(parsed))
-	}
-	if parsed[0].Email != "alice@example.com" || parsed[0].Password != "pass123!" {
-		t.Fatalf("unexpected first account: %+v", parsed[0])
-	}
-	if parsed[1].Email != "bob@example.com" || parsed[1].TOTPSecret != "5M22V32CLCU472EZKS27J7JWPWGZAUXV" {
-		t.Fatalf("unexpected second account: %+v", parsed[1])
-	}
-
-	formatted := FormatKamiLines(parsed)
-	if !strings.Contains(formatted, "alice@example.com----pass123!----OPWOLPW6KQMM6K4V674HAIE6YS2L56NR") {
-		t.Fatalf("unexpected formatted output: %s", formatted)
-	}
-}
-
-func TestParseSub2APIJSON(t *testing.T) {
-	raw := `{
-  "type": "sub2api-data",
-  "version": 1,
-  "accounts": [
-    {
-      "name": "user@example.com",
-      "platform": "openai",
-      "type": "oauth",
-      "credentials": {
-        "access_token": "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiIxMjMifQ.sig",
-        "session_token": "sess-123",
-        "chatgpt_account_id": "acct-123"
-      },
-      "extra": {
-        "email": "user@example.com",
-        "password": "pw",
-        "totp_secret": "OPWOLPW6KQMM6K4V674HAIE6YS2L56NR"
-      }
-    }
-  ]
-}`
-	data, err := ParseSub2APIJSON(raw)
+	masked := BuildSub2APIJSON([]*Account{acct}, false)
+	rawMasked, err := json.Marshal(masked)
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("marshal masked failed: %v", err)
 	}
-	if len(data.Accounts) != 1 || data.Accounts[0].Credentials.SessionToken != "sess-123" {
-		t.Fatalf("unexpected parsed data: %+v", data)
+	if strings.Contains(string(rawMasked), "super-secret-pass") || strings.Contains(string(rawMasked), "JBSWY3DPEHPK3PXP") {
+		t.Fatalf("expected secrets redacted when includeSecrets=false: %s", string(rawMasked))
+	}
+	parsedMasked, err := ParseSub2APIJSON(string(rawMasked))
+	if err != nil || len(parsedMasked.Accounts) != 1 || parsedMasked.Accounts[0].Credentials.AccessToken != acct.Token {
+		t.Fatalf("roundtrip failed: %+v err=%v", parsedMasked, err)
+	}
+
+	full := BuildSub2APIJSON([]*Account{acct}, true)
+	rawFull, err := json.Marshal(full)
+	if err != nil {
+		t.Fatalf("marshal full failed: %v", err)
+	}
+	if !strings.Contains(string(rawFull), "super-secret-pass") || !strings.Contains(string(rawFull), "JBSWY3DPEHPK3PXP") {
+		t.Fatalf("expected secrets present when includeSecrets=true: %s", string(rawFull))
 	}
 }

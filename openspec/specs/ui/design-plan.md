@@ -1,60 +1,34 @@
-# AI-Web-Free 多供应商免费号池网关与 Thesys OpenUI (Generative UI) 设计方案
+# AI-Web-Free 多供应商免费号池网关与 UI 架构设计方案（方案 A + 双层标准）
 
 ## 1. 仓库与技术栈基线
 
 - **项目名称**：`ai-web-free`（AI Web Free Pool & Multi-Provider Reverse Proxy Hub）
 - **远程仓库**：`https://github.com/lwpk110/ai-web-free`
 - **技术栈架构**：
-  - **后端**：100% 纯 Golang（Module: `ai-web-free`，基于 Gin + `bogdanfinn/tls-client` + Go `embed.FS`）。
-  - **前端（Thesys OpenUI Generative UI）**：
-    - 采用官方 **[thesysdev/openui](https://github.com/thesysdev/openui)** 框架生态：
-      - `@openuidev/react-lang`：核心 OpenUI Lang 解析器、`defineComponent`、`createLibrary`、`<Renderer />` 流式渲染运行时与 `library.prompt()` 生成器。
-      - `@openuidev/react-ui`：官方内置生成式 UI 组件库（`openuiChatLibrary` / `openuiLibrary`、`ThemeProvider`、内置 Charts / Tables / Forms / Cards / Tabs 组件）。
-      - `@openuidev/lang-core`：无框架依赖的 OpenUI Lang 核心解析与 System Prompt 生成器。
-    - 构建链路：`web/` 采用 Vite + React 19 + TypeScript，构建产物 `web/dist` 与预生成的 `web/system-prompt.txt` 通过 `//go:embed` 直接打包进单一 Go 二进制文件。
+  - **后端**：100% 纯 Golang（Module: `ai-web-free`，严格保持 `CGO_ENABLED=0` 静态二进制编译与 `embed.FS` 打包）。
+  - **前端（双层 AI 全栈 UI 标准）**：
+    - **全局控制台层（Tailwind CSS + Porcelain / Obsidian 精工令牌体系）**：采用方案 A「可折叠分组左侧栏 + 面包屑顶栏」骨架，默认 **Porcelain 极简亮色**（`#f8fafc` / `#ffffff` / `rgba(15,23,42,0.08)` 发丝线 + 顶部高光层）并支持一键切换 **Obsidian 精致暗色**（`#09090b` / `#18181b` / `rgba(255,255,255,0.08)`），主题选择持久化至 `localStorage`；侧栏收起时底部状态卡自动收敛为居中的 `Pool Pulse` 呼吸圆点（悬停 Tooltip 展示实时健康配额）。
+    - **前端本地持久化（Web IndexedDB `ai_web_free_studio_db`）**：采用零 CGO 约束下的浏览器 IndexedDB 方案，将图像创作工坊（`#/image`）生成的 PNG `Blob` / 远程链接及提示词元数据与对话操场（`#/chat`）会话历史持久化至本地，刷新页面无损恢复；同时保留多模态资产下载与导出能力。
+    - **生成式交互层（Thesys OpenUI 局部作用域）**：保留 `@openuidev/react-lang`、`@openuidev/react-ui` 与预生成的 `web/system-prompt.txt`，但**严格收敛在对话操场（`#/chat`）的消息流 `<Renderer />` 域内**（`<ThemeProvider>` + `.openui-scope`），避免对话主题污染控制台全局组件。
 
 ---
 
-## 2. Thesys OpenUI (`openui-lang`) 架构设计
+## 2. 方案 A 信息架构与 6 大核心视图
 
-### 2.1 工作流概览
+导航分两大分组，支持一键折叠左侧栏（进入图像创作工坊 `#/image` 时默认自动收起以最大化画布宽度），顶栏提供 `48px` 半透明毛玻璃面包屑、`⌘K` 快速命令面板、Porcelain/Obsidian 主题切换、`/v1` 实时端点状态胶囊与 `ADMIN_TOKEN` 安全锁入口：
 
-```mermaid
-flowchart LR
-    A["aiWebFreeLibrary (openuiChatLibrary.extend)"] --> B["library.prompt() / system-prompt.txt"]
-    B --> C["Go 网关 (/v1/chat/completions)"]
-    C --> D["ChatGPT 免费号池 (gpt-5-6 / gpt-6)"]
-    D --> E["OpenUI Lang 流式输出 (root = Card([...]))"]
-    E --> F["<Renderer library={aiWebFreeLibrary} isStreaming />"]
-    F --> G["实时可交互组件 (图表/表单/号池卡片/Image 2.5预览)"]
-```
-
-### 2.2 扩展组件库设计（`web/src/lib/openui-library.tsx`）
-
-基于 `@openuidev/react-ui` 的 `openuiChatLibrary.extend(...)`，在保留全部官方内置组件（`Card`、`Stack`、`Tabs`、`Table`、`BarChart`、`LineChart`、`PieChart`、`Form`、`Input`、`Select`、`Button`、`TextContent`、`CodeBlock`、`Callout` 等）的基础上，使用 `defineComponent` + `zod/v4` 注册 3 个 `ai-web-free` 专属生成式业务组件：
-
-1. **`PoolOverviewCard(provider, total, active, rateLimited, expired, banned, freeNoAuthCount)`**
-   - 用于在对话流中实时展示多供应商免费号池健康度 KPI 大盘与一键全量测活按钮。
-2. **`AccountDiagnosticTable(provider, accounts)`**
-   - 在对话流中渲染可交互的账号诊断表格，每行支持直接点击触发 `[⚡ 测活]`、`[🔄 续期]`、`[⏸ 启停]`。
-3. **`ImageStudioCard(prompt, model, size, quality)`**
-   - 当用户要求生成或修改图片时，模型输出 `ImageStudioCard(...)`，组件直接在聊天流内调用 `/v1/images/generations`（默认 `gpt-image-2.5-sunburst` 或 `gpt-image-2.5-flare`）渲染实时进度与高清大图。
-
-### 2.3 System Prompt 注入与对外 API 兼容性
-
-- **内置 OpenUI Generative Workbench（默认开启 Generative UI 模式）**：
-  - 前端自动通过 `aiWebFreeLibrary.prompt(aiWebFreePromptOptions)` 生成 OpenUI Lang System Prompt（或携带 `X-OpenUI-Lang: true` 请求头），并将模型流式返回的 `openui-lang` 语句实时传入 `<Renderer />`。
-  - 支持一键切换为「纯文本 Markdown 模式」，满足普通文本问答调试需求。
-- **对外 `/v1/chat/completions` 接口兼容**：
-  - 默认情况下（未传 `X-OpenUI-Lang: true`），完全保持标准 OpenAI Chat Completions 行为，不影响任何第三方客户端。
-  - 当请求头包含 `X-OpenUI-Lang: true` 且消息列表中未包含 OpenUI System Prompt 时，Go 后端自动注入内嵌的 `web/system-prompt.txt`，让外部轻量客户端也能直接获得 OpenUI Lang 流式响应。
+| 分组 | 路由 | 视图名称 | 核心能力与接口联动 |
+| :--- | :--- | :--- | :--- |
+| **监控与运维** | `#/overview` | **网关总览大盘** | 号池可用率、卡密串行自动续期队列实时态、代理节点健康度、最近 1000 次请求自愈率 Sparkline KPI、真实审计日志 + 代理延迟聚合的双指标柱状图（`DualThroughputChart`）、点击直达详情与 `/v1` 能力矩阵 |
+| **监控与运维** | `#/pools` | **号池与供应商** | 多供应商切换（ChatGPT Web 已激活 + 规划中槽位）；首字母头像、掩码 Token + `tls_profile` 标签、动态色彩 TTL 进度条与悬停无边框静默操作（`.hover-reveal`）；分级冷却状态展示与倒计时；批量测活/卡密重登/导入/**导出 (`sub2api_json` / `access_tokens` / `kami`)**；30 秒 SVG 动态进度环实时 2FA TOTP 弹窗（`TotpRingModal`） |
+| **监控与运维** | `#/network` | **代理与接入指南** | `proxies.txt` 代理节点健康矩阵（延迟、可用状态、绑定账号数、连续失败数）；一键延迟测活 (`POST /admin/api/v1/proxies/probe`)；保存热更新校绑；实时聚合 `GET /v1/models?include_builtins=true` 目录刷新（覆盖对话、`gpt-image-*`/`dall-e-3` 图像及 `tts-1`/`whisper-1` 音频能力）、分类筛选与 `cURL` / `Python` / `TypeScript` 调用示例 |
+| **监控与运维** | `#/logs` | **请求日志与 Failover** | 采用 Helicone / Langfuse 风格主从分栏追踪视口（`lg:grid-cols-[1fr_370px]` Split Trace Inspector），基于零 CGO 内存环形缓冲支持筛选、状态切换与右侧实时诊断/切号轨迹检查器 |
+| **模型操场** | `#/chat` | **对话与 OpenUI 操场** | 仅在消息渲染区启用 `<Renderer library={aiWebFreeLibrary} isStreaming />`（支持切换纯文本 Markdown 模式、查看 `system-prompt.txt`）；支持 `/` 快捷指令浮层、实时聊天模型目录选择及 IndexedDB 自动同步 |
+| **模型操场** | `#/image` | **图像创作工坊** | 左侧 `336px` 独立参数台支持 `gpt-image-1` / `gpt-image-2.5-sunburst` / `flare` / `2.6` / `dall-e-3` 文生图、SVG 比例线框选择器、多图参考编辑（`/v1/images/edits`）及自动 Failover 切号提示；右侧点阵网格（`.studio-grid-bg`）作品画廊由 IndexedDB 二进制 `Blob` 持久化驱动，支持 Remix 复刻与分栏灯箱预览 |
 
 ---
 
-## 3. 三合一前端视图架构
+## 3. Thesys OpenUI (`openui-lang`) 局部规范
 
-| 视图路由 | 视图名称 | 核心能力 |
-| :--- | :--- | :--- |
-| `#/chat` | **✨ OpenUI Generative Workbench** | 基于 `@openuidev/react-lang` `<Renderer />` 与 `@openuidev/react-ui` `ThemeProvider` 的生成式 UI 对话工作台；支持预置 Prompt 一键生成仪表盘、号池分析大盘、交互式表单、Image 2.5 卡片与实时 OpenUI Lang 源码检视器 |
-| `#/pools` | **🔋 免费号池与多供应商中心** | 多供应商插件切换（一期激活 `ChatGPT Web`）；KPI 统计卡片；账号列表筛选/搜索；单号测活 (`probe`)、续期 (`refresh`)、启停、删除；批量导入 `access_token` / `session_token` / `refresh_token`；代理池 (`proxies.txt`) 在线配置 |
-| `#/image` | **🎨 Image 2.5 创作工坊** | 支持 `gpt-image-2.5-sunburst`（高细节精绘）、`gpt-image-2.5-flare`（极速生图）、`gpt-image-2.5`、`gpt-image-2.6`、`dall-e-3`；支持文生图与多参考图合拍 (`POST /v1/images/edits`) |
+- **扩展组件库（`web/src/lib/openui-library.tsx`）**：在 `@openuidev/react-ui` 的 `openuiChatLibrary` 基础上通过 `zod/v4` 注册 `PoolOverviewCard`、`AccountDiagnosticTable`、`ImageStudioCard`。
+- **对外 `/v1/chat/completions` 兼容**：默认保持标准 OpenAI Chat Completions 行为；携带请求头 `X-OpenUI-Lang: true` 时由 Go 网关自动前置注入内嵌的 `web/system-prompt.txt`。

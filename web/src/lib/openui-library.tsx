@@ -10,6 +10,16 @@ import {
   openuiChatLibrary,
   openuiChatPromptOptions,
 } from "@openuidev/react-ui";
+import {
+  Activity,
+  Download,
+  Image as ImageIcon,
+  Loader2,
+  Pause,
+  Play,
+  RefreshCw,
+  Sparkles,
+} from "lucide-react";
 import { z } from "zod/v4";
 import {
   executeAccountAction,
@@ -43,7 +53,7 @@ export const PoolOverviewCard = defineComponent({
         const res = await fetchAccounts(providerId);
         setStats(res.stats);
       } catch {
-        // fallback if offline
+        // ignore if unavailable
       }
     };
 
@@ -56,6 +66,7 @@ export const PoolOverviewCard = defineComponent({
       try {
         await probeAllAccounts(providerId);
         await loadStats();
+        window.dispatchEvent(new Event("pool-updated"));
       } finally {
         setProbing(false);
       }
@@ -65,45 +76,67 @@ export const PoolOverviewCard = defineComponent({
       <div className="genui-custom-card">
         <div className="genui-custom-header">
           <div>
-            <span className="genui-badge-pill">OpenUI Live Widget</span>
-            <h4>{props.title || `${providerId.toUpperCase()} 免费号池实时健康大盘`}</h4>
+            <span className="genui-badge-pill">Live Telemetry</span>
+            <h4>{props.title || `${providerId.toUpperCase()} 号池实时健康状态`}</h4>
           </div>
-          <div style={{ display: "flex", gap: 8 }}>
+          <div className="genui-header-actions">
             <button
+              type="button"
               className="btn-secondary btn-sm"
               onClick={handleProbeAll}
               disabled={probing}
             >
-              {probing ? "⚡ 测活中..." : "⚡ 全池测活"}
+              {probing ? (
+                <Loader2 size={14} className="spin" />
+              ) : (
+                <Activity size={14} />
+              )}
+              <span>{probing ? "测活中..." : "全池测活"}</span>
             </button>
             <button
+              type="button"
               className="btn-primary btn-sm"
               onClick={() =>
-                triggerAction(`请深入分析 ${providerId} 号池当前各账号状态并给出维护建议`)
+                triggerAction(
+                  `请深入分析 ${providerId} 号池当前各账号状态并给出维护建议`
+                )
               }
             >
-              AI 诊断建议
+              <Sparkles size={14} />
+              <span>AI 诊断建议</span>
             </button>
           </div>
         </div>
         <div className="genui-kpi-grid">
           <div className="genui-kpi-box">
-            <span className="kpi-label">总账号池容量</span>
+            <span className="kpi-label">号池总容量</span>
             <strong className="kpi-val">{stats ? stats.total : "--"}</strong>
+            <span className="kpi-sub">
+              Free {stats?.free_count ?? 0} · 访客 {stats?.noauth_count ?? 0}
+            </span>
           </div>
           <div className="genui-kpi-box active">
-            <span className="kpi-label">正常可用 (Active)</span>
+            <span className="kpi-label">可用账号 (Active)</span>
             <strong className="kpi-val">{stats ? stats.active : "--"}</strong>
+            <span className="kpi-sub">
+              待登录 {stats?.pending ?? 0} · 调用 {stats?.total_calls ?? 0}
+            </span>
           </div>
           <div className="genui-kpi-box warn">
             <span className="kpi-label">限流冷却 (429)</span>
-            <strong className="kpi-val">{stats ? stats.rate_limited : "--"}</strong>
+            <strong className="kpi-val">
+              {stats ? stats.rate_limited : "--"}
+            </strong>
+            <span className="kpi-sub">触发 429 自动退避恢复</span>
           </div>
           <div className="genui-kpi-box danger">
-            <span className="kpi-label">过期 / 封禁</span>
+            <span className="kpi-label">过期 / 停用 / 封禁</span>
             <strong className="kpi-val">
-              {stats ? stats.expired + stats.banned : "--"}
+              {stats ? stats.expired + stats.disabled + stats.banned : "--"}
             </strong>
+            <span className="kpi-sub">
+              失败请求 {stats?.failed_calls ?? 0}
+            </span>
           </div>
         </div>
       </div>
@@ -148,6 +181,7 @@ export const AccountDiagnosticTable = defineComponent({
       try {
         await executeAccountAction(providerId, id, act);
         await load();
+        window.dispatchEvent(new Event("pool-updated"));
       } finally {
         setLoadingId(null);
       }
@@ -157,36 +191,44 @@ export const AccountDiagnosticTable = defineComponent({
       <div className="genui-custom-card">
         <div className="genui-custom-header">
           <div>
-            <span className="genui-badge-pill">OpenUI Interactive Table</span>
+            <span className="genui-badge-pill">Account Diagnostics</span>
             <h4>
-              账号池实时诊断列表 ({accounts.length} 个账号
+              账号诊断列表 ({accounts.length} 个账号
               {props.statusFilter ? ` · 筛选: ${props.statusFilter}` : ""})
             </h4>
           </div>
-          <button className="btn-secondary btn-sm" onClick={load}>
-            刷新列表
+          <button
+            type="button"
+            className="btn-secondary btn-sm"
+            onClick={load}
+          >
+            <RefreshCw size={14} />
+            <span>刷新</span>
           </button>
         </div>
         <div className="table-scroll">
           <table className="console-table">
             <thead>
               <tr>
-                <th>ID</th>
+                <th>账号标识</th>
                 <th>类型</th>
                 <th>状态</th>
                 <th>Token 剩余寿命</th>
-                <th>操作</th>
+                <th className="col-actions">操作</th>
               </tr>
             </thead>
             <tbody>
               {accounts.slice(0, 10).map((acc) => (
                 <tr key={acc.id}>
-                  <td className="mono">{acc.id}</td>
+                  <td className="mono">
+                    {acc.email || acc.chatgpt_account_id || acc.id}
+                  </td>
                   <td>
                     <span className="tag-type">{acc.type}</span>
                   </td>
                   <td>
                     <span className={`status-pill status-${acc.status}`}>
+                      <span className="status-dot" />
                       {acc.status}
                     </span>
                   </td>
@@ -195,17 +237,24 @@ export const AccountDiagnosticTable = defineComponent({
                       ? `${acc.remaining_days} 天`
                       : "免登会话"}
                   </td>
-                  <td>
-                    <div style={{ display: "flex", gap: 6 }}>
+                  <td className="col-actions">
+                    <div className="action-btn-group">
                       <button
+                        type="button"
                         className="btn-secondary btn-xs"
                         disabled={loadingId === `${acc.id}:probe`}
                         onClick={() => runAction(acc.id, "probe")}
                       >
-                        ⚡ 测活
+                        <Activity size={12} />
+                        <span>测活</span>
                       </button>
                       <button
+                        type="button"
                         className="btn-secondary btn-xs"
+                        disabled={
+                          loadingId === `${acc.id}:enable` ||
+                          loadingId === `${acc.id}:disable`
+                        }
                         onClick={() =>
                           runAction(
                             acc.id,
@@ -213,7 +262,12 @@ export const AccountDiagnosticTable = defineComponent({
                           )
                         }
                       >
-                        {acc.status === "disabled" ? "启用" : "停用"}
+                        {acc.status === "disabled" ? (
+                          <Play size={12} />
+                        ) : (
+                          <Pause size={12} />
+                        )}
+                        <span>{acc.status === "disabled" ? "启用" : "停用"}</span>
                       </button>
                     </div>
                   </td>
@@ -221,7 +275,7 @@ export const AccountDiagnosticTable = defineComponent({
               ))}
               {accounts.length === 0 && (
                 <tr>
-                  <td colSpan={5} style={{ textAlign: "center", opacity: 0.6 }}>
+                  <td colSpan={5} className="empty-table-cell">
                     当前无匹配账号
                   </td>
                 </tr>
@@ -253,13 +307,13 @@ export const ImageStudioCard = defineComponent({
       props.model || "gpt-image-2.5-sunburst"
     );
     const [size, setSize] = useState(props.size || "1024x1024");
-    const [quality, setQuality] = useState(props.quality || "hd");
+    const [quality] = useState(props.quality || "hd");
     const [loading, setLoading] = useState(false);
     const [imageUrl, setImageUrl] = useState<string | null>(null);
     const [error, setError] = useState<string | null>(null);
 
     const handleGenerate = async () => {
-      if (!prompt.trim()) return;
+      if (!prompt.trim() || loading) return;
       setLoading(true);
       setError(null);
       try {
@@ -288,8 +342,8 @@ export const ImageStudioCard = defineComponent({
       <div className="genui-custom-card">
         <div className="genui-custom-header">
           <div>
-            <span className="genui-badge-pill">GPT-Image 2.5 Widget</span>
-            <h4>Image 2.5 实时内嵌生图卡片</h4>
+            <span className="genui-badge-pill">Image Generation</span>
+            <h4>GPT-Image 2.5 内嵌生图卡片</h4>
           </div>
           <select
             className="console-select"
@@ -297,44 +351,62 @@ export const ImageStudioCard = defineComponent({
             onChange={(e) => setModel(e.target.value)}
           >
             <option value="gpt-image-2.5-sunburst">
-              gpt-image-2.5-sunburst (高细节精绘)
+              gpt-image-2.5-sunburst (高精)
             </option>
             <option value="gpt-image-2.5-flare">
-              gpt-image-2.5-flare (极速生成)
+              gpt-image-2.5-flare (极速)
             </option>
             <option value="gpt-image-2.5">gpt-image-2.5 (标准)</option>
             <option value="gpt-image-2.6">gpt-image-2.6</option>
           </select>
         </div>
-        <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+        <div className="inline-image-form">
           <input
             className="console-input"
             style={{ flex: 1 }}
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
-            placeholder="输入生图提示词..."
+            placeholder="输入图像生成提示词..."
           />
           <select
             className="console-select"
             value={size}
             onChange={(e) => setSize(e.target.value)}
           >
-            <option value="1024x1024">1024x1024</option>
-            <option value="1792x1024">1792x1024 (横版)</option>
-            <option value="1024x1792">1024x1792 (竖版)</option>
+            <option value="1024x1024">1:1 (1024×1024)</option>
+            <option value="1792x1024">16:9 (1792×1024)</option>
+            <option value="1024x1792">9:16 (1024×1792)</option>
           </select>
           <button
+            type="button"
             className="btn-primary"
             onClick={handleGenerate}
             disabled={loading}
           >
-            {loading ? "🎨 生成中..." : "🎨 立即生成"}
+            {loading ? (
+              <Loader2 size={14} className="spin" />
+            ) : (
+              <ImageIcon size={14} />
+            )}
+            <span>{loading ? "生成中..." : "生成图像"}</span>
           </button>
         </div>
         {error && <div className="error-banner">{error}</div>}
         {imageUrl && (
           <div className="embedded-image-preview">
             <img src={imageUrl} alt={prompt} />
+            <div className="embedded-image-actions">
+              <a
+                href={imageUrl}
+                download="ai-web-free-image.png"
+                target="_blank"
+                rel="noreferrer"
+                className="btn-secondary btn-xs"
+              >
+                <Download size={12} />
+                <span>下载 / 打开原图</span>
+              </a>
+            </div>
           </div>
         )}
       </div>
@@ -393,18 +465,17 @@ export const aiWebFreeLibrary = createLibrary({
 export const aiWebFreePromptOptions: PromptOptions = {
   ...openuiChatPromptOptions,
   preamble:
-    "You are the AI-Web-Free Generative UI Assistant powered by Thesys OpenUI Lang. Always respond with valid OpenUI Lang starting with `root = Card([...])`. Combine built-in OpenUI components (Header, TextContent, BarChart, LineChart, PieChart, Table, Tabs, Form, Callout, CodeBlock) and custom AI-Web-Free components (PoolOverviewCard, AccountDiagnosticTable, ImageStudioCard) to build rich, interactive interfaces.",
+    "You are the AI-Web-Free Generative UI Assistant powered by OpenUI Lang. Always respond with valid OpenUI Lang starting with `root = Card([...])`. Combine built-in OpenUI components (Header, TextContent, BarChart, LineChart, PieChart, Table, Tabs, Form, Callout, CodeBlock) and custom AI-Web-Free components (PoolOverviewCard, AccountDiagnosticTable, ImageStudioCard) to build clean, production-grade interactive interfaces.",
   additionalRules: [
     ...(openuiChatPromptOptions.additionalRules || []),
-    "When the user asks about account pool status, health metrics, or provider overview, include PoolOverviewCard(\"chatgpt\", \"ChatGPT 免费号池实时健康大盘\") and/or AccountDiagnosticTable(\"chatgpt\") inside Card.",
-    "When the user wants to generate or preview an image, include ImageStudioCard(prompt, \"gpt-image-2.5-sunburst\", \"1024x1024\", \"hd\") inside Card.",
+    'When the user asks about account pool status, health metrics, or provider overview, include PoolOverviewCard("chatgpt", "ChatGPT 号池实时健康状态") and/or AccountDiagnosticTable("chatgpt") inside Card.',
+    'When the user wants to generate or preview an image, include ImageStudioCard(prompt, "gpt-image-2.5-sunburst", "1024x1024", "hd") inside Card.',
   ],
   examples: [
     ...(openuiChatPromptOptions.examples || []),
-    `root = Card([header, overview, chart, table])
-header = CardHeader("AI-Web-Free 免费号池与模型负载大盘", "基于 Thesys OpenUI Lang 实时流式生成")
-overview = PoolOverviewCard("chatgpt", "ChatGPT Web 免费号池状态")
-chart = BarChart(["gpt-5-6", "gpt-6", "gpt-image-2.5-sunburst", "gpt-image-2.5-flare"], [Series("今日调用量", [128, 94, 46, 82])])
+    `root = Card([header, overview, table])
+header = CardHeader("ChatGPT Web 免费号池运行状态", "实时号池监控与账号诊断")
+overview = PoolOverviewCard("chatgpt", "号池核心指标")
 table = AccountDiagnosticTable("chatgpt")`,
   ],
 };

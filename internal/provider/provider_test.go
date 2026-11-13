@@ -95,3 +95,66 @@ func TestChatGPTProviderImportAndActions(t *testing.T) {
 		t.Fatalf("expected 1 remaining account")
 	}
 }
+
+func TestChatGPTProviderImportKamiAndSub2API(t *testing.T) {
+	pool := accounts.NewPool(nil)
+	proxyPool := proxy.NewPool([]string{"http://127.0.0.1:8080"})
+	cfg := &config.Config{}
+	p := NewChatGPTProvider(pool, proxyPool, cfg, nil)
+
+	// 1. 测试卡密格式导入（不触发浏览器登录）
+	kamiRes, err := p.ImportCredentials(ImportRequest{
+		CredentialType: "kami",
+		RawText:        "alice@example.com----pass123----JBSWY3DPEHPK3PXP\nbob@example.com----pass456----JBSWY3DPEHPK3PXQ",
+		Persist:        false,
+		AutoLogin:      false,
+	})
+	if err != nil {
+		t.Fatalf("kami import failed: %v", err)
+	}
+	if kamiRes.Added != 2 || p.Stats().Pending != 2 {
+		t.Fatalf("unexpected kami import result: %+v stats=%+v", kamiRes, p.Stats())
+	}
+
+	// 2. 测试 TOTP 动作
+	snaps := p.ListAccounts("free", "pending", "alice@example.com")
+	if len(snaps) != 1 {
+		t.Fatalf("expected 1 pending alice account, got %d", len(snaps))
+	}
+	totpRes, err := p.ExecuteAccountAction(snaps[0].ID, "totp")
+	if err != nil {
+		t.Fatalf("totp action failed: %v", err)
+	}
+	if code, ok := totpRes["totp_code"].(string); !ok || len(code) != 6 {
+		t.Fatalf("unexpected totp_code: %+v", totpRes)
+	}
+
+	// 3. 测试 Sub2API JSON 导入激活已有 pending 账号
+	subRes, err := p.ImportCredentials(ImportRequest{
+		CredentialType: "sub2api_json",
+		RawText: `{
+			"type": "sub2api-data",
+			"version": 1,
+			"accounts": [{
+				"name": "alice@example.com",
+				"credentials": {
+					"access_token": "tok-alice-123",
+					"session_token": "sess-alice-123",
+					"chatgpt_account_id": "acct-alice-123"
+				},
+				"extra": {
+					"email": "alice@example.com",
+					"password": "pass123",
+					"totp_secret": "JBSWY3DPEHPK3PXP"
+				}
+			}]
+		}`,
+		Persist: false,
+	})
+	if err != nil {
+		t.Fatalf("sub2api_json import failed: %v", err)
+	}
+	if subRes.Added != 1 || p.Stats().Active != 1 {
+		t.Fatalf("unexpected sub2api import result: %+v stats=%+v", subRes, p.Stats())
+	}
+}
