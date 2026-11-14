@@ -1073,6 +1073,114 @@ tr:hover .hover-reveal,
   color: var(--text-secondary);
 }
 
+/* Built-in ChatGPT Widget / JSX Markup Rendering */
+.copilot-md .md-widget-block {
+  margin: 0.55rem 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.copilot-md .md-widget-block:first-child {
+  margin-top: 0;
+}
+
+.copilot-md .md-widget-row {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.625rem;
+}
+
+.copilot-md .md-widget-box {
+  color: var(--text-primary);
+  box-sizing: border-box;
+}
+
+.copilot-md .md-widget-grid {
+  width: 100%;
+}
+
+.copilot-md .md-widget-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  width: fit-content;
+  align-self: flex-start;
+  padding: 0.14rem 0.52rem;
+  border-radius: 9999px;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  line-height: 1.35;
+  white-space: nowrap;
+}
+
+.copilot-md .md-widget-row > .md-widget-badge {
+  align-self: center;
+}
+
+.copilot-md .md-widget-badge.is-lg {
+  padding: 0.28rem 0.72rem;
+  font-size: 0.75rem;
+}
+
+.copilot-md .md-widget-badge.is-xs {
+  padding: 0.08rem 0.4rem;
+  font-size: 0.65rem;
+}
+
+.copilot-md .md-widget-tone-neutral {
+  background: var(--bg-muted);
+  color: var(--text-secondary);
+  border-color: var(--hairline);
+}
+
+.copilot-md .md-widget-title {
+  display: inline;
+  font-weight: 700;
+  line-height: 1.25;
+  letter-spacing: -0.015em;
+}
+
+.copilot-md .md-widget-box > .md-widget-title,
+.copilot-md .md-widget-block > .md-widget-title {
+  display: block;
+}
+
+.copilot-md .md-widget-text {
+  line-height: 1.5;
+}
+
+.copilot-md .md-widget-callout {
+  padding: 0.65rem 0.85rem;
+  border-radius: 0.625rem;
+  font-size: 0.75rem;
+  line-height: 1.55;
+}
+
+.copilot-md .md-widget-progress-track {
+  width: 100%;
+  height: 10px;
+  border-radius: 9999px;
+  background: var(--bg-muted);
+  overflow: hidden;
+  border: 1px solid var(--hairline);
+}
+
+.copilot-md .md-widget-progress-fill {
+  height: 100%;
+  border-radius: 9999px;
+  transition: width 0.25s ease;
+}
+
+.copilot-md .md-widget-details {
+  padding: 0.55rem 0.75rem;
+  border-radius: 0.625rem;
+  border: 1px solid var(--hairline);
+  background: var(--bg-surface);
+}
+
 @keyframes spin {
   from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }
