@@ -12,6 +12,7 @@ import (
 
 	"ai-web-free/internal/accounts"
 	"ai-web-free/internal/audit"
+	"ai-web-free/internal/chatgpt"
 	"ai-web-free/internal/config"
 	"ai-web-free/internal/provider"
 	"ai-web-free/internal/proxy"
@@ -70,6 +71,22 @@ func (h *AdminHandler) kamiWorker() *provider.KamiRenewWorker {
 	return nil
 }
 
+func (h *AdminHandler) providerAsChatGPT(providerID string) *provider.ChatGPTProvider {
+	if h.registry == nil {
+		return nil
+	}
+	if p, ok := h.registry.Get(providerID); ok {
+		if cg, ok := p.(*provider.ChatGPTProvider); ok {
+			return cg
+		}
+	}
+	return nil
+}
+
+func (h *AdminHandler) chatgptProvider() *provider.ChatGPTProvider {
+	return h.providerAsChatGPT("chatgpt")
+}
+
 func (h *AdminHandler) boundProxyCounts() map[string]int {
 	if pool := h.accountPool(); pool != nil {
 		return pool.BoundProxyCounts()
@@ -124,6 +141,12 @@ func (h *AdminHandler) Overview(c *gin.Context) {
 	if kw := h.kamiWorker(); kw != nil {
 		kamiStats = kw.Stats()
 	}
+	var activeLoginTask *provider.KamiLoginTask
+	var activeProbeTask *provider.ProbeTask
+	if cg := h.chatgptProvider(); cg != nil {
+		activeLoginTask = cg.ActiveKamiLoginTask()
+		activeProbeTask = cg.ActiveProbeTask()
+	}
 	_, auditSummary := h.auditLog().Query("all", "", 1)
 
 	c.JSON(http.StatusOK, gin.H{
@@ -139,6 +162,8 @@ func (h *AdminHandler) Overview(c *gin.Context) {
 		"proxies":                proxies,
 		"proxies_summary":        buildProxySummary(proxyNodes),
 		"kami_worker":            kamiStats,
+		"login_task":             activeLoginTask,
+		"probe_task":             activeProbeTask,
 		"audit_summary":          auditSummary,
 		"providers":              providerSummaries,
 	})
@@ -179,11 +204,21 @@ func (h *AdminHandler) ListAccounts(c *gin.Context) {
 	search := c.Query("q")
 
 	list := p.ListAccounts(typeFilter, statusFilter, search)
-	c.JSON(http.StatusOK, gin.H{
+	resp := gin.H{
 		"provider": providerID,
 		"stats":    p.Stats(),
 		"accounts": list,
-	})
+	}
+	if cg := h.providerAsChatGPT(providerID); cg != nil {
+		resp["login_task"] = cg.ActiveKamiLoginTask()
+		resp["probe_task"] = cg.ActiveProbeTask()
+		if kw := cg.KamiWorker(); kw != nil {
+			resp["kami_worker"] = kw.Stats()
+		} else if kw := h.kamiWorker(); kw != nil {
+			resp["kami_worker"] = kw.Stats()
+		}
+	}
+	c.JSON(http.StatusOK, resp)
 }
 
 // BulkUpdateAccountProxy applies one proxy binding to a selected account set.
@@ -316,7 +351,7 @@ func (h *AdminHandler) ImportAccounts(c *gin.Context) {
 	})
 }
 
-// AccountAction 对单个账号执行操作（probe / refresh / enable / disable / delete）
+// AccountAction 对单个账号执行操作（probe / refresh / login / enable / disable / delete）
 func (h *AdminHandler) AccountAction(c *gin.Context) {
 	providerID := c.Param("provider")
 	accountID := c.Param("id")
@@ -326,13 +361,27 @@ func (h *AdminHandler) AccountAction(c *gin.Context) {
 		return
 	}
 	var body struct {
-		Action string `json:"action"`
+		Action   string `json:"action"`
+		Headless *bool  `json:"headless"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil || body.Action == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "缺少 action 参数"}})
 		return
 	}
-	result, err := p.ExecuteAccountAction(accountID, body.Action)
+	headless := true
+	if body.Headless != nil {
+		headless = *body.Headless
+	}
+	type actionWithOpts interface {
+		ExecuteAccountActionWithOpts(id, action string, headless bool) (map[string]interface{}, error)
+	}
+	var result map[string]interface{}
+	var err error
+	if runner, ok := p.(actionWithOpts); ok {
+		result, err = runner.ExecuteAccountActionWithOpts(accountID, body.Action, headless)
+	} else {
+		result, err = p.ExecuteAccountAction(accountID, body.Action)
+	}
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": err.Error()}})
 		return
@@ -423,6 +472,14 @@ func (h *AdminHandler) KamiLoginTask(c *gin.Context) {
 }
 
 func probeAllProviderAccounts(p provider.ProviderPlugin) (probed, passed, failed int, results []map[string]interface{}) {
+	if runner, ok := p.(interface {
+		StartOrRunProbeAll(bool) (provider.ProbeTask, error)
+	}); ok {
+		if task, err := runner.StartOrRunProbeAll(false); err == nil {
+			return task.Probed, task.Passed, task.Failed, task.Results
+		}
+	}
+
 	snapshots := p.ListAccounts("free", "", "")
 	puidSnaps := p.ListAccounts("puid", "", "")
 	snapshots = append(snapshots, puidSnaps...)
@@ -461,12 +518,125 @@ func probeAllProviderAccounts(p provider.ProviderPlugin) (probed, passed, failed
 	return len(results), passed, failed, results
 }
 
-// ProbeAllAccounts 批量并发测活当前供应商的所有非免登账号
+// CancelKamiLogin 从正在运行的重登或自动续期等待队列中取消尚未开始执行的账号。
+func (h *AdminHandler) CancelKamiLogin(c *gin.Context) {
+	providerID := c.Param("provider")
+	p, ok := h.registry.Get(providerID)
+	if !ok {
+		c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"message": "未找到供应商插件: " + providerID}})
+		return
+	}
+	cg := h.providerAsChatGPT(providerID)
+	if cg == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "该供应商插件不支持队列取消"}})
+		return
+	}
+	var body struct {
+		TaskID    string `json:"task_id"`
+		AccountID string `json:"account_id"`
+		CancelAll bool   `json:"cancel_all"`
+	}
+	if c.Request.ContentLength > 0 {
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "请求 JSON 格式无效: " + err.Error()}})
+			return
+		}
+	}
+
+	task, count, err := cg.CancelKamiLogin(body.TaskID, body.AccountID, body.CancelAll)
+	if err != nil && !body.CancelAll && strings.TrimSpace(body.AccountID) != "" {
+		if kw := cg.KamiWorker(); kw != nil && kw.CancelQueued(strings.TrimSpace(body.AccountID)) {
+			c.JSON(http.StatusOK, gin.H{
+				"provider":  providerID,
+				"cancelled": 1,
+				"task":      cg.ActiveKamiLoginTask(),
+				"stats":     p.Stats(),
+			})
+			return
+		}
+	}
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": err.Error()}})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"provider":  providerID,
+		"cancelled": count,
+		"task":      task,
+		"stats":     p.Stats(),
+	})
+}
+
+// DismissTask 标记已完成的可观察战报（重登或全池测活）为已关闭。
+func (h *AdminHandler) DismissTask(c *gin.Context) {
+	providerID := c.Param("provider")
+	if _, ok := h.registry.Get(providerID); !ok {
+		c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"message": "未找到供应商插件: " + providerID}})
+		return
+	}
+	cg := h.providerAsChatGPT(providerID)
+	if cg == nil {
+		c.JSON(http.StatusOK, gin.H{"ok": true, "dismissed": false})
+		return
+	}
+	var body struct {
+		Kind   string `json:"kind"`
+		TaskID string `json:"task_id"`
+	}
+	if c.Request.ContentLength > 0 {
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "请求 JSON 格式无效: " + err.Error()}})
+			return
+		}
+	}
+	dismissed := false
+	switch strings.ToLower(strings.TrimSpace(body.Kind)) {
+	case "login":
+		dismissed = cg.DismissKamiLoginTask(body.TaskID)
+	case "probe":
+		dismissed = cg.DismissProbeTask(body.TaskID)
+	default:
+		if cg.DismissKamiLoginTask(body.TaskID) {
+			dismissed = true
+		}
+		if cg.DismissProbeTask(body.TaskID) {
+			dismissed = true
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "dismissed": dismissed})
+}
+
+// ProbeAllAccounts 批量并发测活当前供应商的所有非免登账号（支持 ?async=true 后台异步追踪进度）
 func (h *AdminHandler) ProbeAllAccounts(c *gin.Context) {
 	providerID := c.Param("provider")
 	p, ok := h.registry.Get(providerID)
 	if !ok {
 		c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"message": "未找到供应商插件: " + providerID}})
+		return
+	}
+
+	async := c.Query("async") == "true" || c.Query("async") == "1"
+	if runner, ok := p.(interface {
+		StartOrRunProbeAll(bool) (provider.ProbeTask, error)
+	}); ok {
+		task, err := runner.StartOrRunProbeAll(async)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": err.Error()}})
+			return
+		}
+		status := http.StatusOK
+		if async {
+			status = http.StatusAccepted
+		}
+		c.JSON(status, gin.H{
+			"provider": providerID,
+			"task":     task,
+			"probed":   task.Probed,
+			"passed":   task.Passed,
+			"failed":   task.Failed,
+			"results":  task.Results,
+			"stats":    p.Stats(),
+		})
 		return
 	}
 
@@ -667,4 +837,140 @@ func (h *AdminHandler) ExportAccounts(c *gin.Context) {
 	default:
 		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "不支持的导出格式: " + format}})
 	}
+}
+
+func respondAdminModelsCatalog(
+	c *gin.Context,
+	upstreamSlugs []string,
+	source string,
+	cachedAt time.Time,
+	warning string,
+	includeBuiltins bool,
+) {
+	seen := make(map[string]bool, len(upstreamSlugs)+20)
+	data := make([]gin.H, 0, len(upstreamSlugs)+20)
+	upstreamCount := 0
+	for _, raw := range upstreamSlugs {
+		id := strings.TrimSpace(raw)
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		upstreamCount++
+		data = append(data, gin.H{
+			"id":       id,
+			"object":   "model",
+			"owned_by": "openai",
+			"created":  0,
+			"source":   "upstream",
+		})
+	}
+	if source == "fallback" && upstreamCount == 0 {
+		for _, id := range []string{"gpt-5-6", "gpt-5-3", "gpt-5-mini", "gpt-4o", "gpt-4o-mini"} {
+			if !seen[id] {
+				seen[id] = true
+				data = append(data, gin.H{
+					"id":       id,
+					"object":   "model",
+					"owned_by": "openai",
+					"created":  0,
+					"source":   "builtin",
+				})
+			}
+		}
+	}
+	if includeBuiltins {
+		for _, id := range BuiltinModelIDs() {
+			if !seen[id] {
+				seen[id] = true
+				data = append(data, gin.H{
+					"id":       id,
+					"object":   "model",
+					"owned_by": "openai",
+					"created":  0,
+					"source":   "builtin",
+				})
+			}
+		}
+	}
+
+	payload := gin.H{
+		"object":         "list",
+		"source":         source,
+		"upstream_count": upstreamCount,
+		"data":           data,
+	}
+	if !cachedAt.IsZero() {
+		payload["cached_at"] = cachedAt.Format(time.RFC3339)
+	}
+	if strings.TrimSpace(warning) != "" {
+		payload["warning"] = warning
+	}
+	c.JSON(http.StatusOK, payload)
+}
+
+// ListModelsCatalog 返回动态获取并池级缓存的模型目录（支持 ?refresh=true 强制重新拉取）。
+func (h *AdminHandler) ListModelsCatalog(c *gin.Context) {
+	forceRefresh := c.Query("refresh") == "true" || c.Query("refresh") == "1"
+	includeBuiltins := c.DefaultQuery("include_builtins", "true") != "false" && c.DefaultQuery("include_builtins", "true") != "0"
+	pool := h.accountPool()
+
+	if !forceRefresh && pool != nil {
+		if cached, cachedAt := pool.CachedModels(); len(cached) > 0 {
+			respondAdminModelsCatalog(c, cached, "cache", cachedAt, "", includeBuiltins)
+			return
+		}
+	}
+
+	var lastErr string
+	if pool != nil {
+		const maxProbeAccounts = 3
+		attempts := 0
+		excluded := make(map[string]bool)
+		for _, kind := range []accounts.AccountType{accounts.TypeFree, accounts.TypePUID} {
+			for attempts < maxProbeAccounts {
+				acct, err := pool.AcquireForCapability(kind, "", excluded)
+				if err != nil || acct == nil {
+					break
+				}
+				excluded[acct.ID] = true
+				attempts++
+				if acct.Client == nil {
+					_ = acct.InitClient()
+				}
+				models, status, listErr := chatgpt.ListModels(acct.Client, acct)
+				if listErr == nil {
+					slugs := make([]string, 0, len(models))
+					seen := make(map[string]bool, len(models))
+					for _, m := range models {
+						id := strings.TrimSpace(m.Slug)
+						if id != "" && !seen[id] {
+							seen[id] = true
+							slugs = append(slugs, id)
+						}
+					}
+					if len(slugs) > 0 {
+						pool.RecordAccountModels(acct.ID, slugs)
+						respondAdminModelsCatalog(c, slugs, "live", time.Now(), "", includeBuiltins)
+						return
+					}
+					lastErr = "上游返回空模型列表"
+					continue
+				}
+				lastErr = fmt.Sprintf("HTTP %d: %v", status, listErr)
+				if status == http.StatusUnauthorized {
+					pool.ReportFailure(acct)
+				}
+			}
+		}
+		if cached, cachedAt := pool.CachedModels(); len(cached) > 0 {
+			respondAdminModelsCatalog(c, cached, "cache", cachedAt, lastErr, includeBuiltins)
+			return
+		}
+	}
+
+	if lastErr == "" {
+		lastErr = "当前无可用登录态账号，已使用内置参考目录"
+	}
+	respondAdminModelsCatalog(c, nil, "fallback", time.Time{}, lastErr, includeBuiltins)
 }

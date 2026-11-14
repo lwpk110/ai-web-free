@@ -28,6 +28,10 @@ type Pool struct {
 	// 临时账号 (外部传入的 accessToken 创建的)
 	tempMu    sync.RWMutex
 	temporary map[string]*Account // key = tokenHash
+
+	// 上游模型目录内存缓存（按探测/拉取结果合并去重，受 p.mu 保护）
+	cachedModels   []string
+	modelsCachedAt time.Time
 }
 
 // typeIndex 返回 AccountType 在 cursors 中的索引
@@ -500,12 +504,24 @@ type AccountSnapshot struct {
 	RenewState         string   `json:"renew_state,omitempty"`
 	RenewCooldownUntil string   `json:"renew_cooldown_until,omitempty"`
 	LastRenewError     string   `json:"last_renew_error,omitempty"`
+	ActiveAction       string   `json:"active_action,omitempty"`
+	ActionPhase        string   `json:"action_phase,omitempty"`
+	ActionPhaseLabel   string   `json:"action_phase_label,omitempty"`
+	ActionQueuePos     int      `json:"action_queue_pos,omitempty"`
+	ActionTaskID       string   `json:"action_task_id,omitempty"`
+	ActionStartedAt    string   `json:"action_started_at,omitempty"`
+	LastAction         string   `json:"last_action,omitempty"`
+	LastActionOK       bool     `json:"last_action_ok,omitempty"`
+	LastActionSummary  string   `json:"last_action_summary,omitempty"`
+	LastActionAt       string   `json:"last_action_at,omitempty"`
 	RemainingDays      float64  `json:"remaining_days"`
 	LastUsed           string   `json:"last_used,omitempty"`
 	LastChecked        string   `json:"last_checked,omitempty"`
 	LastError          string   `json:"last_error,omitempty"`
 	CreatedAt          string   `json:"created_at"`
 	Capabilities       []string `json:"capabilities"`
+	Models             []string `json:"models,omitempty"`
+	ModelsCount        int      `json:"models_count,omitempty"`
 }
 
 func maskToken(t string) string {
@@ -552,9 +568,27 @@ func toSnapshot(a *Account) AccountSnapshot {
 		FailedCalls:        a.FailedCalls,
 		RenewState:         a.RenewState,
 		LastRenewError:     a.LastRenewError,
+		ActiveAction:       a.ActiveAction,
+		ActionPhase:        a.ActionPhase,
+		ActionPhaseLabel:   a.ActionPhaseLabel,
+		ActionQueuePos:     a.ActionQueuePos,
+		ActionTaskID:       a.ActionTaskID,
+		LastAction:         a.LastAction,
+		LastActionOK:       a.LastActionOK,
+		LastActionSummary:  a.LastActionSummary,
 		LastError:          a.LastError,
 		CreatedAt:          a.CreatedAt.Format(time.RFC3339),
 		Capabilities:       capabilitiesForType(a.Type),
+	}
+	if len(a.Models) > 0 {
+		snap.Models = append([]string(nil), a.Models...)
+		snap.ModelsCount = len(a.Models)
+	}
+	if !a.ActionStartedAt.IsZero() {
+		snap.ActionStartedAt = a.ActionStartedAt.Format(time.RFC3339)
+	}
+	if !a.LastActionAt.IsZero() {
+		snap.LastActionAt = a.LastActionAt.Format(time.RFC3339)
 	}
 	if !a.ExpiresAt.IsZero() {
 		snap.ExpiresAt = a.ExpiresAt.Format(time.RFC3339)
@@ -642,7 +676,11 @@ func (p *Pool) ListSnapshots(typeFilter, statusFilter, search string) []AccountS
 			if typeFilter != "" && typeFilter != "all" && snap.Type != typeFilter {
 				continue
 			}
-			if statusFilter != "" && statusFilter != "all" && snap.Status != statusFilter {
+			if statusFilter == "renewing" {
+				if snap.ActiveAction == "" && snap.RenewState != "queued" && snap.RenewState != "running" {
+					continue
+				}
+			} else if statusFilter != "" && statusFilter != "all" && snap.Status != statusFilter {
 				continue
 			}
 			if search != "" {
@@ -657,13 +695,10 @@ func (p *Pool) ListSnapshots(typeFilter, statusFilter, search string) []AccountS
 	return out
 }
 
-// GetByID 根据账号 ID（或前缀）查找账号
-func (p *Pool) GetByID(id string) *Account {
+func (p *Pool) findAccountLocked(id string) *Account {
 	if id == "" {
 		return nil
 	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
 	for _, list := range [][]*Account{p.free, p.puid, p.noauth} {
 		for _, a := range list {
 			if a.ID == id || strings.HasPrefix(a.ID, id) {
@@ -674,19 +709,116 @@ func (p *Pool) GetByID(id string) *Account {
 	return nil
 }
 
-// SetStatus 修改指定账号的状态
-func (p *Pool) SetStatus(id string, status AccountStatus) bool {
+// GetByID 根据账号 ID（或前缀）查找账号
+func (p *Pool) GetByID(id string) *Account {
+	if p == nil || id == "" {
+		return nil
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	for _, list := range [][]*Account{p.free, p.puid, p.noauth} {
-		for _, a := range list {
-			if a.ID == id || strings.HasPrefix(a.ID, id) {
-				a.Status = status
-				return true
-			}
-		}
+	return p.findAccountLocked(id)
+}
+
+// SetStatus 修改指定账号的状态
+func (p *Pool) SetStatus(id string, status AccountStatus) bool {
+	if p == nil || id == "" {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if a := p.findAccountLocked(id); a != nil {
+		a.Status = status
+		return true
 	}
 	return false
+}
+
+// SetAccountRenewState 线程安全地更新账号续期状态标记。
+func (p *Pool) SetAccountRenewState(id, state string) {
+	if p == nil || id == "" {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if a := p.findAccountLocked(id); a != nil {
+		a.RenewState = state
+	}
+}
+
+// SetAccountActionState 更新账号实时操作阶段与排队序号，供前端列表刷新/轮询即时回显。
+func (p *Pool) SetAccountActionState(id, activeAction, phase, phaseLabel, taskID string, queuePos int, startedAt time.Time) {
+	if p == nil || id == "" {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	a := p.findAccountLocked(id)
+	if a == nil {
+		return
+	}
+	a.ActiveAction = activeAction
+	a.ActionPhase = phase
+	a.ActionPhaseLabel = phaseLabel
+	a.ActionTaskID = taskID
+	a.ActionQueuePos = queuePos
+	if !startedAt.IsZero() {
+		a.ActionStartedAt = startedAt
+	} else if a.ActionStartedAt.IsZero() {
+		a.ActionStartedAt = time.Now()
+	}
+}
+
+func clearAccountActiveActionLocked(a *Account) {
+	a.ActiveAction = ""
+	a.ActionPhase = ""
+	a.ActionPhaseLabel = ""
+	a.ActionQueuePos = 0
+	a.ActionTaskID = ""
+	a.ActionStartedAt = time.Time{}
+}
+
+// FinishAccountAction 结束账号当前操作，清空运行态并写入最近一次操作结果摘要。
+func (p *Pool) FinishAccountAction(id, action string, ok bool, summary string) {
+	if p == nil || id == "" {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	a := p.findAccountLocked(id)
+	if a == nil {
+		return
+	}
+	clearAccountActiveActionLocked(a)
+	a.LastAction = action
+	a.LastActionOK = ok
+	a.LastActionSummary = summary
+	a.LastActionAt = time.Now()
+}
+
+// ClearAccountQueuedAction 取消排队态账号的运行标记，并在需要时记录取消摘要。
+func (p *Pool) ClearAccountQueuedAction(id, summary string) {
+	if p == nil || id == "" {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	a := p.findAccountLocked(id)
+	if a == nil {
+		return
+	}
+	prevAction := a.ActiveAction
+	clearAccountActiveActionLocked(a)
+	if a.RenewState == "queued" {
+		a.RenewState = ""
+	}
+	if summary != "" {
+		if prevAction != "" {
+			a.LastAction = prevAction
+		}
+		a.LastActionOK = false
+		a.LastActionSummary = summary
+		a.LastActionAt = time.Now()
+	}
 }
 
 // RemoveByID 从号池移除指定账号
@@ -962,4 +1094,68 @@ func (p *Pool) AllPersistentAccounts() []*Account {
 		}
 	}
 	return out
+}
+
+// RecordAccountModels 记录指定账号探测到的上游模型，并合并更新池级模型目录缓存。
+func (p *Pool) RecordAccountModels(acctID string, slugs []string) {
+	if p == nil || len(slugs) == 0 {
+		return
+	}
+	seen := make(map[string]bool, len(slugs))
+	clean := make([]string, 0, len(slugs))
+	for _, raw := range slugs {
+		slug := strings.TrimSpace(raw)
+		if slug == "" || seen[slug] {
+			continue
+		}
+		seen[slug] = true
+		clean = append(clean, slug)
+	}
+	if len(clean) == 0 {
+		return
+	}
+
+	p.mu.Lock()
+	found := false
+	if acct := p.findAccountLocked(acctID); acct != nil {
+		acct.Models = append([]string(nil), clean...)
+		found = true
+	}
+	merged := make([]string, 0, len(clean)+len(p.cachedModels))
+	merged = append(merged, clean...)
+	for _, prev := range p.cachedModels {
+		if prev != "" && !seen[prev] {
+			seen[prev] = true
+			merged = append(merged, prev)
+		}
+	}
+	p.cachedModels = merged
+	p.modelsCachedAt = time.Now()
+	p.mu.Unlock()
+
+	if !found && acctID != "" {
+		p.tempMu.Lock()
+		for _, a := range p.temporary {
+			if a != nil && (a.ID == acctID || strings.HasPrefix(a.ID, acctID)) {
+				a.Models = append([]string(nil), clean...)
+				break
+			}
+		}
+		p.tempMu.Unlock()
+	}
+}
+
+// CachedModels 返回池内已缓存的上游模型列表及其最近更新时间。
+func (p *Pool) CachedModels() ([]string, time.Time) {
+	if p == nil {
+		return nil, time.Time{}
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.cachedModels) == 0 {
+		return nil, p.modelsCachedAt
+	}
+	out := make([]string, len(p.cachedModels))
+	copy(out, p.cachedModels)
+	return out, p.modelsCachedAt
 }

@@ -37,5 +37,16 @@ _third_party/
 web/node_modules/
 !scripts/kami_login.py
 !scripts/test_kami_login.py
+!scripts/test_grill_me_adr.py
+!internal/promptplaza/seeds.json
+
+# Allow tracking project-level Antigravity hooks, skills, and ADR archives
+!/.agents/
+!/.agents/**
+.agents/hooks/.state/
+!/docs/
+/docs/*
+!/docs/adr/
+!/docs/adr/**
 __pycache__/
 *.pyc

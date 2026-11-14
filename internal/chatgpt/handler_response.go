@@ -185,13 +185,15 @@ func HandlerDetailedWithOptions(c *gin.Context, response *http.Response, client 
 	}
 
 	streamOutput := stream && !options.SuppressOutput
-	if streamOutput {
-		c.Header("Content-Type", "text/event-stream")
-		c.Header("Cache-Control", "no-cache")
-		c.Header("Connection", "keep-alive")
-		c.Header("X-Accel-Buffering", "no")
-	} else {
-		c.Header("Content-Type", "application/json")
+	if c != nil {
+		if streamOutput {
+			c.Header("Content-Type", "text/event-stream")
+			c.Header("Cache-Control", "no-cache")
+			c.Header("Connection", "keep-alive")
+			c.Header("X-Accel-Buffering", "no")
+		} else if !options.SuppressOutput {
+			c.Header("Content-Type", "application/json")
+		}
 	}
 	var finish_reason string
 	var previous_text typings.StringStruct
@@ -497,7 +499,9 @@ readLoop:
 			}
 			original_response = streamEvent.response
 			if original_response.Error != nil {
-				c.JSON(500, gin.H{"error": original_response.Error})
+				if !options.SuppressOutput && c != nil {
+					c.JSON(500, gin.H{"error": original_response.Error})
+				}
 				return HandlerResult{}
 			}
 			sentinel = append(sentinel, sseparser.SentinelsFromResponse(original_response)...)

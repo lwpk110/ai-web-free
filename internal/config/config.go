@@ -27,9 +27,11 @@ type Config struct {
 	ProxyURL            string
 	HTTPProxy           string
 	DebugSentinel       bool
-	AuditLogFile        string
-	AuditLogMaxMB       int
-	KamiAutoRenew       bool
+	AuditLogFile            string
+	AuditLogMaxMB           int
+	KamiAutoRenew           bool
+	PromptSyncIntervalHours int
+	PromptPlazaFile         string
 }
 
 func Load() Config {
@@ -55,9 +57,11 @@ func Load() Config {
 		ProxyURL:            os.Getenv("PROXY_URL"),
 		HTTPProxy:           os.Getenv("http_proxy"),
 		DebugSentinel:       getBoolEnv("DEBUG_SENTINEL", false),
-		AuditLogFile:        os.Getenv("AUDIT_LOG_FILE"),
-		AuditLogMaxMB:       getIntEnv("AUDIT_LOG_MAX_MB", 10),
-		KamiAutoRenew:       getBoolEnv("KAMI_AUTO_RENEW", true),
+		AuditLogFile:            os.Getenv("AUDIT_LOG_FILE"),
+		AuditLogMaxMB:           getIntEnv("AUDIT_LOG_MAX_MB", 10),
+		KamiAutoRenew:           getBoolEnv("KAMI_AUTO_RENEW", true),
+		PromptSyncIntervalHours: getIntEnv("PROMPT_SYNC_INTERVAL_HOURS", 6),
+		PromptPlazaFile:         os.Getenv("PROMPT_PLAZA_FILE"),
 	}
 }
 

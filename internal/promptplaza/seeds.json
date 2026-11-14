@@ -1,0 +1,906 @@
+[
+  {
+    "id": "seed-photo-glass-greenhouse",
+    "title_zh": "云端悬浮极简玻璃温室",
+    "category": "摄影写实",
+    "prompt_en": "A futuristic [主体] floating above soft clouds at golden hour, architectural photography shot on 35mm medium format lens, [光影材质], crisp reflections and atmospheric depth",
+    "prompt_zh": "黄金时刻悬浮在柔和云海之上的未来感[主体]，中画幅 35mm 建筑摄影视角，[光影材质]，通透反射与大气纵深感",
+    "recommended_mode": "generations",
+    "recommended_model": "gpt-image-2.5-sunburst",
+    "recommended_size": "1792x1024",
+    "variables": [
+      {
+        "key": "主体",
+        "label": "建筑主体",
+        "default_value": "minimalist glass greenhouse filled with ferns",
+        "options": [
+          "minimalist glass greenhouse filled with ferns",
+          "cantilevered timber cliffside library",
+          "curved brutalist concrete observatory"
+        ]
+      },
+      {
+        "key": "光影材质",
+        "label": "光线与材质",
+        "default_value": "warm volumetric sunlight through ultra-clear glass",
+        "options": [
+          "warm volumetric sunlight through ultra-clear glass",
+          "cool Nordic misty twilight with subtle interior glow",
+          "dramatic sunset rim light with brushed aluminum frames"
+        ]
+      }
+    ],
+    "source": "seed",
+    "stats": { "likes": 428, "hearts": 196, "score": 98.4 }
+  },
+  {
+    "id": "seed-photo-polaroid-peel",
+    "title_zh": "复古拍立得撕拉片街拍",
+    "category": "摄影写实",
+    "prompt_en": "Candid [主体] captured on vintage instant peel-apart film, natural grain, soft halation, [光影材质], authentic analog color palette with handwritten date margin",
+    "prompt_zh": "用复古撕拉片胶卷抓拍的[主体]，自然胶片颗粒与柔和光晕，[光影材质]，真实模拟胶片色彩质感与手写日期白边",
+    "recommended_mode": "generations",
+    "recommended_model": "gpt-image-2.5",
+    "recommended_size": "1024x1792",
+    "variables": [
+      {
+        "key": "主体",
+        "label": "拍摄人物/场景",
+        "default_value": "young artist sketching at a sunlit Paris cafe terrace",
+        "options": [
+          "young artist sketching at a sunlit Paris cafe terrace",
+          "retro convertible parked along a coastal highway",
+          "sleeping tabby cat on a stack of art books"
+        ]
+      },
+      {
+        "key": "光影材质",
+        "label": "光线氛围",
+        "default_value": "dappled late afternoon shadows and gentle warm flash",
+        "options": [
+          "dappled late afternoon shadows and gentle warm flash",
+          "rainy neon reflections on wet asphalt",
+          "soft overcast window light with warm film fade"
+        ]
+      }
+    ],
+    "source": "seed",
+    "stats": { "likes": 389, "hearts": 165, "score": 95.8 }
+  },
+  {
+    "id": "seed-photo-nordic-interior",
+    "title_zh": "北欧中古风日光客厅",
+    "category": "摄影写实",
+    "prompt_en": "Editorial interior photograph of a serene Nordic living room featuring [主体], travertine coffee table, linen sofa, [光影材质], shot for Architectural Digest",
+    "prompt_zh": "《安邸 AD》杂志风静谧北欧风客厅室内摄影，配有[主体]、洞石茶几与亚麻沙发，[光影材质]，自然松弛的生活质感",
+    "recommended_mode": "generations",
+    "recommended_model": "gpt-image-2.5-sunburst",
+    "recommended_size": "1792x1024",
+    "variables": [
+      {
+        "key": "主体",
+        "label": "视觉焦点家具",
+        "default_value": "warm walnut sideboard and sculptural ceramic lamp",
+        "options": [
+          "warm walnut sideboard and sculptural ceramic lamp",
+          "curved boucle lounge chair beside tall fiddle-leaf fig",
+          "floor-to-ceiling oak bookshelves with vinyl turntable"
+        ]
+      },
+      {
+        "key": "光影材质",
+        "label": "自然光线",
+        "default_value": "long morning shadows streaming through sheer linen curtains",
+        "options": [
+          "long morning shadows streaming through sheer linen curtains",
+          "cozy golden hour sunbeam across limewash walls",
+          "soft rainy day diffused skylight with warm floor lamp"
+        ]
+      }
+    ],
+    "source": "seed",
+    "stats": { "likes": 312, "hearts": 141, "score": 92.6 }
+  },
+  {
+    "id": "seed-photo-macro-raindrop",
+    "title_zh": "超微距晨露叶脉生态",
+    "category": "摄影写实",
+    "prompt_en": "Extreme macro photography of [主体] glistening with crystal dew drops, shallow depth of field, [光影材质], 100mm f/2.8 macro lens, ultra-sharp micro texture",
+    "prompt_zh": "极微距镜头下的[主体]与晶莹晨露水珠，极浅景深，[光影材质]，100mm f/2.8 微距镜头呈现极致微观纹理",
+    "recommended_mode": "generations",
+    "recommended_model": "gpt-image-2.6",
+    "recommended_size": "1024x1024",
+    "variables": [
+      {
+        "key": "主体",
+        "label": "微观主体",
+        "default_value": "emerald fern fronds and delicate moss spores",
+        "options": [
+          "emerald fern fronds and delicate moss spores",
+          "translucent butterfly wing resting on wild lavender",
+          "iridescent soap bubble perched on a pine needle"
+        ]
+      },
+      {
+        "key": "光影材质",
+        "label": "光学散景",
+        "default_value": "creamy sunrise bokeh with prism refractions in droplets",
+        "options": [
+          "creamy sunrise bokeh with prism refractions in droplets",
+          "cool bioluminescent forest twilight glow",
+          "crisp studio backlight highlighting translucent veins"
+        ]
+      }
+    ],
+    "source": "seed",
+    "stats": { "likes": 284, "hearts": 119, "score": 90.3 }
+  },
+  {
+    "id": "seed-photo-tokyo-rain-night",
+    "title_zh": "东京雨夜胶片霓虹小巷",
+    "category": "摄影写实",
+    "prompt_en": "Cinematic night street photography in a narrow [主体] after rain, wet cobblestones mirroring glowing lanterns, [光影材质], Cinestill 800T 35mm film aesthetic",
+    "prompt_zh": "雨后狭窄[主体]的电影感夜景街拍，湿润石板路倒映温暖灯笼，[光影材质]，Cinestill 800T 35mm 胶片质感",
+    "recommended_mode": "generations",
+    "recommended_model": "gpt-image-2.5-sunburst",
+    "recommended_size": "1024x1792",
+    "variables": [
+      {
+        "key": "主体",
+        "label": "街巷地点",
+        "default_value": "Tokyo izakaya alley with steam rising from ramen stalls",
+        "options": [
+          "Tokyo izakaya alley with steam rising from ramen stalls",
+          "Hong Kong neon tramway intersection in light drizzle",
+          "Kyoto wooden machiya street with glowing paper lanterns"
+        ]
+      },
+      {
+        "key": "光影材质",
+        "label": "氛围色调",
+        "default_value": "teal and amber neon reflections with soft mist",
+        "options": [
+          "teal and amber neon reflections with soft mist",
+          "warm crimson lantern glow against deep indigo shadows",
+          "vibrant cyan and magenta rain puddles"
+        ]
+      }
+    ],
+    "source": "seed",
+    "stats": { "likes": 365, "hearts": 154, "score": 94.1 }
+  },
+  {
+    "id": "seed-3d-glass-capsule",
+    "title_zh": "微缩生态玻璃胶囊世界",
+    "category": "3D 与微缩",
+    "prompt_en": "A highly detailed miniature [主体] sealed inside a crystal-clear glass capsule resting on a dark oak desk, [光影材质], macro tilt-shift 3D render, Octane render quality",
+    "prompt_zh": "密封在深色橡木桌面水晶玻璃胶囊内的超高精度微缩[主体]，[光影材质]，微距移轴 3D 渲染，Octane 级材质光影",
+    "recommended_mode": "generations",
+    "recommended_model": "gpt-image-2.5-sunburst",
+    "recommended_size": "1024x1024",
+    "variables": [
+      {
+        "key": "主体",
+        "label": "胶囊微缩景观",
+        "default_value": "cozy rainy Kyoto ramen stall with tiny warm lanterns",
+        "options": [
+          "cozy rainy Kyoto ramen stall with tiny warm lanterns",
+          "floating bonsai island with a miniature waterfall",
+          "snowy alpine observatory with spinning brass telescope"
+        ]
+      },
+      {
+        "key": "光影材质",
+        "label": "光影质感",
+        "default_value": "warm amber rim lighting and crisp glass caustics",
+        "options": [
+          "warm amber rim lighting and crisp glass caustics",
+          "soft morning sunbeam with floating dust motes",
+          "cool moonlight and glowing bioluminescent fungi"
+        ]
+      }
+    ],
+    "source": "seed",
+    "stats": { "likes": 512, "hearts": 248, "score": 99.2 }
+  },
+  {
+    "id": "seed-3d-artisan-keycap",
+    "title_zh": "透明树脂机械键盘键帽",
+    "category": "3D 与微缩",
+    "prompt_en": "Macro studio shot of a translucent crystal resin artisan mechanical keycap containing a tiny [主体], mounted on a brushed aluminum keyboard, [光影材质], ultra-clean product 3D render",
+    "prompt_zh": "安装在拉丝铝合金键盘上的透明水晶树脂个性化机械键帽微距特写，内部封存微缩[主体]，[光影材质]，超洁净 3D 产品渲染",
+    "recommended_mode": "generations",
+    "recommended_model": "gpt-image-2.5",
+    "recommended_size": "1024x1024",
+    "variables": [
+      {
+        "key": "主体",
+        "label": "键帽内嵌景物",
+        "default_value": "coral reef with a tiny glowing jellyfish",
+        "options": [
+          "coral reef with a tiny glowing jellyfish",
+          "miniature Mount Fuji with cherry blossom petals",
+          "retro pixel arcade cabinet with glowing CRT screen"
+        ]
+      },
+      {
+        "key": "光影材质",
+        "label": "RGB 与光线",
+        "default_value": "subtle under-glow RGB light refracting through beveled resin",
+        "options": [
+          "subtle under-glow RGB light refracting through beveled resin",
+          "crisp softbox studio highlights on matte PBT neighboring keys",
+          "golden afternoon sun casting caustic patterns on the desk"
+        ]
+      }
+    ],
+    "source": "seed",
+    "stats": { "likes": 401, "hearts": 182, "score": 96.1 }
+  },
+  {
+    "id": "seed-3d-blindbox-toy",
+    "title_zh": "潮玩盲盒毛绒搪胶手办",
+    "category": "3D 与微缩",
+    "prompt_en": "Cute designer blind-box collectible figure of [主体], tactile matte vinyl and soft flocked plush textures, [光影材质], clean pastel cyclorama studio backdrop, C4D Redshift render",
+    "prompt_zh": "可爱设计师潮玩盲盒手办[主体]，细腻哑光搪胶与植绒毛绒拼接质感，[光影材质]，纯净莫兰迪影棚无缝背景，C4D 渲染",
+    "recommended_mode": "generations",
+    "recommended_model": "gpt-image-2.5-flare",
+    "recommended_size": "1024x1024",
+    "variables": [
+      {
+        "key": "主体",
+        "label": "潮玩角色",
+        "default_value": "chubby astronaut Shiba Inu holding a glowing star jar",
+        "options": [
+          "chubby astronaut Shiba Inu holding a glowing star jar",
+          "sleepy frog wearing an oversized knit beanie and headphones",
+          "clockwork steampunk kitten holding a brass pocket watch"
+        ]
+      },
+      {
+        "key": "光影材质",
+        "label": "影棚布光",
+        "default_value": "soft diffused three-point studio lighting with gentle rim highlight",
+        "options": [
+          "soft diffused three-point studio lighting with gentle rim highlight",
+          "playful candy-colored studio gels in mint and peach",
+          "warm tungsten spotlight on velvet display pedestal"
+        ]
+      }
+    ],
+    "source": "seed",
+    "stats": { "likes": 376, "hearts": 170, "score": 94.7 }
+  },
+  {
+    "id": "seed-3d-isometric-city",
+    "title_zh": "等距视角悬浮生态微缩块",
+    "category": "3D 与微缩",
+    "prompt_en": "Isometric 3D diorama cutaway block of [主体], layered geological cross-section beneath, [光影材质], clean white studio void background, ultra-crisp Blender Cycles aesthetic",
+    "prompt_zh": "等距视角 3D 剖面微缩生态方块：[主体]，底部呈现分层地质剖面，[光影材质]，纯净白色无边背景，Blender Cycles 精致建模风格",
+    "recommended_mode": "generations",
+    "recommended_model": "gpt-image-2.5-sunburst",
+    "recommended_size": "1024x1024",
+    "variables": [
+      {
+        "key": "主体",
+        "label": "微缩方块主题",
+        "default_value": "retro rooftop coffee roastery with tiny greenhouse and windmill",
+        "options": [
+          "retro rooftop coffee roastery with tiny greenhouse and windmill",
+          "subterranean crystal mine linked to a quaint timber train station",
+          "Mediterranean seaside cliff cafe with azure swimming cove"
+        ]
+      },
+      {
+        "key": "光影材质",
+        "label": "色调光影",
+        "default_value": "bright sunlit clay and wood textures with soft ambient occlusion",
+        "options": [
+          "bright sunlit clay and wood textures with soft ambient occlusion",
+          "cozy twilight glow with warm miniature streetlamps",
+          "pastel architectural model look with crisp directional shadows"
+        ]
+      }
+    ],
+    "source": "seed",
+    "stats": { "likes": 348, "hearts": 152, "score": 93.4 }
+  },
+  {
+    "id": "seed-3d-knolling-kit",
+    "title_zh": "极客装备平铺拆解陈列",
+    "category": "3D 与微缩",
+    "prompt_en": "Top-down flat-lay knolling photograph of [主体] arranged in immaculate geometric alignment on [光影材质], hyper-detailed Industrial Design showcase, even overhead softbox light",
+    "prompt_zh": "俯拍工业设计感平铺整理（Knolling）摄影：将[主体]以完美几何对齐方式陈列在[光影材质]之上，均匀顶光柔光箱照明",
+    "recommended_mode": "generations",
+    "recommended_model": "gpt-image-2.6",
+    "recommended_size": "1792x1024",
+    "variables": [
+      {
+        "key": "主体",
+        "label": "拆解物品集合",
+        "default_value": "vintage analog film camera components, brass lenses, and film canisters",
+        "options": [
+          "vintage analog film camera components, brass lenses, and film canisters",
+          "field expedition survival kit with titanium compass and sketchbooks",
+          "custom handheld game console transparent shell and precision PCB parts"
+        ]
+      },
+      {
+        "key": "光影材质",
+        "label": "桌面底材",
+        "default_value": "matte slate-grey cutting mat with subtle grid markings",
+        "options": [
+          "matte slate-grey cutting mat with subtle grid markings",
+          "warm brushed birch workbench",
+          "deep charcoal felt tray"
+        ]
+      }
+    ],
+    "source": "seed",
+    "stats": { "likes": 295, "hearts": 124, "score": 91.2 }
+  },
+  {
+    "id": "seed-poster-swiss-typo",
+    "title_zh": "瑞士国际主义网格排版海报",
+    "category": "海报与文字排版",
+    "prompt_en": "Swiss International Typographic Style exhibition poster featuring bold geometric grids, crisp sans-serif headline text \"[主标题]\" and smaller subtext \"[副标题]\", [配色风格], risograph paper texture",
+    "prompt_zh": "瑞士国际主义网格排版展览海报，包含锐利无衬线大标题文字“[主标题]”与副标题“[副标题]”，[配色风格]，孔版印刷纸张纤维肌理",
+    "recommended_mode": "generations",
+    "recommended_model": "gpt-image-2.5-sunburst",
+    "recommended_size": "1024x1792",
+    "variables": [
+      {
+        "key": "主标题",
+        "label": "海报英文主标题",
+        "default_value": "FORM & LIGHT 2026",
+        "options": [
+          "FORM & LIGHT 2026",
+          "SYNTHETIC HORIZON",
+          "MODERN ARCHIVE 04"
+        ]
+      },
+      {
+        "key": "副标题",
+        "label": "海报副标题",
+        "default_value": "TOKYO DESIGN SYMPOSIUM",
+        "options": [
+          "TOKYO DESIGN SYMPOSIUM",
+          "BAUHAUS RETROSPECTIVE",
+          "EDITION NO. 12 — NOVEMBER"
+        ]
+      },
+      {
+        "key": "配色风格",
+        "label": "色彩组合",
+        "default_value": "vermilion red, off-white cream paper, and deep carbon black circles",
+        "options": [
+          "vermilion red, off-white cream paper, and deep carbon black circles",
+          "cobalt blue and vibrant acid yellow overlapping shapes",
+          "monochrome charcoal and metallic silver foil accents"
+        ]
+      }
+    ],
+    "source": "seed",
+    "stats": { "likes": 438, "hearts": 205, "score": 97.9 }
+  },
+  {
+    "id": "seed-poster-retro-scifi",
+    "title_zh": "70年代复古科幻电影海报",
+    "category": "海报与文字排版",
+    "prompt_en": "1970s retro sci-fi movie poster illustration showing [主体], dramatic hand-painted airbrush gradients, bold vintage serif title \"[片名]\" at the top, [配色风格], subtle folded paper crease",
+    "prompt_zh": "1970 年代复古科幻电影插画海报，描绘[主体]，戏剧性手绘喷枪渐变质感，顶部配有复古衬线大片名“[片名]”，[配色风格]，带轻微折痕纸纹",
+    "recommended_mode": "generations",
+    "recommended_model": "gpt-image-2.5",
+    "recommended_size": "1024x1792",
+    "variables": [
+      {
+        "key": "主体",
+        "label": "核心视觉场景",
+        "default_value": "lone astronaut gazing at twin ringed planets above crimson desert dunes",
+        "options": [
+          "lone astronaut gazing at twin ringed planets above crimson desert dunes",
+          "sleek chrome starship ascending out of a glowing orbital city",
+          "mysterious monolith emerging from an ancient misty ocean"
+        ]
+      },
+      {
+        "key": "片名",
+        "label": "英文片名",
+        "default_value": "SOLARIS ECHO",
+        "options": [
+          "SOLARIS ECHO",
+          "STARWARD DRIFT",
+          "NEBULA NINE"
+        ]
+      },
+      {
+        "key": "配色风格",
+        "label": "年代色调",
+        "default_value": "burnt orange, teal, and aged parchment tones",
+        "options": [
+          "burnt orange, teal, and aged parchment tones",
+          "electric magenta, cosmic violet, and gold",
+          "warm ochre, forest green, and cream"
+        ]
+      }
+    ],
+    "source": "seed",
+    "stats": { "likes": 356, "hearts": 161, "score": 94.4 }
+  },
+  {
+    "id": "seed-poster-coffee-menu",
+    "title_zh": "手绘信息图卡片与食谱排版",
+    "category": "海报与文字排版",
+    "prompt_en": "Hand-drawn editorial infographic card explaining \"[主题]\", clean Step 1-2-3 visual diagrams, legible neat calligraphy labels, [配色风格], warm textured cotton watercolor paper",
+    "prompt_zh": "手绘编辑风信息图卡片，图解“[主题]”，包含清晰的步骤 1-2-3 示意图与工整易读的手写标注，[配色风格]，温暖纹理棉浆水彩纸底",
+    "recommended_mode": "generations",
+    "recommended_model": "gpt-image-2.6",
+    "recommended_size": "1024x1792",
+    "variables": [
+      {
+        "key": "主题",
+        "label": "信息图主题",
+        "default_value": "POUR OVER COFFEE GUIDE",
+        "options": [
+          "POUR OVER COFFEE GUIDE",
+          "KYOTO TEA CEREMONY",
+          "MATCHA LATTE RECIPE"
+        ]
+      },
+      {
+        "key": "配色风格",
+        "label": "插画配色",
+        "default_value": "espresso brown, sage green, and warm cream ink washes",
+        "options": [
+          "espresso brown, sage green, and warm cream ink washes",
+          "terracotta orange, mustard yellow, and navy fountain pen ink",
+          "soft matcha green, charcoal fine-liner, and rice paper white"
+        ]
+      }
+    ],
+    "source": "seed",
+    "stats": { "likes": 391, "hearts": 188, "score": 95.6 }
+  },
+  {
+    "id": "seed-poster-neon-festival",
+    "title_zh": "液态铬金音乐节主视觉",
+    "category": "海报与文字排版",
+    "prompt_en": "Avant-garde acid-graphics music festival poster featuring sculptural liquid chrome typography reading \"[主标题]\", holographic foil reflections, [配色风格], ultra-sharp 3D graphic design",
+    "prompt_zh": "先锋酸性平面设计音乐节主视觉海报，雕塑感液态铬金三维字体显示“[主标题]”，全息镭射箔反射光效，[配色风格]，超锐利 3D 平面设计",
+    "recommended_mode": "generations",
+    "recommended_model": "gpt-image-2.5-flare",
+    "recommended_size": "1024x1792",
+    "variables": [
+      {
+        "key": "主标题",
+        "label": "视觉文字",
+        "default_value": "PULSE 2026",
+        "options": [
+          "PULSE 2026",
+          "HYPER WAVE",
+          "SONIC BLOOM"
+        ]
+      },
+      {
+        "key": "配色风格",
+        "label": "霓虹氛围",
+        "default_value": "iridescent obsidian black background with cyber lime accents",
+        "options": [
+          "iridescent obsidian black background with cyber lime accents",
+          "electric cobalt blue and molten silver chrome",
+          "prismatic rainbow glass refraction on matte white"
+        ]
+      }
+    ],
+    "source": "seed",
+    "stats": { "likes": 287, "hearts": 130, "score": 91.5 }
+  },
+  {
+    "id": "seed-illus-kyoto-watercolor",
+    "title_zh": "京都竹溪晨雾水彩茶屋",
+    "category": "插画与二次元",
+    "prompt_en": "A peaceful [主体] beside a misty bamboo stream at dawn, delicate watercolor and fine ink illustration, [光影材质], gentle paper bleed and poetic negative space",
+    "prompt_zh": "黎明薄雾竹溪旁静谧的[主体]，细腻水彩与钢笔淡彩插画，[光影材质]，自然的纸面晕染与诗意留白构图",
+    "recommended_mode": "generations",
+    "recommended_model": "gpt-image-2.5-sunburst",
+    "recommended_size": "1792x1024",
+    "variables": [
+      {
+        "key": "主体",
+        "label": "和风建筑",
+        "default_value": "Kyoto wooden tea house with warm shoji paper windows",
+        "options": [
+          "Kyoto wooden tea house with warm shoji paper windows",
+          "moss-covered stone bridge leading to a hillside shrine",
+          "traditional riverboat moored beneath weeping willow trees"
+        ]
+      },
+      {
+        "key": "光影材质",
+        "label": "色彩意境",
+        "default_value": "soft celadon green, misty indigo, and warm amber dawn light",
+        "options": [
+          "soft celadon green, misty indigo, and warm amber dawn light",
+          "autumn maple crimson and golden ochre washes",
+          "quiet winter snowfall with pale slate blue washes"
+        ]
+      }
+    ],
+    "source": "seed",
+    "stats": { "likes": 462, "hearts": 218, "score": 97.6 }
+  },
+  {
+    "id": "seed-illus-lofi-study",
+    "title_zh": "Lo-Fi 雨夜窗台书房插画",
+    "category": "插画与二次元",
+    "prompt_en": "Warm cozy anime background illustration of [主体] overlooking a glowing evening cityscape, soft painterly cel shading, [光影材质], peaceful nostalgic atmosphere",
+    "prompt_zh": "温暖治愈系日式动画背景插画：[主体]窗外是灯火微亮的傍晚城市天际线，柔和厚涂赛璐璐质感，[光影材质]，宁静怀旧氛围",
+    "recommended_mode": "generations",
+    "recommended_model": "gpt-image-2.5",
+    "recommended_size": "1792x1024",
+    "variables": [
+      {
+        "key": "主体",
+        "label": "室内主角/角落",
+        "default_value": "cluttered attic studio desk with steaming mug, plants, and sleeping orange cat",
+        "options": [
+          "cluttered attic studio desk with steaming mug, plants, and sleeping orange cat",
+          "train dining booth passing coastal cliffs at sunset",
+          "second-hand bookshop corner filled with fairy lights and vinyl records"
+        ]
+      },
+      {
+        "key": "光影材质",
+        "label": "时段光色",
+        "default_value": "lavender dusk sky and warm desk lamp glow",
+        "options": [
+          "lavender dusk sky and warm desk lamp glow",
+          "steady evening rain streaks on windowpane with amber lamp",
+          "golden late-summer afternoon sunbeams with floating dust"
+        ]
+      }
+    ],
+    "source": "seed",
+    "stats": { "likes": 419, "hearts": 195, "score": 96.4 }
+  },
+  {
+    "id": "seed-illus-ukiyoe-cyber",
+    "title_zh": "浮世绘木刻版画风未来都市",
+    "category": "插画与二次元",
+    "prompt_en": "Traditional Japanese Ukiyo-e woodblock print depicting [主体], bold sumi-ink outlines, flat mineral pigment layers, [光影材质], authentic washi paper grain",
+    "prompt_zh": "传统日本浮世绘木刻版画风格描绘[主体]，豪放墨线轮廓与矿物颜料平涂层次，[光影材质]，真实和纸肌理",
+    "recommended_mode": "generations",
+    "recommended_model": "dall-e-3",
+    "recommended_size": "1792x1024",
+    "variables": [
+      {
+        "key": "主体",
+        "label": "画作题材",
+        "default_value": "giant mechanical koi leaping above stylized crashing ocean waves",
+        "options": [
+          "giant mechanical koi leaping above stylized crashing ocean waves",
+          "samurai courier riding a hover-bike across a neon Edo bridge",
+          "celestial crane soaring past Mount Fuji and orbital rings"
+        ]
+      },
+      {
+        "key": "光影材质",
+        "label": "版画色板",
+        "default_value": "Prussian blue, vermilion red, and aged ivory washi",
+        "options": [
+          "Prussian blue, vermilion red, and aged ivory washi",
+          "indigo night tones with gold leaf highlights",
+          "warm ochre, jade green, and charcoal black"
+        ]
+      }
+    ],
+    "source": "seed",
+    "stats": { "likes": 334, "hearts": 147, "score": 92.8 }
+  },
+  {
+    "id": "seed-illus-storybook-gouache",
+    "title_zh": "童话绘本水粉拼贴森林",
+    "category": "插画与二次元",
+    "prompt_en": "Whimsical children's picture book illustration in tactile gouache and paper-cut collage style showing [主体], [光影材质], charming naive proportions and rich brushwork",
+    "prompt_zh": "充满童趣的儿童绘本水粉与剪纸拼贴风插画，展现[主体]，[光影材质]，稚拙灵动的造型比例与丰富笔触质感",
+    "recommended_mode": "generations",
+    "recommended_model": "gpt-image-2.5-flare",
+    "recommended_size": "1024x1024",
+    "variables": [
+      {
+        "key": "主体",
+        "label": "童话角色",
+        "default_value": "friendly badger baker pushing a tiny pastry cart through an autumn forest",
+        "options": [
+          "friendly badger baker pushing a tiny pastry cart through an autumn forest",
+          "little bear sailing a walnut-shell boat across a starry pond",
+          "owl postmaster sorting glowing letters inside a hollow oak tree"
+        ]
+      },
+      {
+        "key": "光影材质",
+        "label": "绘本色调",
+        "default_value": "warm mustard, terracotta, and sage green gouache",
+        "options": [
+          "warm mustard, terracotta, and sage green gouache",
+          "midnight navy, buttery starlight yellow, and dusty rose",
+          "fresh spring mint, buttercream, and sky blue"
+        ]
+      }
+    ],
+    "source": "seed",
+    "stats": { "likes": 276, "hearts": 115, "score": 89.9 }
+  },
+  {
+    "id": "seed-product-titanium-synth",
+    "title_zh": "极简钛金属桌面合成器",
+    "category": "产品与 UI",
+    "prompt_en": "Minimalist matte bead-blasted titanium desktop [主体] with crisp warm amber OLED readout, tactile knurled aluminum dials, [光影材质], commercial industrial design photography",
+    "prompt_zh": "极简喷砂哑光钛金属桌面级[主体]，配有清晰暖琥珀色 OLED 屏显与滚花铝合金旋钮，[光影材质]，顶级商业工业设计棚拍",
+    "recommended_mode": "generations",
+    "recommended_model": "gpt-image-2.5-sunburst",
+    "recommended_size": "1792x1024",
+    "variables": [
+      {
+        "key": "主体",
+        "label": "硬件设备",
+        "default_value": "audio synthesizer and field sampler",
+        "options": [
+          "audio synthesizer and field sampler",
+          "precision espresso scale and timer unit",
+          "portable retro-futuristic AI pocket terminal"
+        ]
+      },
+      {
+        "key": "光影材质",
+        "label": "影棚环境",
+        "default_value": "softbox rim lighting on dark slate architectural desk",
+        "options": [
+          "softbox rim lighting on dark slate architectural desk",
+          "clean porcelain white studio sweep with subtle shadow",
+          "warm walnut desk under soft directional north light"
+        ]
+      }
+    ],
+    "source": "seed",
+    "stats": { "likes": 451, "hearts": 211, "score": 97.3 }
+  },
+  {
+    "id": "seed-product-frosted-glass-ui",
+    "title_zh": "磨砂玻璃 3D App 图标矩阵",
+    "category": "产品与 UI",
+    "prompt_en": "Sleek 3D translucent frosted glass UI icon representing [主体], layered refractive acrylic panels, [光影材质], floating smoothly on an ultra-clean minimal studio background",
+    "prompt_zh": "精致三维磨砂玻璃质感 UI 应用图标，主题为[主体]，多层折射亚克力叠层，[光影材质]，悬浮于极简纯净工作台背景之上",
+    "recommended_mode": "generations",
+    "recommended_model": "gpt-image-2.5",
+    "recommended_size": "1024x1024",
+    "variables": [
+      {
+        "key": "主体",
+        "label": "图标功能",
+        "default_value": "cloud weather compass with miniature sun and translucent cloud",
+        "options": [
+          "cloud weather compass with miniature sun and translucent cloud",
+          "AI voice waveform crystal orb",
+          "minimalist encrypted vault shield and precision key"
+        ]
+      },
+      {
+        "key": "光影材质",
+        "label": "材质光效",
+        "default_value": "soft porcelain grey surface with subtle emerald and cyan internal glow",
+        "options": [
+          "soft porcelain grey surface with subtle emerald and cyan internal glow",
+          "deep obsidian slate backdrop with warm amber edge refraction",
+          "clean pearl white canvas with pastel lavender dispersion"
+        ]
+      }
+    ],
+    "source": "seed",
+    "stats": { "likes": 368, "hearts": 168, "score": 94.5 }
+  },
+  {
+    "id": "seed-product-perfume-bottle",
+    "title_zh": "高定香水浮水光影大片",
+    "category": "产品与 UI",
+    "prompt_en": "Luxury minimalist editorial product shot of a sculptural [主体] resting on gentle rippling crystal water, [光影材质], crisp caustic refractions, shot on Phase One 120mm",
+    "prompt_zh": "高定极简商业静物大片：雕塑感[主体]静置在微漾清澈水面之上，[光影材质]，清晰焦散光斑折射，飞思 120mm 棚拍质感",
+    "recommended_mode": "generations",
+    "recommended_model": "gpt-image-2.5-sunburst",
+    "recommended_size": "1024x1792",
+    "variables": [
+      {
+        "key": "主体",
+        "label": "美妆/香氛容器",
+        "default_value": "fluted smoked glass perfume flacon with travertine stone cap",
+        "options": [
+          "fluted smoked glass perfume flacon with travertine stone cap",
+          "matte ceramic skincare serum dropper bottle",
+          "faceted amber glass botanical candle jar"
+        ]
+      },
+      {
+        "key": "光影材质",
+        "label": "水光氛围",
+        "default_value": "golden afternoon sunbeam casting sharp water caustics",
+        "options": [
+          "golden afternoon sunbeam casting sharp water caustics",
+          "cool misty morning light with white limestone backdrop",
+          "dramatic monochrome studio rim light"
+        ]
+      }
+    ],
+    "source": "seed",
+    "stats": { "likes": 329, "hearts": 144, "score": 92.7 }
+  },
+  {
+    "id": "seed-product-mobile-dashboard",
+    "title_zh": "高保真深色 SaaS 数据看板样机",
+    "category": "产品与 UI",
+    "prompt_en": "High-craft UI/UX presentation mockup of a modern [主体] displayed on a floating frameless tablet at an isometric three-quarter angle, [光影材质], crisp typography and clean charts",
+    "prompt_zh": "高保真 UI/UX 设计展示样机：在悬浮无边框平板电脑上呈现现代感[主体]界面，四分之三等距视角，[光影材质]，字体锐利图表整洁",
+    "recommended_mode": "generations",
+    "recommended_model": "gpt-image-2.6",
+    "recommended_size": "1792x1024",
+    "variables": [
+      {
+        "key": "主体",
+        "label": "界面类型",
+        "default_value": "AI energy grid analytics dashboard with smooth sparklines",
+        "options": [
+          "AI energy grid analytics dashboard with smooth sparklines",
+          "minimalist fintech wealth portfolio app",
+          "spatial audio mixing workstation interface"
+        ]
+      },
+      {
+        "key": "光影材质",
+        "label": "呈现风格",
+        "default_value": "refined Obsidian dark mode UI on soft brushed graphite backdrop",
+        "options": [
+          "refined Obsidian dark mode UI on soft brushed graphite backdrop",
+          "crisp Porcelain light mode UI on soft warm alabaster backdrop",
+          "translucent glassmorphism cards floating above abstract gradient"
+        ]
+      }
+    ],
+    "source": "seed",
+    "stats": { "likes": 304, "hearts": 136, "score": 91.6 }
+  },
+  {
+    "id": "seed-edit-material-remodel",
+    "title_zh": "参考图物体材质彻底重塑",
+    "category": "参考图编辑",
+    "prompt_en": "Keep the exact geometry, proportions, and composition of the uploaded reference object, but completely transform its surface material into [目标材质], [光影材质], photorealistic studio render",
+    "prompt_zh": "严格保持上传参考图中物体的几何轮廓、比例与构图不变，将其表面材质彻底重塑为[目标材质]，[光影材质]，照片级影棚渲染",
+    "recommended_mode": "edits",
+    "recommended_model": "gpt-image-2.5",
+    "recommended_size": "1024x1024",
+    "variables": [
+      {
+        "key": "目标材质",
+        "label": "替换材质",
+        "default_value": "translucent frosted Murano glass with a soft glowing neon core",
+        "options": [
+          "translucent frosted Murano glass with a soft glowing neon core",
+          "hand-carved porous travertine stone with subtle moss",
+          "iridescent liquid chrome and matte carbon fiber weave"
+        ]
+      },
+      {
+        "key": "光影材质",
+        "label": "环境布光",
+        "default_value": "clean softbox studio rim light on neutral warm grey backdrop",
+        "options": [
+          "clean softbox studio rim light on neutral warm grey backdrop",
+          "dramatic low-key dark studio spotlight",
+          "bright natural daylight casting crisp shadows"
+        ]
+      }
+    ],
+    "source": "seed",
+    "stats": { "likes": 489, "hearts": 236, "score": 98.7 }
+  },
+  {
+    "id": "seed-edit-ghibli-style",
+    "title_zh": "照片一键转手绘动画电影帧",
+    "category": "参考图编辑",
+    "prompt_en": "Transform the uploaded reference photo into a nostalgic hand-painted [动画风格] film frame, preserving every person's pose, facial expression, and background layout, [光影材质]",
+    "prompt_zh": "将上传的参考照片重绘为充满怀旧感的手绘[动画风格]电影画面，完整保留人物姿态、表情与场景空间布局，[光影材质]",
+    "recommended_mode": "edits",
+    "recommended_model": "gpt-image-2.5",
+    "recommended_size": "1792x1024",
+    "variables": [
+      {
+        "key": "动画风格",
+        "label": "目标画风",
+        "default_value": "1990s Studio Ghibli watercolor cel-anime",
+        "options": [
+          "1990s Studio Ghibli watercolor cel-anime",
+          "Franco-Belgian Ligne Claire comic book ink",
+          "Makoto Shinkai luminous sky and painterly lighting"
+        ]
+      },
+      {
+        "key": "光影材质",
+        "label": "氛围调性",
+        "default_value": "warm summer breeze, fluffy cumulus clouds, and gentle gouache brush texture",
+        "options": [
+          "warm summer breeze, fluffy cumulus clouds, and gentle gouache brush texture",
+          "golden twilight glow with soft lens bloom",
+          "quiet rainy morning watercolor wash"
+        ]
+      }
+    ],
+    "source": "seed",
+    "stats": { "likes": 445, "hearts": 209, "score": 97.1 }
+  },
+  {
+    "id": "seed-edit-product-scene",
+    "title_zh": "电商产品图智能换景融图",
+    "category": "参考图编辑",
+    "prompt_en": "Extract the main product from the reference photo cleanly without altering its logo or shape, and place it naturally on [场景舞台], matching perspective, [光影材质], commercial photography",
+    "prompt_zh": "精准保留参考图中主产品的形状、纹理与品牌标识不变，将其自然融入[场景舞台]，保持透视与[光影材质]高度一致，商业广告大片",
+    "recommended_mode": "edits",
+    "recommended_model": "gpt-image-2.5-sunburst",
+    "recommended_size": "1024x1024",
+    "variables": [
+      {
+        "key": "场景舞台",
+        "label": "新背景舞台",
+        "default_value": "a sun-drenched travertine pedestal beside Mediterranean olive branches",
+        "options": [
+          "a sun-drenched travertine pedestal beside Mediterranean olive branches",
+          "wet volcanic basalt rock with misty ocean spray in background",
+          "minimalist oak café table with morning espresso shadows"
+        ]
+      },
+      {
+        "key": "光影材质",
+        "label": "融合光效",
+        "default_value": "realistic contact shadows and warm morning directional reflections",
+        "options": [
+          "realistic contact shadows and warm morning directional reflections",
+          "crisp studio backlight with soft atmospheric haze",
+          "cool Nordic overcast skylight"
+        ]
+      }
+    ],
+    "source": "seed",
+    "stats": { "likes": 374, "hearts": 173, "score": 94.9 }
+  },
+  {
+    "id": "seed-edit-3d-figurine",
+    "title_zh": "人像/宠物照变桌面 3D 手办",
+    "category": "参考图编辑",
+    "prompt_en": "Convert the character or pet from the uploaded reference image into a charming 1/7 scale collectible PVC figurine standing on a [底座风格], keeping recognizable outfit and features, [光影材质]",
+    "prompt_zh": "将上传参考图中的人物或宠物转化为精致 1/7 比例 PVC 桌面手办模型，站在[底座风格]上，保留标志性服饰与五官神韵，[光影材质]",
+    "recommended_mode": "edits",
+    "recommended_model": "gpt-image-2.5",
+    "recommended_size": "1024x1024",
+    "variables": [
+      {
+        "key": "底座风格",
+        "label": "展示底座",
+        "default_value": "round translucent acrylic display base on an artist workbench",
+        "options": [
+          "round translucent acrylic display base on an artist workbench",
+          "miniature mossy cobblestone diorama plinth",
+          "sleek brushed aluminum pedestal inside a lit glass showcase"
+        ]
+      },
+      {
+        "key": "光影材质",
+        "label": "手办质感",
+        "default_value": "subtle satin PVC paint finish and soft natural window light",
+        "options": [
+          "subtle satin PVC paint finish and soft natural window light",
+          "matte vinyl toy finish with playful studio rim lighting",
+          "glossy ceramic glaze with warm desk lamp highlights"
+        ]
+      }
+    ],
+    "source": "seed",
+    "stats": { "likes": 432, "hearts": 198, "score": 96.7 }
+  }
+]

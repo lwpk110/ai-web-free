@@ -221,3 +221,135 @@ func TestChatGPTProviderImportKamiAndSub2API(t *testing.T) {
 		t.Fatalf("unexpected sub2api import result: %+v stats=%+v", subRes, p.Stats())
 	}
 }
+
+func TestSingleAccountLoginActionPhaseQueueAppendAndCancel(t *testing.T) {
+	pool := accounts.NewPool(nil)
+	p := NewChatGPTProvider(pool, nil, &config.Config{}, nil)
+	p.kamiLoginCooldown = 5 * time.Millisecond
+
+	makeAcct := func(id, email string) *accounts.Account {
+		a := accounts.CreateAccount("", accounts.TypeFree, accounts.DefaultProfiles)
+		a.ID = id
+		a.Email = email
+		a.Password = "pass"
+		a.TOTPSecret = "JBSWY3DPEHPK3PXP"
+		a.Status = accounts.StatusExpired
+		a.LastRenewError = "old error"
+		a.RenewCooldownUntil = time.Now().Add(5 * time.Minute)
+		pool.AddAccount(a)
+		return a
+	}
+
+	a1 := makeAcct("acc-1", "one@example.com")
+	a2 := makeAcct("acc-2", "two@example.com")
+	a3 := makeAcct("acc-3", "three@example.com")
+
+	startedCh := make(chan struct{}, 1)
+	releaseCh := make(chan struct{})
+	p.SetKamiLoginExecutor(func(targets []*accounts.Account, _ string, _ bool, onPhase KamiPhaseReporter) (map[string]KamiLoginOutcome, error) {
+		out := make(map[string]KamiLoginOutcome, len(targets))
+		for _, acct := range targets {
+			if onPhase != nil {
+				onPhase(acct.ID, "enter_email", KamiPhaseLabel("enter_email"))
+				onPhase(acct.ID, "enter_totp", KamiPhaseLabel("enter_totp"))
+			}
+			select {
+			case startedCh <- struct{}{}:
+			default:
+			}
+			<-releaseCh
+			out[strings.ToLower(acct.Email)] = KamiLoginOutcome{
+				Email:            acct.Email,
+				OK:               true,
+				AccessToken:      "tok-" + acct.ID,
+				SessionToken:     "sess-" + acct.ID,
+				ChatGPTAccountID: "cg-" + acct.ID,
+				ExpiresAt:        time.Now().Add(7 * 24 * time.Hour).Unix(),
+			}
+		}
+		return out, nil
+	})
+
+	// 1. Trigger single-account async re-login.
+	res1, err := p.ExecuteAccountActionWithOpts(a1.ID, "login", false)
+	if err != nil {
+		t.Fatalf("single login action failed: %v", err)
+	}
+	task1, ok := res1["task"].(KamiLoginTask)
+	if !ok || task1.ID == "" {
+		t.Fatalf("expected task in action result, got %+v", res1)
+	}
+
+	select {
+	case <-startedCh:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for mock login executor start")
+	}
+
+	// Verify live phase visibility in snapshot and ActiveKamiLoginTask.
+	activeTask := p.ActiveKamiLoginTask()
+	if activeTask == nil || activeTask.CurrentAccountID != a1.ID || activeTask.CurrentPhase != "enter_totp" {
+		t.Fatalf("expected active phase enter_totp on acc-1, got %+v", activeTask)
+	}
+	snaps := p.ListAccounts("", "", "one@example.com")
+	if len(snaps) != 1 || snaps[0].ActiveAction != "login" || snaps[0].ActionPhase != "enter_totp" {
+		t.Fatalf("expected snapshot to expose active login phase, got %+v", snaps)
+	}
+
+	// 2. Dynamically append a2 and a3 while a1 is still running.
+	if _, err := p.ExecuteAccountActionWithOpts(a2.ID, "login", true); err != nil {
+		t.Fatalf("append a2 failed: %v", err)
+	}
+	res3, err := p.ExecuteAccountActionWithOpts(a3.ID, "login", true)
+	if err != nil {
+		t.Fatalf("append a3 failed: %v", err)
+	}
+	task3 := res3["task"].(KamiLoginTask)
+	if task3.ID != task1.ID || task3.Total != 3 || len(task3.QueuedAccountIDs) != 2 {
+		t.Fatalf("expected dynamic append onto task %s (total=3, queued=2), got %+v", task1.ID, task3)
+	}
+
+	// 3. Cancel a2 only -> a3 shifts from queue #2 to #1.
+	cancelledTask, count, err := p.CancelKamiLogin(task1.ID, a2.ID, false)
+	if err != nil || count != 1 || len(cancelledTask.QueuedAccountIDs) != 1 || cancelledTask.QueuedAccountIDs[0] != a3.ID {
+		t.Fatalf("expected cancel a2 leave [acc-3], count=%d err=%v task=%+v", count, err, cancelledTask)
+	}
+	snap2 := pool.ListSnapshots("", "", "two@example.com")
+	if len(snap2) != 1 || snap2[0].ActiveAction != "" || snap2[0].LastActionSummary != "已取消重登排队" {
+		t.Fatalf("expected cleared queue state on a2, got %+v", snap2)
+	}
+	snap3 := pool.ListSnapshots("", "", "three@example.com")
+	if len(snap3) != 1 || snap3[0].ActionQueuePos != 1 {
+		t.Fatalf("expected a3 queue position shifted to 1, got %+v", snap3)
+	}
+
+	// 4. Cancel remaining (a3), release running login (a1), wait for completion.
+	if _, _, err := p.CancelKamiLogin(task1.ID, "", true); err != nil {
+		t.Fatalf("cancel remaining failed: %v", err)
+	}
+	close(releaseCh)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		st, _ := p.KamiLoginTaskSnapshot(task1.ID)
+		if st.Status == "completed" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	finalTask, _ := p.KamiLoginTaskSnapshot(task1.ID)
+	if finalTask.Status != "completed" || finalTask.Success != 1 || finalTask.Cancelled != 2 {
+		t.Fatalf("unexpected final task state: %+v", finalTask)
+	}
+	if a1.Status != accounts.StatusActive || a1.LastRenewError != "" || a1.LastActionSummary != "重登成功，Token 已更新" {
+		t.Fatalf("expected a1 active with cleared error and summary, got status=%v err=%q sum=%q", a1.Status, a1.LastRenewError, a1.LastActionSummary)
+	}
+
+	// 5. Dismiss task removes it from ActiveKamiLoginTask.
+	if !p.DismissKamiLoginTask(task1.ID) {
+		t.Fatalf("expected DismissKamiLoginTask to succeed")
+	}
+	if p.ActiveKamiLoginTask() != nil {
+		t.Fatalf("expected nil ActiveKamiLoginTask after dismiss")
+	}
+}

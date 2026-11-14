@@ -32,6 +32,7 @@
 
 5. **Spec-Driven 变更习惯**
    - 修改架构、UI 骨架、账号状态机、Failover 策略或 `/admin/api/v1/*` 契约前，先阅读 `openspec/specs/` 下对应规范并在实施后保持同步。
+   - 仓库内已配置项目级 Antigravity 钩子（`.agents/hooks.json` + `.agents/hooks/grill_me_adr.py`）与技能（`.agents/skills/grill-me-adr/SKILL.md`）：使用 `/grill-me` 开展架构/需求访谈时，会自动将决策树问答与收敛方案归档至 `docs/adr/ADR-XXXX-*.md`（可通过 `make adr-sync` 手动回填/校验）。
 
 ---
 
@@ -51,8 +52,10 @@
 | `internal/httpstream/`, `internal/sseparser/`, `internal/toolcall/` | SSE 流式解析、OpenAI 增量输出、`<tool_call>` 解析与纠偏恢复 |
 | `conversion/`, `typings/`, `httpclient/`, `middlewares/`, `util/` | OpenAI ↔ ChatGPT 请求/响应转换、数据结构、TLS HTTP 客户端封装、鉴权/CORS 中间件与工具函数 |
 | `web/` | Vite + React 19 + TypeScript 前端、`scripts/export-prompt.mjs` 与 `embed.go` |
-| `scripts/` | 独立 Python 卡密辅助脚本（`kami_login.py` 及对应单测 `test_kami_login.py`） |
+| `scripts/` | 独立 Python 卡密辅助脚本（`kami_login.py` 及对应单测 `test_kami_login.py`）与 ADR 归档单测（`test_grill_me_adr.py`） |
 | `openspec/specs/` | UI 与号池运维系统设计规范 |
+| `.agents/` | 项目级 Antigravity 钩子（`hooks.json`、`hooks/grill_me_adr.py`）与技能（`skills/grill-me-adr/SKILL.md`） |
+| `docs/adr/` | 由 `/grill-me` 访谈自动归档生成的架构决策记录（ADR）及索引 |
 
 ---
 

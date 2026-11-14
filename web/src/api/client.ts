@@ -104,12 +104,25 @@ export interface ProxyNodeStatus {
 
 export interface KamiWorkerStats {
   running: boolean;
+  running_account_id?: string;
   running_email?: string;
+  running_phase?: string;
+  running_phase_label?: string;
+  running_started_at?: string;
   queue_length: number;
+  queued_account_ids?: string[];
   total_succeeded: number;
   total_failed: number;
   last_run_at?: string;
   last_error?: string;
+}
+
+export interface KamiLoginTaskResult {
+  account_id: string;
+  email: string;
+  ok: boolean;
+  cancelled?: boolean;
+  error?: string;
 }
 
 export interface KamiLoginTask {
@@ -119,8 +132,34 @@ export interface KamiLoginTask {
   completed: number;
   success: number;
   failed: number;
+  cancelled?: number;
+  current_account_id?: string;
   current_email?: string;
-  results: { account_id: string; email: string; ok: boolean; error?: string }[];
+  current_phase?: string;
+  current_phase_label?: string;
+  current_started_at?: string;
+  queued_account_ids?: string[];
+  dismissed?: boolean;
+  results: KamiLoginTaskResult[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ProbeTask {
+  id: string;
+  status: "running" | "completed" | string;
+  total: number;
+  probed: number;
+  passed: number;
+  failed: number;
+  dismissed?: boolean;
+  results?: Array<{
+    id?: string;
+    email?: string;
+    ok?: boolean;
+    latency_ms?: number;
+    error?: string;
+  }>;
   created_at: string;
   updated_at: string;
 }
@@ -167,6 +206,8 @@ export interface OverviewResponse {
   proxies: string[];
   proxies_summary?: ProxySummary;
   kami_worker?: KamiWorkerStats;
+  login_task?: KamiLoginTask | null;
+  probe_task?: ProbeTask | null;
   audit_summary?: AuditSummary;
   providers: ProviderSummary[];
 }
@@ -189,6 +230,16 @@ export interface AccountView {
   renew_state?: string;
   renew_cooldown_until?: string;
   last_renew_error?: string;
+  active_action?: string;
+  action_phase?: string;
+  action_phase_label?: string;
+  action_queue_pos?: number;
+  action_task_id?: string;
+  action_started_at?: string;
+  last_action?: string;
+  last_action_ok?: boolean;
+  last_action_summary?: string;
+  last_action_at?: string;
   proxy?: string;
   tls_profile?: string;
   total_calls?: number;
@@ -200,6 +251,8 @@ export interface AccountView {
   created_at?: string;
   last_error?: string;
   capabilities?: string[];
+  models?: string[];
+  models_count?: number;
 }
 
 export async function fetchAuthStatus(
@@ -226,7 +279,14 @@ export async function fetchAccounts(
   status = "",
   type = "",
   search = ""
-): Promise<{ provider: string; accounts: AccountView[]; stats: PoolStats }> {
+): Promise<{
+  provider: string;
+  accounts: AccountView[];
+  stats: PoolStats;
+  login_task?: KamiLoginTask | null;
+  probe_task?: ProbeTask | null;
+  kami_worker?: KamiWorkerStats;
+}> {
   const params = new URLSearchParams();
   if (status) params.set("status", status);
   if (type) params.set("type", type);
@@ -279,7 +339,8 @@ export type AccountActionType =
 export async function executeAccountAction(
   provider: string,
   accountId: string,
-  action: AccountActionType
+  action: AccountActionType,
+  options?: { headless?: boolean }
 ): Promise<{
   provider: string;
   stats: PoolStats;
@@ -289,6 +350,7 @@ export async function executeAccountAction(
     status?: string;
     latency_ms?: number;
     models_count?: number;
+    models?: string[];
     error?: string;
     message?: string;
     email?: string;
@@ -296,14 +358,21 @@ export async function executeAccountAction(
     remaining_seconds?: number;
     expires_at?: string;
     deleted?: boolean;
+    queued?: boolean;
+    task_id?: string;
+    task?: KamiLoginTask;
   };
 }> {
+  const payload: Record<string, unknown> = { action };
+  if (typeof options?.headless === "boolean") {
+    payload.headless = options.headless;
+  }
   const res = await adminFetch(
     `/admin/api/v1/providers/${encodeURIComponent(provider)}/accounts/${encodeURIComponent(accountId)}/action`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action }),
+      body: JSON.stringify(payload),
     }
   );
   const data = await res.json();
@@ -314,21 +383,67 @@ export async function executeAccountAction(
 }
 
 export async function probeAllAccounts(
-  provider = "chatgpt"
+  provider = "chatgpt",
+  asyncMode = true
 ): Promise<{
   provider: string;
+  task?: ProbeTask;
   probed: number;
   passed: number;
   failed: number;
   stats: PoolStats;
 }> {
+  const qs = asyncMode ? "?async=true" : "";
   const res = await adminFetch(
-    `/admin/api/v1/providers/${encodeURIComponent(provider)}/pool/probe-all`,
+    `/admin/api/v1/providers/${encodeURIComponent(provider)}/pool/probe-all${qs}`,
     { method: "POST" }
   );
   const data = await res.json();
   if (!res.ok) {
     throw new Error(data?.error?.message || `Probe failed: HTTP ${res.status}`);
+  }
+  return data;
+}
+
+export async function cancelKamiLogin(
+  provider = "chatgpt",
+  payload: { task_id?: string; account_id?: string; cancel_all?: boolean }
+): Promise<{
+  provider: string;
+  cancelled: number;
+  task?: KamiLoginTask | null;
+  stats: PoolStats;
+}> {
+  const res = await adminFetch(
+    `/admin/api/v1/providers/${encodeURIComponent(provider)}/accounts/kami-login/cancel`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }
+  );
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error?.message || `Cancel failed: HTTP ${res.status}`);
+  }
+  return data;
+}
+
+export async function dismissAdminTask(
+  provider = "chatgpt",
+  payload: { kind?: "login" | "probe"; task_id?: string }
+): Promise<{ ok: boolean; dismissed: boolean }> {
+  const res = await adminFetch(
+    `/admin/api/v1/providers/${encodeURIComponent(provider)}/tasks/dismiss`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }
+  );
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error?.message || `Dismiss failed: HTTP ${res.status}`);
   }
   return data;
 }
@@ -513,28 +628,92 @@ export async function fetchLogs(params?: {
   return res.json();
 }
 
-export async function fetchModelsCatalog(
-  apiKey?: string
-): Promise<Array<{ id: string; owned_by?: string }>> {
-  const headers: Record<string, string> = {};
-  if (apiKey?.trim()) {
-    headers["Authorization"] = `Bearer ${apiKey.trim()}`;
+export interface ModelsCatalogItem {
+  id: string;
+  owned_by?: string;
+  source?: "upstream" | "builtin" | string;
+}
+
+export interface ModelsCatalogResult {
+  data: ModelsCatalogItem[];
+  source: "live" | "cache" | "fallback";
+  cached_at?: string;
+  upstream_count?: number;
+  warning?: string;
+}
+
+async function parseCatalogError(res: Response): Promise<string> {
+  let errMsg = `HTTP ${res.status}`;
+  try {
+    const errBody = await res.json();
+    errMsg =
+      errBody?.error?.message ||
+      (typeof errBody?.error === "string" ? errBody.error : errMsg);
+  } catch {
+    // ignore non-json error body
   }
-  const res = await fetch("/v1/models?include_builtins=true", { headers });
-  if (!res.ok) {
-    let errMsg = `HTTP ${res.status}`;
-    try {
-      const errBody = await res.json();
-      errMsg =
-        errBody?.error?.message ||
-        (typeof errBody?.error === "string" ? errBody.error : errMsg);
-    } catch {
-      // ignore non-json error body
+  return errMsg;
+}
+
+export async function fetchAdminModelsCatalog(options?: {
+  refresh?: boolean;
+  apiKey?: string;
+}): Promise<ModelsCatalogResult> {
+  const apiKey = options?.apiKey?.trim();
+  const useCacheParam = options?.refresh ? "" : "&use_cache=true";
+  if (apiKey) {
+    const res = await fetch(`/v1/models?include_builtins=true${useCacheParam}`, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+    });
+    if (!res.ok) {
+      throw new Error(await parseCatalogError(res));
     }
-    throw new Error(errMsg);
+    const data = await res.json();
+    return {
+      data: Array.isArray(data?.data) ? data.data : [],
+      source: "live",
+      cached_at: new Date().toISOString(),
+    };
+  }
+
+  const refreshParam = options?.refresh ? "&refresh=true" : "";
+  try {
+    const res = await adminFetch(
+      `/admin/api/v1/models?include_builtins=true${refreshParam}`
+    );
+    if (res.ok) {
+      const data = await res.json();
+      return {
+        data: Array.isArray(data?.data) ? data.data : [],
+        source: data?.source || "live",
+        cached_at: data?.cached_at,
+        upstream_count: data?.upstream_count,
+        warning: data?.warning,
+      };
+    }
+  } catch (err) {
+    if (err instanceof AdminUnauthorizedError) {
+      throw err;
+    }
+  }
+
+  const res = await fetch(`/v1/models?include_builtins=true${useCacheParam}`);
+  if (!res.ok) {
+    throw new Error(await parseCatalogError(res));
   }
   const data = await res.json();
-  return Array.isArray(data?.data) ? data.data : [];
+  return {
+    data: Array.isArray(data?.data) ? data.data : [],
+    source: "live",
+    cached_at: new Date().toISOString(),
+  };
+}
+
+export async function fetchModelsCatalog(
+  apiKey?: string
+): Promise<ModelsCatalogItem[]> {
+  const res = await fetchAdminModelsCatalog({ apiKey });
+  return res.data;
 }
 
 export async function generateImage(params: {
@@ -769,6 +948,124 @@ export async function executeDiagnosticRepair(
   const data = await res.json();
   if (!res.ok) {
     throw new Error(data?.error?.message || `HTTP ${res.status}`);
+  }
+  return data;
+}
+
+export interface PromptVariable {
+  key: string;
+  label: string;
+  default_value: string;
+  options?: string[];
+}
+
+export interface PromptStats {
+  likes: number;
+  hearts: number;
+  score: number;
+}
+
+export interface PromptPlazaItem {
+  id: string;
+  title_zh: string;
+  category: string;
+  prompt_en: string;
+  prompt_zh: string;
+  preview_url?: string;
+  recommended_mode: "generations" | "edits" | string;
+  recommended_model: string;
+  recommended_size: string;
+  variables?: PromptVariable[];
+  source: "seed" | "civitai" | "lexica" | "reddit" | "huggingface" | "ai_search" | string;
+  stats: PromptStats;
+  updated_at: string;
+}
+
+export interface PromptSyncStatus {
+  state: "idle" | "running" | "last_error" | string;
+  running: boolean;
+  last_synced_at?: string;
+  last_error?: string;
+  active_sources?: string[];
+  source_counts?: Record<string, number>;
+  total_count: number;
+}
+
+export interface PromptListResponse {
+  items: PromptPlazaItem[];
+  categories: Record<string, number>;
+  sources: Record<string, number>;
+  last_synced_at?: string;
+  sync_status: PromptSyncStatus;
+}
+
+export interface PromptExpandRequest {
+  idea: string;
+  mode?: string;
+  size?: string;
+}
+
+export interface PromptExpandResponse {
+  title_zh: string;
+  category: string;
+  prompt_en: string;
+  prompt_zh: string;
+  recommended_mode: "generations" | "edits" | string;
+  recommended_model: string;
+  recommended_size: string;
+  variables?: PromptVariable[];
+  source: string;
+}
+
+export async function fetchPromptPlaza(params?: {
+  category?: string;
+  mode?: string;
+  source?: string;
+  q?: string;
+  sort?: string;
+}): Promise<PromptListResponse> {
+  const sp = new URLSearchParams();
+  if (params?.category && params.category !== "all") sp.set("category", params.category);
+  if (params?.mode && params.mode !== "all") sp.set("mode", params.mode);
+  if (params?.source && params.source !== "all") sp.set("source", params.source);
+  if (params?.q?.trim()) sp.set("q", params.q.trim());
+  if (params?.sort) sp.set("sort", params.sort);
+  const qs = sp.toString();
+  const res = await adminFetch(`/admin/api/v1/prompts${qs ? `?${qs}` : ""}`);
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error?.message || `Fetch prompts failed: HTTP ${res.status}`);
+  }
+  return data;
+}
+
+export async function triggerPromptPlazaSync(): Promise<{
+  ok: boolean;
+  sync_status: PromptSyncStatus;
+}> {
+  const res = await adminFetch("/admin/api/v1/prompts/sync", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ wait: false }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error?.message || `Prompt sync failed: HTTP ${res.status}`);
+  }
+  return data;
+}
+
+export async function expandImagePrompt(
+  req: PromptExpandRequest
+): Promise<PromptExpandResponse> {
+  const res = await adminFetch("/admin/api/v1/prompts/expand", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error?.message || `Prompt expand failed: HTTP ${res.status}`);
   }
   return data;
 }

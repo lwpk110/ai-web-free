@@ -8,7 +8,6 @@ import {
   Zap,
 } from "lucide-react";
 import {
-  fetchModelsCatalog,
   fetchProxies,
   probeProxies,
   updateProxies,
@@ -16,13 +15,14 @@ import {
   type ProxySummary,
 } from "../api/client";
 import {
+  formatClockTime,
   formatRemainingCountdown,
   NoticeBanner,
   StatusBadge,
 } from "../components/ui";
 import {
   classifyModel,
-  FALLBACK_CATALOG_IDS,
+  useModelsCatalog,
   type ModelCategory,
 } from "../lib/models";
 
@@ -43,15 +43,20 @@ export const NetworkView: React.FC<{
     text: string;
   } | null>(null);
 
-  const [models, setModels] = useState<string[]>(FALLBACK_CATALOG_IDS);
-  const [modelsSource, setModelsSource] = useState<"live" | "fallback">(
-    "fallback"
-  );
-  const [modelsError, setModelsError] = useState<string | null>(null);
-  const [refreshingModels, setRefreshingModels] = useState(false);
-  const [lastRefreshed, setLastRefreshed] = useState<string>("");
+  const {
+    catalog,
+    chatModels,
+    imageModels,
+    source: modelsSource,
+    cachedAt: modelsCachedAt,
+    warning: modelsWarning,
+    loading: refreshingModels,
+    error: modelsError,
+    refresh: refreshCatalog,
+  } = useModelsCatalog();
   const [modelFilter, setModelFilter] = useState<"all" | ModelCategory>("all");
   const [copiedModelId, setCopiedModelId] = useState<string | null>(null);
+  const [selectedSdkModel, setSelectedSdkModel] = useState<string>("");
 
   const [apiKey, setApiKey] = useState("");
   const [sdkTab, setSdkTab] = useState<"curl" | "python" | "ts">("curl");
@@ -72,52 +77,39 @@ export const NetworkView: React.FC<{
     }
   };
 
-  const loadModels = async (key?: string, manual = false) => {
-    setRefreshingModels(true);
-    setModelsError(null);
-    try {
-      const list = await fetchModelsCatalog(key);
-      if (list.length > 0) {
-        setModels(list.map((m) => m.id));
-        setModelsSource("live");
-        const nowStr = new Date().toLocaleTimeString("zh-CN", {
-          hour12: false,
-        });
-        setLastRefreshed(nowStr);
-        if (manual) {
-          setNotice({
-            type: "success",
-            text: `已从 /v1/models?include_builtins=true 实时拉取 ${list.length} 个模型（含生图 / TTS / Whisper）`,
-          });
-        }
-      } else {
-        setModels(FALLBACK_CATALOG_IDS);
-        setModelsSource("fallback");
-        if (manual) {
-          setNotice({
-            type: "info",
-            text: "接口返回空模型列表，已保留内置能力目录参考",
-          });
-        }
-      }
-    } catch (err: any) {
-      setModelsSource("fallback");
-      const msg = err?.message || "请求 /v1/models 失败";
-      setModelsError(msg);
-      if (manual) {
-        setNotice({
-          type: "error",
-          text: `实时拉取 /v1/models 失败（已回退内置能力参考）：${msg}`,
-        });
-      }
-    } finally {
-      setRefreshingModels(false);
+  const handleRefreshModels = async () => {
+    const nextState = await refreshCatalog({
+      forceRefresh: true,
+      apiKey: apiKey.trim() || undefined,
+    });
+    if (nextState.error) {
+      setNotice({
+        type: "error",
+        text: `实时拉取模型目录失败（已保留当前参考目录）：${nextState.error}`,
+      });
+      return;
     }
+    if (nextState.source === "fallback") {
+      setNotice({
+        type: "info",
+        text: nextState.warning || "当前无可用登录态账号，已使用内置参考目录",
+      });
+      return;
+    }
+    const upstreamN = nextState.catalog.filter(
+      (m) => m.source === "upstream"
+    ).length;
+    const builtinN = nextState.catalog.filter(
+      (m) => m.source === "builtin"
+    ).length;
+    setNotice({
+      type: "success",
+      text: `已实时拉取并缓存 ${nextState.catalog.length} 个模型（上游 ${upstreamN} + 内置生图/语音 ${builtinN}）`,
+    });
   };
 
   useEffect(() => {
     loadProxies();
-    loadModels(undefined, false);
     const timer = window.setInterval(() => setNowMs(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, []);
@@ -177,7 +169,6 @@ export const NetworkView: React.FC<{
     }
   };
 
-  const catalog = useMemo(() => models.map(classifyModel), [models]);
   const counts = useMemo(
     () => ({
       all: catalog.length,
@@ -196,6 +187,7 @@ export const NetworkView: React.FC<{
   }, [catalog, modelFilter]);
 
   const handleCopyModel = async (id: string) => {
+    setSelectedSdkModel(id);
     try {
       await navigator.clipboard.writeText(id);
       setCopiedModelId(id);
@@ -205,17 +197,61 @@ export const NetworkView: React.FC<{
     }
   };
 
+  const activeSdkModel = useMemo(() => {
+    if (selectedSdkModel && visibleModels.some((m) => m.id === selectedSdkModel)) {
+      return selectedSdkModel;
+    }
+    if (modelFilter === "chat") {
+      return chatModels[0]?.id || "gpt-5-6";
+    }
+    if (modelFilter === "image") {
+      return (
+        imageModels.find((m) => m.id === "gpt-image-2.5-sunburst")?.id ||
+        imageModels[0]?.id ||
+        "gpt-image-2.5-sunburst"
+      );
+    }
+    if (modelFilter === "audio") {
+      return visibleModels[0]?.id || "gpt-4o-mini-tts";
+    }
+    return (
+      imageModels.find((m) => m.id === "gpt-image-2.5-sunburst")?.id ||
+      visibleModels[0]?.id ||
+      chatModels[0]?.id ||
+      "gpt-5-6"
+    );
+  }, [selectedSdkModel, visibleModels, modelFilter, chatModels, imageModels]);
+
   const baseURL = `${window.location.origin}/v1`;
   const sdkCode = useMemo(() => {
     const keyVal = apiKey.trim() || "free";
+    const meta = classifyModel(activeSdkModel);
+    if (meta.category === "chat") {
+      if (sdkTab === "curl") {
+        return `curl -X POST ${baseURL}/chat/completions \\\n  -H "Content-Type: application/json" \\\n  -H "Authorization: Bearer ${keyVal}" \\\n  -d '{"model":"${activeSdkModel}","messages":[{"role":"user","content":"Hello!"}]}'`;
+      }
+      if (sdkTab === "python") {
+        return `from openai import OpenAI\n\nclient = OpenAI(base_url="${baseURL}", api_key="${keyVal}")\nresp = client.chat.completions.create(\n    model="${activeSdkModel}",\n    messages=[{"role": "user", "content": "Hello!"}]\n)\nprint(resp.choices[0].message.content)`;
+      }
+      return `import OpenAI from "openai";\n\nconst client = new OpenAI({\n  baseURL: "${baseURL}",\n  apiKey: "${keyVal}",\n});\nconst resp = await client.chat.completions.create({\n  model: "${activeSdkModel}",\n  messages: [{ role: "user", content: "Hello!" }],\n});`;
+    }
+    if (meta.category === "audio") {
+      if (sdkTab === "curl") {
+        return `curl -X POST ${baseURL}/audio/speech \\\n  -H "Content-Type: application/json" \\\n  -H "Authorization: Bearer ${keyVal}" \\\n  -d '{"model":"${activeSdkModel}","input":"Hello from AI-Web-Free","voice":"alloy"}' --output speech.mp3`;
+      }
+      if (sdkTab === "python") {
+        return `from openai import OpenAI\n\nclient = OpenAI(base_url="${baseURL}", api_key="${keyVal}")\nresp = client.audio.speech.create(\n    model="${activeSdkModel}",\n    voice="alloy",\n    input="Hello from AI-Web-Free"\n)\nresp.stream_to_file("speech.mp3")`;
+      }
+      return `import OpenAI from "openai";\n\nconst client = new OpenAI({\n  baseURL: "${baseURL}",\n  apiKey: "${keyVal}",\n});\nconst resp = await client.audio.speech.create({\n  model: "${activeSdkModel}",\n  voice: "alloy",\n  input: "Hello from AI-Web-Free",\n});`;
+    }
     if (sdkTab === "curl") {
-      return `curl -X POST ${baseURL}/images/generations \\\n  -H "Content-Type: application/json" \\\n  -H "Authorization: Bearer ${keyVal}" \\\n  -d '{"model":"gpt-image-2.5-sunburst","prompt":"Minimalist glass pavilion at sunrise","size":"1024x1024"}'`;
+      return `curl -X POST ${baseURL}/images/generations \\\n  -H "Content-Type: application/json" \\\n  -H "Authorization: Bearer ${keyVal}" \\\n  -d '{"model":"${activeSdkModel}","prompt":"Minimalist glass pavilion at sunrise","size":"1024x1024"}'`;
     }
     if (sdkTab === "python") {
-      return `from openai import OpenAI\n\nclient = OpenAI(base_url="${baseURL}", api_key="${keyVal}")\nimg = client.images.generate(\n    model="gpt-image-2.5-sunburst",\n    prompt="Minimalist glass pavilion at sunrise",\n    size="1024x1024"\n)\nprint(img.data[0].url)`;
+      return `from openai import OpenAI\n\nclient = OpenAI(base_url="${baseURL}", api_key="${keyVal}")\nimg = client.images.generate(\n    model="${activeSdkModel}",\n    prompt="Minimalist glass pavilion at sunrise",\n    size="1024x1024"\n)\nprint(img.data[0].url)`;
     }
-    return `import OpenAI from "openai";\n\nconst client = new OpenAI({\n  baseURL: "${baseURL}",\n  apiKey: "${keyVal}",\n});\nconst img = await client.images.generate({\n  model: "gpt-image-2.5-sunburst",\n  prompt: "Minimalist glass pavilion at sunrise",\n});`;
-  }, [apiKey, baseURL, sdkTab]);
+    return `import OpenAI from "openai";\n\nconst client = new OpenAI({\n  baseURL: "${baseURL}",\n  apiKey: "${keyVal}",\n});\nconst img = await client.images.generate({\n  model: "${activeSdkModel}",\n  prompt: "Minimalist glass pavilion at sunrise",\n});`;
+  }, [apiKey, baseURL, sdkTab, activeSdkModel]);
 
   const handleCopyCode = async () => {
     try {
@@ -379,15 +415,23 @@ export const NetworkView: React.FC<{
                 /v1/models 完整模型能力目录
               </h2>
               <div className="z-text-muted mt-0.5">
-                {modelsSource === "live" ? (
+                {modelsSource === "live" || modelsSource === "cache" ? (
                   <span style={{ color: "var(--pill-success-text)" }}>
-                    实时拉取自 /v1/models?include_builtins=true（上游{" "}
-                    {counts.upstream} + 内置生图/语音 {counts.builtin}
-                    {lastRefreshed ? ` · ${lastRefreshed}` : ""}）
+                    {modelsSource === "cache"
+                      ? "已缓存复用 /v1/models 目录"
+                      : "实时拉取自 /v1/models 目录"}
+                    （上游 {counts.upstream} + 内置生图/语音 {counts.builtin}
+                    {modelsCachedAt
+                      ? ` · ${formatClockTime(modelsCachedAt)}`
+                      : ""}
+                    ）
                   </span>
                 ) : (
                   <span>
-                    内置参考目录{modelsError ? ` · 上游未拉取: ${modelsError}` : ""}
+                    内置参考目录
+                    {modelsError || modelsWarning
+                      ? ` · ${modelsError || modelsWarning}`
+                      : ""}
                   </span>
                 )}
               </div>
@@ -396,7 +440,7 @@ export const NetworkView: React.FC<{
             <button
               type="button"
               disabled={refreshingModels}
-              onClick={() => loadModels(apiKey, true)}
+              onClick={handleRefreshModels}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border z-border z-surface z-ghost-btn font-medium cursor-pointer shrink-0"
             >
               <RefreshCw

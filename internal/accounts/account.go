@@ -103,6 +103,23 @@ type Account struct {
 	RenewFailures      int
 	LastRenewError     string
 
+	// 实时操作进度状态（重登 / 续期 / 测活 / 刷新）
+	ActiveAction     string    // "login" | "renew" | "probe" | "refresh" | ""
+	ActionPhase      string    // "queued" | "checking_proxy" | "launch_browser" | "open_login" | "enter_email" | "enter_password" | "enter_totp" | "waiting_challenge" | "wait_session_token" | "probing" | "refreshing" | ""
+	ActionPhaseLabel string    // 中文阶段描述
+	ActionQueuePos   int       // 排队序号（1-based，非排队态为 0）
+	ActionTaskID     string    // 关联任务 ID
+	ActionStartedAt  time.Time // 当前操作/阶段开始时间
+
+	// 最近一次操作结果回显
+	LastAction        string // "login" | "renew" | "probe" | "refresh" | ""
+	LastActionOK      bool
+	LastActionSummary string
+	LastActionAt      time.Time
+
+	// 已探测上游模型缓存
+	Models []string
+
 	// 统计
 	TotalCalls  int64
 	FailedCalls int64

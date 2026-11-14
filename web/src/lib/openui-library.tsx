@@ -39,6 +39,7 @@ import {
   type DiagnosticsReport,
   type PoolStats,
 } from "../api/client";
+import { useModelsCatalog } from "./models";
 
 function maskProxyHost(raw?: string): string {
   if (!raw) return "直连";
@@ -386,9 +387,10 @@ export const ImageStudioCard = defineComponent({
     quality: z.string().optional(),
   }),
   component: ({ props }) => {
+    const { imageModels } = useModelsCatalog();
     const [prompt, setPrompt] = useState(props.prompt || "");
     const [model, setModel] = useState(
-      props.model || "gpt-image-2.5-sunburst"
+      props.model || imageModels[0]?.id || "gpt-image-2.5-sunburst"
     );
     const [size, setSize] = useState(props.size || "1024x1024");
     const [quality] = useState(props.quality || "hd");
@@ -434,14 +436,14 @@ export const ImageStudioCard = defineComponent({
             value={model}
             onChange={(e) => setModel(e.target.value)}
           >
-            <option value="gpt-image-2.5-sunburst">
-              gpt-image-2.5-sunburst (高精)
-            </option>
-            <option value="gpt-image-2.5-flare">
-              gpt-image-2.5-flare (极速)
-            </option>
-            <option value="gpt-image-2.5">gpt-image-2.5 (标准)</option>
-            <option value="gpt-image-2.6">gpt-image-2.6</option>
+            {!imageModels.some((m) => m.id === model) && (
+              <option value={model}>{model}</option>
+            )}
+            {imageModels.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.id} ({m.tag})
+              </option>
+            ))}
           </select>
         </div>
         <div className="inline-image-form">

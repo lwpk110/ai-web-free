@@ -152,7 +152,6 @@ export const App: React.FC = () => {
 
   useEffect(() => {
     refreshHealth();
-    const timer = window.setInterval(refreshHealth, 30000);
     const onPoolUpdated = () => refreshHealth();
     const onUnauth = () => {
       setAuthRequired(true);
@@ -161,11 +160,33 @@ export const App: React.FC = () => {
     window.addEventListener("pool-updated", onPoolUpdated);
     window.addEventListener("admin-unauthorized", onUnauth);
     return () => {
-      window.clearInterval(timer);
       window.removeEventListener("pool-updated", onPoolUpdated);
       window.removeEventListener("admin-unauthorized", onUnauth);
     };
   }, []);
+
+  const activeLoginTask =
+    overview?.login_task &&
+    (overview.login_task.status === "queued" ||
+      overview.login_task.status === "running")
+      ? overview.login_task
+      : null;
+  const activeProbeTask =
+    overview?.probe_task && overview.probe_task.status === "running"
+      ? overview.probe_task
+      : null;
+  const hasActiveOps = Boolean(
+    activeLoginTask ||
+      activeProbeTask ||
+      overview?.kami_worker?.running ||
+      (overview?.kami_worker?.queue_length ?? 0) > 0
+  );
+
+  useEffect(() => {
+    const intervalMs = hasActiveOps ? 3000 : 30000;
+    const timer = window.setInterval(refreshHealth, intervalMs);
+    return () => window.clearInterval(timer);
+  }, [hasActiveOps]);
 
   const navigate = (next: RouteKey) => {
     window.location.hash = `#/${next}`;
@@ -406,14 +427,22 @@ export const App: React.FC = () => {
                   />
                 )}
               </div>
-              <div className="mt-1.5 flex items-center justify-between text-xs z-text-muted">
-                <span>
-                  对话 {activeCount} · 生图 {imgReadyCount}
+              <div className="mt-1.5 flex items-center justify-between text-xs z-text-muted gap-1">
+                <span className="truncate">
+                  {activeLoginTask
+                    ? `重登 ${activeLoginTask.completed}/${activeLoginTask.total}${activeLoginTask.current_phase_label ? ` · ${activeLoginTask.current_phase_label}` : ""}`
+                    : activeProbeTask
+                      ? `测活 ${activeProbeTask.probed}/${activeProbeTask.total}`
+                      : overview?.kami_worker?.running
+                        ? overview.kami_worker.running_phase_label || "自动续期中"
+                        : `对话 ${activeCount} · 生图 ${imgReadyCount}`}
                 </span>
-                <span>
-                  {queueLen > 0
-                    ? `${queueLen} 续期`
-                    : `${imgLimitedCount} 冷却`}
+                <span className="shrink-0">
+                  {activeLoginTask
+                    ? `${activeLoginTask.queued_account_ids?.length ?? 0} 排队`
+                    : queueLen > 0
+                      ? `${queueLen} 续期`
+                      : `${imgLimitedCount} 冷却`}
                 </span>
               </div>
             </>

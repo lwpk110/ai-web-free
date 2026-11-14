@@ -24,7 +24,7 @@
 | **监控与运维** | `#/network` | **代理与接入指南** | `proxies.txt` 代理节点健康矩阵（延迟、可用状态、绑定账号数、连续失败数）；一键延迟测活 (`POST /admin/api/v1/proxies/probe`)；保存热更新校绑；实时聚合 `GET /v1/models?include_builtins=true` 目录刷新（覆盖对话、`gpt-image-*`/`dall-e-3` 图像及 `tts-1`/`whisper-1` 音频能力）、分类筛选与 `cURL` / `Python` / `TypeScript` 调用示例 |
 | **监控与运维** | `#/logs` | **请求日志与 Failover** | 采用 Helicone / Langfuse 风格主从分栏追踪视口（`lg:grid-cols-[1fr_370px]` Split Trace Inspector），基于零 CGO 内存环形缓冲支持筛选、状态切换与右侧实时诊断/切号轨迹检查器 |
 | **模型操场** | `#/chat` | **AI Copilot · 平台诊断与 OpenUI** | 统一多轮对话 Copilot（支持最近 12 轮历史、`/` 技能胶囊 `/diagnose` `/fix` `/openui` `/image` `/clear` 及运维关键词自动意图识别）；混合渲染格式化 Markdown 与局部 `.openui-scope` 内嵌 `<Renderer />` 卡片；当号池可用账号耗尽或网关熔断时自动降级为基于 `/admin/api/v1/diagnostics` 的离线诊断分析与内联自愈控制台 |
-| **模型操场** | `#/image` | **图像创作工坊** | 左侧 `336px` 独立参数台支持 `gpt-image-1` / `gpt-image-2.5-sunburst` / `flare` / `2.6` / `dall-e-3` 文生图、SVG 比例线框选择器、多图参考编辑（`/v1/images/edits`）及自动 Failover 切号提示；右侧点阵网格（`.studio-grid-bg`）作品画廊由 IndexedDB 二进制 `Blob` 持久化驱动，支持 Remix 复刻与分栏灯箱预览 |
+| **模型操场** | `#/image` | **图像创作工坊** | 左侧 `336px` 独立参数台支持 `gpt-image-1` / `gpt-image-2.5-sunburst` / `flare` / `2.6` / `dall-e-3` 文生图、SVG 比例线框选择器、多图参考编辑（`/v1/images/edits`）、自动 Failover 切号提示、Prompt 标题栏「AI 魔法扩写」/「随机灵感」与可交互「变量槽位填空」；右侧点阵网格（`.studio-grid-bg`）支持 `🔥 提示词广场`（接入 Civitai / Lexica / Reddit / HuggingFace 多源定时爬虫 + 本机号池 AI 提炼与联网搜索，支持分类筛选、双语切换、星标收藏与全参数联动「做同款 / 立即生成」）与 `🖼️ 我的作品库`（IndexedDB 二进制 `Blob` 持久化、Remix 复刻与分栏灯箱预览）双 Tab 切换（详见 [prompt-plaza.md](./prompt-plaza.md)） |
 
 ---
 

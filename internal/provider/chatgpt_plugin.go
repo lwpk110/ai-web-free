@@ -31,6 +31,11 @@ type ChatGPTProvider struct {
 	kamiLoginTasks     map[string]*KamiLoginTask
 	kamiLoginTaskOrder []string
 	kamiLoginRunning   string
+	kamiLoginQueue     []kamiLoginQueueItem
+	kamiLoginFn        KamiBatchLoginExecutor
+	kamiLoginCooldown  time.Duration
+	probeMu            sync.Mutex
+	currentProbeTask   *ProbeTask
 }
 
 func NewChatGPTProvider(pool *accounts.Pool, proxyPool *proxy.Pool, cfg *config.Config, renewFn func(*accounts.Account) bool) *ChatGPTProvider {
@@ -40,7 +45,18 @@ func NewChatGPTProvider(pool *accounts.Pool, proxyPool *proxy.Pool, cfg *config.
 		cfg:            cfg,
 		renewFn:        renewFn,
 		kamiLoginTasks: make(map[string]*KamiLoginTask),
+		kamiLoginFn:    RunKamiPlaywrightLoginWithProgress,
 	}
+}
+
+// SetKamiLoginExecutor 替换批量/单号卡密登录执行器（主要用于单元测试注入 mock）。
+func (p *ChatGPTProvider) SetKamiLoginExecutor(fn KamiBatchLoginExecutor) {
+	if fn == nil {
+		return
+	}
+	p.kamiLoginMu.Lock()
+	p.kamiLoginFn = fn
+	p.kamiLoginMu.Unlock()
 }
 
 // SetKamiWorker 绑定卡密后台自动续期队列。
@@ -75,6 +91,37 @@ func (p *ChatGPTProvider) reportProbeProxyFailure(acct *accounts.Account, errMsg
 }
 
 func (p *ChatGPTProvider) Descriptor() ProviderDescriptor {
+	featured := []string{
+		"gpt-5-6",
+		"gpt-5-6-mini",
+		"gpt-6",
+		"gpt-6-mini",
+		"gpt-image-2.5",
+		"gpt-image-2.5-sunburst",
+		"gpt-image-2.5-flare",
+		"gpt-image-2.6",
+		"gpt-image-2",
+		"dall-e-3",
+	}
+	if p.pool != nil {
+		if cached, _ := p.pool.CachedModels(); len(cached) > 0 {
+			seen := make(map[string]bool, len(cached)+5)
+			merged := make([]string, 0, len(cached)+5)
+			for _, id := range cached {
+				if id != "" && !seen[id] {
+					seen[id] = true
+					merged = append(merged, id)
+				}
+			}
+			for _, img := range []string{"gpt-image-2.5-sunburst", "gpt-image-2.5-flare", "gpt-image-2.5", "gpt-image-2.6", "dall-e-3"} {
+				if !seen[img] {
+					seen[img] = true
+					merged = append(merged, img)
+				}
+			}
+			featured = merged
+		}
+	}
 	return ProviderDescriptor{
 		ID:          "chatgpt",
 		Name:        "ChatGPT Web",
@@ -107,18 +154,7 @@ func (p *ChatGPTProvider) Descriptor() ProviderDescriptor {
 			"file_upload",
 			"websocket",
 		},
-		FeaturedModels: []string{
-			"gpt-5-6",
-			"gpt-5-6-mini",
-			"gpt-6",
-			"gpt-6-mini",
-			"gpt-image-2.5",
-			"gpt-image-2.5-sunburst",
-			"gpt-image-2.5-flare",
-			"gpt-image-2.6",
-			"gpt-image-2",
-			"dall-e-3",
-		},
+		FeaturedModels: featured,
 	}
 }
 
@@ -304,7 +340,157 @@ func (p *ChatGPTProvider) ImportCredentials(req ImportRequest) (ImportResult, er
 	return res, nil
 }
 
+// ProbeTask 表示全池批量测活的异步/同步执行进度快照。
+type ProbeTask struct {
+	ID        string                   `json:"id"`
+	Status    string                   `json:"status"` // "running" | "completed"
+	Total     int                      `json:"total"`
+	Probed    int                      `json:"probed"`
+	Passed    int                      `json:"passed"`
+	Failed    int                      `json:"failed"`
+	Results   []map[string]interface{} `json:"results,omitempty"`
+	CreatedAt string                   `json:"created_at"`
+	UpdatedAt string                   `json:"updated_at"`
+	Dismissed bool                     `json:"dismissed,omitempty"`
+}
+
+func cloneProbeTask(t *ProbeTask) ProbeTask {
+	cp := *t
+	if t.Results != nil {
+		cp.Results = append([]map[string]interface{}(nil), t.Results...)
+	}
+	return cp
+}
+
+// ActiveProbeTask 返回运行中或最近一次未关闭的全池测活任务快照。
+func (p *ChatGPTProvider) ActiveProbeTask() *ProbeTask {
+	p.probeMu.Lock()
+	defer p.probeMu.Unlock()
+	if p.currentProbeTask == nil || p.currentProbeTask.Dismissed {
+		return nil
+	}
+	cp := cloneProbeTask(p.currentProbeTask)
+	return &cp
+}
+
+// DismissProbeTask 标记已完成的全池测活战报为已关闭。
+func (p *ChatGPTProvider) DismissProbeTask(taskID string) bool {
+	p.probeMu.Lock()
+	defer p.probeMu.Unlock()
+	if p.currentProbeTask == nil || p.currentProbeTask.Status == "running" {
+		return false
+	}
+	if taskID != "" && p.currentProbeTask.ID != taskID {
+		return false
+	}
+	p.currentProbeTask.Dismissed = true
+	return true
+}
+
+// StartOrRunProbeAll 启动全池并发测活；async=true 时立即返回任务快照并后台执行，async=false 时等待完成。
+func (p *ChatGPTProvider) StartOrRunProbeAll(async bool) (ProbeTask, error) {
+	p.probeMu.Lock()
+	if async && p.currentProbeTask != nil && p.currentProbeTask.Status == "running" {
+		cp := cloneProbeTask(p.currentProbeTask)
+		p.probeMu.Unlock()
+		return cp, nil
+	}
+
+	snapshots := p.ListAccounts("free", "", "")
+	snapshots = append(snapshots, p.ListAccounts("puid", "", "")...)
+	targets := make([]accounts.AccountSnapshot, 0, len(snapshots))
+	for _, snap := range snapshots {
+		if snap.Status == "disabled" || snap.ActiveAction == "login" || snap.ActiveAction == "renew" {
+			continue
+		}
+		targets = append(targets, snap)
+	}
+
+	now := time.Now()
+	nowStr := now.Format(time.RFC3339)
+	task := &ProbeTask{
+		ID:        uuid.NewString(),
+		Status:    "running",
+		Total:     len(targets),
+		Results:   make([]map[string]interface{}, 0, len(targets)),
+		CreatedAt: nowStr,
+		UpdatedAt: nowStr,
+	}
+	if len(targets) == 0 {
+		task.Status = "completed"
+		p.currentProbeTask = task
+		cp := cloneProbeTask(task)
+		p.probeMu.Unlock()
+		return cp, nil
+	}
+	p.currentProbeTask = task
+	for _, snap := range targets {
+		p.pool.SetAccountActionState(snap.ID, "probe", "queued", "等待测活", task.ID, 0, now)
+	}
+	initial := cloneProbeTask(task)
+	p.probeMu.Unlock()
+
+	run := func() ProbeTask {
+		sem := make(chan struct{}, 3)
+		var wg sync.WaitGroup
+		for _, snap := range targets {
+			wg.Add(1)
+			go func(id string) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+
+				acct := p.pool.GetByID(id)
+				var res map[string]interface{}
+				var err error
+				if acct == nil {
+					err = errors.New("未找到对应账号")
+				} else {
+					res, err = p.executeProbe(acct, task.ID)
+				}
+
+				p.probeMu.Lock()
+				if err != nil {
+					task.Failed++
+					task.Results = append(task.Results, map[string]interface{}{"id": id, "ok": false, "error": err.Error()})
+				} else {
+					if okFlag, _ := res["ok"].(bool); okFlag {
+						task.Passed++
+					} else {
+						task.Failed++
+					}
+					task.Results = append(task.Results, res)
+				}
+				task.Probed++
+				task.UpdatedAt = time.Now().Format(time.RFC3339)
+				p.probeMu.Unlock()
+			}(snap.ID)
+		}
+		wg.Wait()
+
+		p.probeMu.Lock()
+		task.Status = "completed"
+		task.UpdatedAt = time.Now().Format(time.RFC3339)
+		cp := cloneProbeTask(task)
+		p.probeMu.Unlock()
+		return cp
+	}
+
+	if async {
+		go func() {
+			_ = run()
+		}()
+		return initial, nil
+	}
+	return run(), nil
+}
+
 func (p *ChatGPTProvider) ExecuteAccountAction(id, action string) (map[string]interface{}, error) {
+	return p.ExecuteAccountActionWithOpts(id, action, true)
+}
+
+// ExecuteAccountActionWithOpts 对单个账号执行运维操作，支持透传 headless 等扩展参数。
+func (p *ChatGPTProvider) ExecuteAccountActionWithOpts(id, action string, headless bool) (map[string]interface{}, error) {
 	action = strings.ToLower(strings.TrimSpace(action))
 	if action == "delete" {
 		removed, ok := p.pool.RemoveByID(id)
@@ -346,11 +532,13 @@ func (p *ChatGPTProvider) ExecuteAccountAction(id, action string) (map[string]in
 		if acct.RefreshToken == "" && acct.SessionToken == "" {
 			return nil, errors.New("该账号仅包含 AccessToken，无 RefreshToken/SessionToken 可供续期")
 		}
+		p.pool.SetAccountActionState(acct.ID, "refresh", "refreshing", "正在刷新 Token", "", 0, time.Now())
 		if p.renewFn != nil && p.renewFn(acct) {
 			acct.SyncJWTMetadata()
 			acct.LastChecked = time.Now()
 			acct.LastError = ""
 			p.pool.SetStatus(acct.ID, accounts.StatusActive)
+			p.pool.FinishAccountAction(acct.ID, "refresh", true, "Token 续期成功")
 			return map[string]interface{}{
 				"id":         acct.ID,
 				"status":     acct.Status.String(),
@@ -360,88 +548,11 @@ func (p *ChatGPTProvider) ExecuteAccountAction(id, action string) (map[string]in
 		acct.LastChecked = time.Now()
 		acct.LastError = "Token 续期失败"
 		p.pool.SetStatus(acct.ID, accounts.StatusExpired)
+		p.pool.FinishAccountAction(acct.ID, "refresh", false, "Token 续期失败")
 		return nil, errors.New("Token 续期请求失败")
 
 	case "probe":
-		start := time.Now()
-		acct.LastChecked = start
-		if acct.Client == nil {
-			_ = acct.InitClient()
-		}
-		if acct.Type == accounts.TypeNoAuth {
-			return map[string]interface{}{
-				"id":         acct.ID,
-				"status":     acct.Status.String(),
-				"latency_ms": time.Since(start).Milliseconds(),
-				"message":    "免登 UUID 账号就绪",
-			}, nil
-		}
-		models, httpStatus, err := chatgpt.ListModels(acct.Client, acct)
-		latency := time.Since(start).Milliseconds()
-		if err != nil {
-			errMsg := fmt.Sprintf("HTTP %d: %v", httpStatus, err)
-			acct.LastError = errMsg
-			reason := chatgpt.ClassifyAccountErrorReason(httpStatus, errMsg)
-			switch reason {
-			case chatgpt.ErrCategoryBanned:
-				p.pool.MarkBanned(acct, errMsg)
-				if p.auditLog != nil {
-					p.auditLog.RecordEvent("/internal/account-banned", acct.Email, acct.Proxy, "probe_banned", errMsg)
-				}
-			case chatgpt.ErrCategoryWAFProxy:
-				p.pool.RecordProxyBlock(acct, 2*time.Minute, errMsg)
-				p.reportProbeProxyFailure(acct, errMsg, "probe_tripped_migrated_")
-			case chatgpt.ErrCategoryTokenExpired:
-				p.pool.MarkExpired(acct, errMsg)
-				if p.kamiWorker != nil {
-					p.kamiWorker.Enqueue(acct, "probe_unauthorized")
-				}
-			case chatgpt.ErrCategoryImageLimit, chatgpt.ErrCategoryRateLimit:
-				isImg := reason == chatgpt.ErrCategoryImageLimit
-				cd := 5 * time.Minute
-				if isImg {
-					cd = 15 * time.Minute
-				}
-				p.pool.ReportRateLimit(acct, isImg, cd, errMsg)
-			case chatgpt.ErrCategoryProxyTransport:
-				p.reportProbeProxyFailure(acct, errMsg, "probe_transport_migrated_")
-			default:
-				if httpStatus == 401 {
-					p.pool.MarkExpired(acct, errMsg)
-					if p.kamiWorker != nil {
-						p.kamiWorker.Enqueue(acct, "probe_unauthorized")
-					}
-				} else if httpStatus == 429 {
-					p.pool.ReportRateLimit(acct, false, 5*time.Minute, errMsg)
-				}
-			}
-			return map[string]interface{}{
-				"id":          acct.ID,
-				"ok":          false,
-				"status":      acct.Status.String(),
-				"http_status": httpStatus,
-				"latency_ms":  latency,
-				"error":       acct.LastError,
-			}, nil
-		}
-		acct.LastError = ""
-		acct.CooldownUntil = time.Time{}
-		acct.ImageCooldownUntil = time.Time{}
-		p.pool.SetStatus(acct.ID, accounts.StatusActive)
-		var slugs []string
-		for _, m := range models {
-			if m.Slug != "" {
-				slugs = append(slugs, m.Slug)
-			}
-		}
-		return map[string]interface{}{
-			"id":           acct.ID,
-			"ok":           true,
-			"status":       acct.Status.String(),
-			"latency_ms":   latency,
-			"models_count": len(slugs),
-			"models":       slugs,
-		}, nil
+		return p.executeProbe(acct, "")
 
 	case "totp":
 		if acct.TOTPSecret == "" {
@@ -460,30 +571,139 @@ func (p *ChatGPTProvider) ExecuteAccountAction(id, action string) (map[string]in
 		}, nil
 
 	case "login":
+		if acct.Status == accounts.StatusDisabled {
+			return nil, errors.New("账号已停用，请先启用后再重登")
+		}
 		if acct.Email == "" || acct.Password == "" || acct.TOTPSecret == "" {
 			return nil, errors.New("该账号未配置邮箱/密码/2FA 卡密凭据，无法自动登录")
 		}
-		outcomes, err := p.loginKamiAccounts([]*accounts.Account{acct}, true)
+		if acct.ActiveAction == "renew" && acct.ActionPhase != "queued" {
+			return nil, errors.New("该账号正在后台自动续期中，请稍候")
+		}
+		if p.kamiWorker != nil {
+			p.kamiWorker.CancelQueued(acct.ID)
+		}
+		if acct.RenewState == "cooldown" {
+			p.pool.ResetRenewBackoff(acct)
+		}
+		task, err := p.StartKamiLoginBatch([]string{acct.ID}, headless)
 		if err != nil {
-			acct.LastError = err.Error()
 			return nil, err
 		}
-		_ = p.PersistAccessTokens()
-		outcome := outcomes[strings.ToLower(strings.TrimSpace(acct.Email))]
-		if !outcome.OK {
-			return nil, errors.New(outcome.Error)
+		msg := fmt.Sprintf("账号 %s 已加入后台重登任务（将实时回显执行阶段）", acct.Email)
+		if task.CurrentAccountID != "" && task.CurrentAccountID != acct.ID {
+			for idx, qid := range task.QueuedAccountIDs {
+				if qid == acct.ID {
+					msg = fmt.Sprintf("账号 %s 已加入重登队列（排队 #%d）", acct.Email, idx+1)
+					break
+				}
+			}
 		}
 		return map[string]interface{}{
-			"id":         acct.ID,
-			"email":      acct.Email,
-			"status":     acct.Status.String(),
-			"expires_at": acct.ExpiresAt.Format(time.RFC3339),
-			"message":    fmt.Sprintf("账号 %s 登录提取 Token 成功，已激活进入号池", acct.Email),
+			"id":      acct.ID,
+			"email":   acct.Email,
+			"status":  acct.Status.String(),
+			"queued":  true,
+			"task_id": task.ID,
+			"task":    task,
+			"message": msg,
 		}, nil
 
 	default:
 		return nil, fmt.Errorf("未知操作指令: %s", action)
 	}
+}
+
+func (p *ChatGPTProvider) executeProbe(acct *accounts.Account, taskID string) (map[string]interface{}, error) {
+	start := time.Now()
+	acct.LastChecked = start
+	p.pool.SetAccountActionState(acct.ID, "probe", "probing", "正在测活模型列表", taskID, 0, start)
+	if acct.Client == nil {
+		_ = acct.InitClient()
+	}
+	if acct.Type == accounts.TypeNoAuth {
+		latency := time.Since(start).Milliseconds()
+		p.pool.FinishAccountAction(acct.ID, "probe", true, fmt.Sprintf("免登就绪 · %dms", latency))
+		return map[string]interface{}{
+			"id":         acct.ID,
+			"ok":         true,
+			"status":     acct.Status.String(),
+			"latency_ms": latency,
+			"message":    "免登 UUID 账号就绪",
+		}, nil
+	}
+	models, httpStatus, err := chatgpt.ListModels(acct.Client, acct)
+	latency := time.Since(start).Milliseconds()
+	if err != nil {
+		errMsg := fmt.Sprintf("HTTP %d: %v", httpStatus, err)
+		acct.LastError = errMsg
+		reason := chatgpt.ClassifyAccountErrorReason(httpStatus, errMsg)
+		// 先记录本次测活结果并清除 "probe" 运行态，再按需触发后续续期入队，避免覆盖 renew 排队态
+		p.pool.FinishAccountAction(acct.ID, "probe", false, fmt.Sprintf("测活异常 (HTTP %d)", httpStatus))
+		switch reason {
+		case chatgpt.ErrCategoryBanned:
+			p.pool.MarkBanned(acct, errMsg)
+			if p.auditLog != nil {
+				p.auditLog.RecordEvent("/internal/account-banned", acct.Email, acct.Proxy, "probe_banned", errMsg)
+			}
+		case chatgpt.ErrCategoryWAFProxy:
+			p.pool.RecordProxyBlock(acct, 2*time.Minute, errMsg)
+			p.reportProbeProxyFailure(acct, errMsg, "probe_tripped_migrated_")
+		case chatgpt.ErrCategoryTokenExpired:
+			p.pool.MarkExpired(acct, errMsg)
+			if p.kamiWorker != nil {
+				p.kamiWorker.Enqueue(acct, "probe_unauthorized")
+			}
+		case chatgpt.ErrCategoryImageLimit, chatgpt.ErrCategoryRateLimit:
+			isImg := reason == chatgpt.ErrCategoryImageLimit
+			cd := 5 * time.Minute
+			if isImg {
+				cd = 15 * time.Minute
+			}
+			p.pool.ReportRateLimit(acct, isImg, cd, errMsg)
+		case chatgpt.ErrCategoryProxyTransport:
+			p.reportProbeProxyFailure(acct, errMsg, "probe_transport_migrated_")
+		default:
+			if httpStatus == 401 {
+				p.pool.MarkExpired(acct, errMsg)
+				if p.kamiWorker != nil {
+					p.kamiWorker.Enqueue(acct, "probe_unauthorized")
+				}
+			} else if httpStatus == 429 {
+				p.pool.ReportRateLimit(acct, false, 5*time.Minute, errMsg)
+			}
+		}
+		return map[string]interface{}{
+			"id":          acct.ID,
+			"ok":          false,
+			"status":      acct.Status.String(),
+			"http_status": httpStatus,
+			"latency_ms":  latency,
+			"error":       acct.LastError,
+		}, nil
+	}
+	acct.LastError = ""
+	acct.CooldownUntil = time.Time{}
+	acct.ImageCooldownUntil = time.Time{}
+	p.pool.SetStatus(acct.ID, accounts.StatusActive)
+	var slugs []string
+	for _, m := range models {
+		if m.Slug != "" {
+			slugs = append(slugs, m.Slug)
+		}
+	}
+	if p.pool != nil {
+		p.pool.RecordAccountModels(acct.ID, slugs)
+	}
+	p.pool.FinishAccountAction(acct.ID, "probe", true, fmt.Sprintf("测活通过 · %dms · %d 模型", latency, len(slugs)))
+	return map[string]interface{}{
+		"id":           acct.ID,
+		"ok":           true,
+		"status":       acct.Status.String(),
+		"latency_ms":   latency,
+		"models_count": len(slugs),
+		"models":       slugs,
+	}, nil
 }
 
 // PersistAccessTokens 将池内非临时 access_token 原子写回 access_tokens.txt

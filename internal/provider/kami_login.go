@@ -22,24 +22,41 @@ import (
 	"github.com/google/uuid"
 )
 
+type KamiPhaseReporter func(accountID, phase, phaseLabel string)
+
+type KamiBatchLoginExecutor func(targets []*accounts.Account, defaultProxy string, headless bool, onPhase KamiPhaseReporter) (map[string]KamiLoginOutcome, error)
+
+type kamiLoginQueueItem struct {
+	account  *accounts.Account
+	headless bool
+}
+
 type KamiLoginTaskResult struct {
 	AccountID string `json:"account_id"`
 	Email     string `json:"email"`
 	OK        bool   `json:"ok"`
+	Cancelled bool   `json:"cancelled,omitempty"`
 	Error     string `json:"error,omitempty"`
 }
 
 type KamiLoginTask struct {
-	ID           string                `json:"id"`
-	Status       string                `json:"status"`
-	Total        int                   `json:"total"`
-	Completed    int                   `json:"completed"`
-	Success      int                   `json:"success"`
-	Failed       int                   `json:"failed"`
-	CurrentEmail string                `json:"current_email,omitempty"`
-	Results      []KamiLoginTaskResult `json:"results"`
-	CreatedAt    string                `json:"created_at"`
-	UpdatedAt    string                `json:"updated_at"`
+	ID                string                `json:"id"`
+	Status            string                `json:"status"`
+	Total             int                   `json:"total"`
+	Completed         int                   `json:"completed"`
+	Success           int                   `json:"success"`
+	Failed            int                   `json:"failed"`
+	Cancelled         int                   `json:"cancelled,omitempty"`
+	CurrentAccountID  string                `json:"current_account_id,omitempty"`
+	CurrentEmail      string                `json:"current_email,omitempty"`
+	CurrentPhase      string                `json:"current_phase,omitempty"`
+	CurrentPhaseLabel string                `json:"current_phase_label,omitempty"`
+	CurrentStartedAt  string                `json:"current_started_at,omitempty"`
+	QueuedAccountIDs  []string              `json:"queued_account_ids,omitempty"`
+	Dismissed         bool                  `json:"dismissed,omitempty"`
+	Results           []KamiLoginTaskResult `json:"results"`
+	CreatedAt         string                `json:"created_at"`
+	UpdatedAt         string                `json:"updated_at"`
 }
 
 // KamiLoginOutcome 单账号浏览器登录提取结果
@@ -108,8 +125,57 @@ func resolveChromeExecutable() (string, error) {
 	return "", errors.New("未找到 Chrome/Chromium 可执行文件，请安装 Chrome/Chromium、将其加入 PATH 或设置 CHROME_PATH")
 }
 
+// KamiPhaseLabel 将内部登录阶段 key 映射为中文用户可读阶段名。
+func KamiPhaseLabel(phase string) string {
+	switch phase {
+	case "queued":
+		return "排队等待重登"
+	case "checking_proxy":
+		return "代理连通预检"
+	case "launch_browser":
+		return "启动浏览器实例"
+	case "open_login":
+		return "打开登录页"
+	case "enter_email":
+		return "填充账号邮箱"
+	case "enter_password":
+		return "填充登录密码"
+	case "enter_totp":
+		return "填充 2FA 动态码"
+	case "waiting_challenge":
+		return "等待安全验证过盾"
+	case "wait_session_token":
+		return "提取会话 Token"
+	case "cooldown_wait":
+		return "等待账号间隔"
+	case "probing":
+		return "正在测活"
+	case "refreshing":
+		return "正在刷新 Token"
+	default:
+		return phase
+	}
+}
+
+func summarizeActionError(errMsg string) string {
+	s := strings.TrimSpace(errMsg)
+	if idx := strings.Index(s, "\n"); idx >= 0 {
+		s = strings.TrimSpace(s[:idx])
+	}
+	runes := []rune(s)
+	if len(runes) > 72 {
+		return string(runes[:72]) + "..."
+	}
+	return s
+}
+
 // RunKamiPlaywrightLogin 使用纯 Go chromedp (CDP) 驱动本机 Chrome/Chromium 批量登录卡密账号并提取 AccessToken / SessionToken。
 func RunKamiPlaywrightLogin(targets []*accounts.Account, defaultProxy string, headless bool) (map[string]KamiLoginOutcome, error) {
+	return RunKamiPlaywrightLoginWithProgress(targets, defaultProxy, headless, nil)
+}
+
+// RunKamiPlaywrightLoginWithProgress 与 RunKamiPlaywrightLogin 相同，但在关键登录步骤触发实时阶段回调。
+func RunKamiPlaywrightLoginWithProgress(targets []*accounts.Account, defaultProxy string, headless bool, onPhase KamiPhaseReporter) (map[string]KamiLoginOutcome, error) {
 	if len(targets) == 0 {
 		return map[string]KamiLoginOutcome{}, nil
 	}
@@ -135,7 +201,7 @@ func RunKamiPlaywrightLogin(targets []*accounts.Account, defaultProxy string, he
 		}
 		startedAt := time.Now()
 		log.Printf("[kami-login] starting account=%s proxy_bound=%t headless=%t", acct.Email, proxyURL != "", headless)
-		outcome := loginSingleAccountCDP(chromePath, acct.Email, acct.Password, acct.TOTPSecret, proxyURL, headless)
+		outcome := loginSingleAccountCDP(chromePath, acct.ID, acct.Email, acct.Password, acct.TOTPSecret, proxyURL, headless, onPhase)
 		if outcome.OK {
 			log.Printf("[kami-login] succeeded account=%s elapsed=%s", acct.Email, time.Since(startedAt).Round(time.Second))
 		} else {
@@ -146,10 +212,17 @@ func RunKamiPlaywrightLogin(targets []*accounts.Account, defaultProxy string, he
 	return out, nil
 }
 
-func loginSingleAccountCDP(chromePath, email, password, totpSecret, proxyURL string, headless bool) KamiLoginOutcome {
+func loginSingleAccountCDP(chromePath, accountID, email, password, totpSecret, proxyURL string, headless bool, onPhase KamiPhaseReporter) KamiLoginOutcome {
 	outcome := KamiLoginOutcome{Email: email}
 	phase := "launch_browser"
 	lastStepError := ""
+	reportPhase := func(nextPhase string) {
+		phase = nextPhase
+		if onPhase != nil && accountID != "" {
+			onPhase(accountID, nextPhase, KamiPhaseLabel(nextPhase))
+		}
+	}
+	reportPhase("launch_browser")
 
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
 		chromedp.ExecPath(chromePath),
@@ -251,7 +324,7 @@ func loginSingleAccountCDP(chromePath, email, password, totpSecret, proxyURL str
 		outcome.Error = fmt.Sprintf("启用网络监听失败: %v", err)
 		return outcome
 	}
-	phase = "open_login"
+	reportPhase("open_login")
 	if err := chromedp.Do(ctx, chromedp.Navigate("https://chatgpt.com/auth/login")); err != nil {
 		outcome.Error = fmt.Sprintf("打开登录页失败: %v", err)
 		return outcome
@@ -271,12 +344,12 @@ func loginSingleAccountCDP(chromePath, email, password, totpSecret, proxyURL str
 
 	// 1. 填写邮箱并点击 Continue
 	emailSel := `input[name="username"], input[type="email"], #email-input`
-	phase = "enter_email"
+	reportPhase("enter_email")
 	inputTimeout := 25 * time.Second
 	if !headless {
 		inputTimeout = 120 * time.Second
 	}
-	if err := waitVisibleAndType(ctx, emailSel, email, inputTimeout, headless, email); err == nil {
+	if err := waitVisibleAndType(ctx, emailSel, email, inputTimeout, headless, email, reportPhase, "enter_email"); err == nil {
 		time.Sleep(500 * time.Millisecond)
 		if err := clickContinueButton(ctx); err != nil {
 			lastStepError = "提交邮箱失败: " + err.Error()
@@ -288,8 +361,8 @@ func loginSingleAccountCDP(chromePath, email, password, totpSecret, proxyURL str
 
 	// 2. 填写密码并点击 Continue
 	passSel := `input[name="password"], input[type="password"]`
-	phase = "enter_password"
-	if err := waitVisibleAndType(ctx, passSel, password, inputTimeout, headless, email); err == nil {
+	reportPhase("enter_password")
+	if err := waitVisibleAndType(ctx, passSel, password, inputTimeout, headless, email, reportPhase, "enter_password"); err == nil {
 		time.Sleep(500 * time.Millisecond)
 		if err := clickContinueButton(ctx); err != nil {
 			lastStepError = "提交密码失败: " + err.Error()
@@ -301,12 +374,12 @@ func loginSingleAccountCDP(chromePath, email, password, totpSecret, proxyURL str
 
 	// 3. 填写 2FA TOTP
 	totpSel := `input[inputmode="numeric"], input[name="code"], input[autocomplete="one-time-code"], input[placeholder*="code" i]`
-	phase = "enter_totp"
+	reportPhase("enter_totp")
 	totpTimeout := 12 * time.Second
 	if !headless {
 		totpTimeout = 120 * time.Second
 	}
-	if err := waitVisible(ctx, totpSel, totpTimeout, headless, email); err == nil {
+	if err := waitVisible(ctx, totpSel, totpTimeout, headless, email, reportPhase, "enter_totp"); err == nil {
 		if code, _, totpErr := accounts.GenerateTOTP(totpSecret, time.Now()); totpErr == nil && code != "" {
 			_ = chromedp.Do(ctx,
 				chromedp.Focus(chromedp.CSS(totpSel)),
@@ -318,7 +391,7 @@ func loginSingleAccountCDP(chromePath, email, password, totpSecret, proxyURL str
 	}
 
 	// 4. 轮询等待登录完成并提取 Token
-	phase = "wait_session_token"
+	reportPhase("wait_session_token")
 	loginStartedAt := time.Now()
 	deadline := time.Now().Add(120 * time.Second)
 	sessionProbeAttempted := false
@@ -437,7 +510,7 @@ func readSessionFromNewTab(parent context.Context) (string, error) {
 	return chromedp.Run(ctx, chromedp.Evaluate[string]("document.body.innerText"))
 }
 
-func waitVisible(ctx context.Context, selector string, timeout time.Duration, headless bool, email string) error {
+func waitVisible(ctx context.Context, selector string, timeout time.Duration, headless bool, email string, reportPhase func(string), resumePhase string) error {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	selectorJSON, _ := json.Marshal(selector)
@@ -456,6 +529,9 @@ func waitVisible(ctx context.Context, selector string, timeout time.Duration, he
 			return err
 		}
 		if state["visible"] {
+			if challengeReported && reportPhase != nil && resumePhase != "" {
+				reportPhase(resumePhase)
+			}
 			return nil
 		}
 		if state["challenge"] {
@@ -465,6 +541,9 @@ func waitVisible(ctx context.Context, selector string, timeout time.Duration, he
 			if !challengeReported {
 				log.Printf("[kami-login] waiting for manual browser verification account=%s", email)
 				challengeReported = true
+				if reportPhase != nil {
+					reportPhase("waiting_challenge")
+				}
 			}
 		}
 		select {
@@ -475,8 +554,8 @@ func waitVisible(ctx context.Context, selector string, timeout time.Duration, he
 	}
 }
 
-func waitVisibleAndType(ctx context.Context, selector, value string, timeout time.Duration, headless bool, email string) error {
-	if err := waitVisible(ctx, selector, timeout, headless, email); err != nil {
+func waitVisibleAndType(ctx context.Context, selector, value string, timeout time.Duration, headless bool, email string, reportPhase func(string), resumePhase string) error {
+	if err := waitVisible(ctx, selector, timeout, headless, email, reportPhase, resumePhase); err != nil {
 		return err
 	}
 	return chromedp.Do(ctx,
@@ -707,6 +786,10 @@ func (p *ChatGPTProvider) importSub2APIJSON(rawJSON string, persist bool) (Impor
 }
 
 func (p *ChatGPTProvider) loginKamiAccounts(targets []*accounts.Account, headless bool) (map[string]KamiLoginOutcome, error) {
+	return p.loginKamiAccountsWithProgress(targets, headless, nil)
+}
+
+func (p *ChatGPTProvider) loginKamiAccountsWithProgress(targets []*accounts.Account, headless bool, onPhase KamiPhaseReporter) (map[string]KamiLoginOutcome, error) {
 	defaultProxy := ""
 	if p.cfg != nil {
 		defaultProxy = p.cfg.ProxyURL
@@ -735,7 +818,13 @@ func (p *ChatGPTProvider) loginKamiAccounts(targets []*accounts.Account, headles
 			}
 		}
 	}
-	outcomes, err := RunKamiPlaywrightLogin(targets, defaultProxy, headless)
+	p.kamiLoginMu.Lock()
+	executor := p.kamiLoginFn
+	p.kamiLoginMu.Unlock()
+	if executor == nil {
+		executor = RunKamiPlaywrightLoginWithProgress
+	}
+	outcomes, err := executor(targets, defaultProxy, headless, onPhase)
 	if err != nil {
 		log.Printf("[kami-login] browser batch failed accounts=%d error=%v", len(targets), err)
 		if p.auditLog != nil {
@@ -775,6 +864,11 @@ func (p *ChatGPTProvider) loginKamiAccounts(targets []*accounts.Account, headles
 				acct.ExpiresAt = time.Unix(o.ExpiresAt, 0)
 			}
 			acct.LastError = ""
+			acct.CooldownUntil = time.Time{}
+			acct.ImageCooldownUntil = time.Time{}
+			acct.RenewFailures = 0
+			acct.RenewCooldownUntil = time.Time{}
+			acct.LastRenewError = ""
 			p.pool.SetStatus(acct.ID, accounts.StatusActive)
 		} else if !o.OK && o.Error != "" {
 			acct.LastError = o.Error
@@ -822,16 +916,113 @@ func (p *ChatGPTProvider) LoginPendingKami(headless, force bool) (map[string]int
 	}, nil
 }
 
-// StartKamiLoginBatch queues one serialized background login task and returns its initial snapshot.
+func cloneKamiLoginTask(task *KamiLoginTask) KamiLoginTask {
+	snapshot := *task
+	snapshot.Results = append([]KamiLoginTaskResult(nil), task.Results...)
+	snapshot.QueuedAccountIDs = append([]string(nil), task.QueuedAccountIDs...)
+	return snapshot
+}
+
+func (p *ChatGPTProvider) rebuildKamiQueueSnapshotLocked(task *KamiLoginTask) {
+	queuedIDs := make([]string, 0, len(p.kamiLoginQueue))
+	for idx, item := range p.kamiLoginQueue {
+		if item.account == nil {
+			continue
+		}
+		queuedIDs = append(queuedIDs, item.account.ID)
+		p.pool.SetAccountRenewState(item.account.ID, "queued")
+		p.pool.SetAccountActionState(item.account.ID, "login", "queued", KamiPhaseLabel("queued"), task.ID, idx+1, time.Time{})
+	}
+	task.QueuedAccountIDs = queuedIDs
+	task.UpdatedAt = time.Now().Format(time.RFC3339)
+}
+
+func (p *ChatGPTProvider) validateKamiLoginTarget(id string) (*accounts.Account, *KamiLoginTaskResult) {
+	acct := p.pool.GetByID(id)
+	result := KamiLoginTaskResult{AccountID: id}
+	if acct == nil {
+		result.Error = "账号不存在"
+		return nil, &result
+	}
+	result.AccountID = acct.ID
+	result.Email = acct.Email
+	switch {
+	case acct.Email == "" || acct.Password == "" || acct.TOTPSecret == "":
+		result.Error = "账号未配置完整卡密凭据"
+	case acct.Status == accounts.StatusDisabled:
+		result.Error = "账号已停用"
+	case acct.ActiveAction == "renew" && acct.ActionPhase != "queued":
+		result.Error = "该账号正在后台自动续期中"
+	default:
+		return acct, nil
+	}
+	return nil, &result
+}
+
+// StartKamiLoginBatch queues one serialized background login task (or appends to the running queue) and returns its snapshot.
 func (p *ChatGPTProvider) StartKamiLoginBatch(ids []string, headless bool) (KamiLoginTask, error) {
 	if len(ids) == 0 || len(ids) > 10000 {
 		return KamiLoginTask{}, errors.New("请选择 1 到 10000 个账号")
 	}
 
 	p.kamiLoginMu.Lock()
+	var auditFailures []KamiLoginTaskResult
 	if p.kamiLoginRunning != "" {
-		p.kamiLoginMu.Unlock()
-		return KamiLoginTask{}, errors.New("已有批量登录任务正在运行，请等待完成后再启动新任务")
+		if existing := p.kamiLoginTasks[p.kamiLoginRunning]; existing != nil && (existing.Status == "queued" || existing.Status == "running") {
+			alreadyInTask := make(map[string]struct{}, len(p.kamiLoginQueue)+1)
+			if existing.CurrentAccountID != "" {
+				alreadyInTask[existing.CurrentAccountID] = struct{}{}
+			}
+			for _, item := range p.kamiLoginQueue {
+				if item.account != nil {
+					alreadyInTask[item.account.ID] = struct{}{}
+				}
+			}
+			seen := make(map[string]struct{}, len(ids))
+			for _, rawID := range ids {
+				id := strings.TrimSpace(rawID)
+				if id == "" {
+					continue
+				}
+				if _, ok := seen[id]; ok {
+					continue
+				}
+				seen[id] = struct{}{}
+				if _, dup := alreadyInTask[id]; dup {
+					continue
+				}
+				acct, failRes := p.validateKamiLoginTarget(id)
+				if failRes != nil {
+					existing.Total++
+					existing.Completed++
+					existing.Failed++
+					existing.Results = append(existing.Results, *failRes)
+					auditFailures = append(auditFailures, *failRes)
+					continue
+				}
+				if p.kamiWorker != nil {
+					p.kamiWorker.CancelQueued(acct.ID)
+				}
+				if acct.RenewState == "cooldown" {
+					p.pool.ResetRenewBackoff(acct)
+				}
+				alreadyInTask[acct.ID] = struct{}{}
+				existing.Total++
+				p.kamiLoginQueue = append(p.kamiLoginQueue, kamiLoginQueueItem{
+					account:  acct,
+					headless: headless,
+				})
+			}
+			p.rebuildKamiQueueSnapshotLocked(existing)
+			snapshot := cloneKamiLoginTask(existing)
+			p.kamiLoginMu.Unlock()
+			if p.auditLog != nil {
+				for _, res := range auditFailures {
+					p.auditLog.RecordEvent("/admin/api/v1/providers/chatgpt/accounts/kami-login", res.Email, "", "kami_login_failed", res.Error)
+				}
+			}
+			return snapshot, nil
+		}
 	}
 
 	now := time.Now().Format(time.RFC3339)
@@ -854,51 +1045,63 @@ func (p *ChatGPTProvider) StartKamiLoginBatch(ids []string, headless bool) (Kami
 		}
 		seen[id] = struct{}{}
 		task.Total++
-		acct := p.pool.GetByID(id)
-		result := KamiLoginTaskResult{AccountID: id}
-		if acct == nil {
-			result.Error = "账号不存在"
-		} else {
-			result.AccountID = acct.ID
-			result.Email = acct.Email
-			switch {
-			case acct.Email == "" || acct.Password == "" || acct.TOTPSecret == "":
-				result.Error = "账号未配置完整卡密凭据"
-			case acct.Status == accounts.StatusDisabled:
-				result.Error = "账号已停用"
-			default:
-				targets = append(targets, acct)
-				continue
-			}
+		acct, failRes := p.validateKamiLoginTarget(id)
+		if failRes != nil {
+			task.Completed++
+			task.Failed++
+			task.Results = append(task.Results, *failRes)
+			auditFailures = append(auditFailures, *failRes)
+			continue
 		}
-		task.Completed++
-		task.Failed++
-		task.Results = append(task.Results, result)
+		targets = append(targets, acct)
 	}
 	if task.Total == 0 {
 		p.kamiLoginMu.Unlock()
 		return KamiLoginTask{}, errors.New("请选择至少一个账号")
 	}
+
+	if len(targets) == 0 {
+		task.Status = "completed"
+	} else {
+		p.kamiLoginQueue = p.kamiLoginQueue[:0]
+		for _, acct := range targets {
+			if p.kamiWorker != nil {
+				p.kamiWorker.CancelQueued(acct.ID)
+			}
+			if acct.RenewState == "cooldown" {
+				p.pool.ResetRenewBackoff(acct)
+			}
+			p.kamiLoginQueue = append(p.kamiLoginQueue, kamiLoginQueueItem{
+				account:  acct,
+				headless: headless,
+			})
+		}
+		p.rebuildKamiQueueSnapshotLocked(task)
+		p.kamiLoginRunning = task.ID
+	}
+
 	p.kamiLoginTasks[task.ID] = task
 	p.kamiLoginTaskOrder = append(p.kamiLoginTaskOrder, task.ID)
-	if len(p.kamiLoginTaskOrder) > 20 {
+	for len(p.kamiLoginTaskOrder) > 20 {
 		oldest := p.kamiLoginTaskOrder[0]
+		if oldest == p.kamiLoginRunning {
+			break
+		}
 		p.kamiLoginTaskOrder = p.kamiLoginTaskOrder[1:]
 		delete(p.kamiLoginTasks, oldest)
 	}
-	p.kamiLoginRunning = task.ID
-	snapshot := *task
-	snapshot.Results = append([]KamiLoginTaskResult(nil), task.Results...)
+	snapshot := cloneKamiLoginTask(task)
 	p.kamiLoginMu.Unlock()
+
 	if p.auditLog != nil {
-		for _, result := range snapshot.Results {
-			if !result.OK {
-				p.auditLog.RecordEvent("/admin/api/v1/providers/chatgpt/accounts/kami-login", result.Email, "", "kami_login_failed", result.Error)
-			}
+		for _, result := range auditFailures {
+			p.auditLog.RecordEvent("/admin/api/v1/providers/chatgpt/accounts/kami-login", result.Email, "", "kami_login_failed", result.Error)
 		}
 	}
 
-	go p.runKamiLoginTask(task.ID, targets, headless)
+	if len(targets) > 0 {
+		go p.runKamiLoginTask(task.ID)
+	}
 	return snapshot, nil
 }
 
@@ -923,66 +1126,287 @@ func (p *ChatGPTProvider) KamiLoginTaskSnapshot(id string) (KamiLoginTask, bool)
 	if task == nil {
 		return KamiLoginTask{}, false
 	}
-	snapshot := *task
-	snapshot.Results = append([]KamiLoginTaskResult(nil), task.Results...)
-	return snapshot, true
+	return cloneKamiLoginTask(task), true
 }
 
-func (p *ChatGPTProvider) runKamiLoginTask(taskID string, targets []*accounts.Account, headless bool) {
+// ActiveKamiLoginTask 返回当前正在运行的登录任务，或最近一个尚未被用户关闭的已完成任务。
+func (p *ChatGPTProvider) ActiveKamiLoginTask() *KamiLoginTask {
+	p.kamiLoginMu.Lock()
+	defer p.kamiLoginMu.Unlock()
+	if p.kamiLoginRunning != "" {
+		if task := p.kamiLoginTasks[p.kamiLoginRunning]; task != nil {
+			cp := cloneKamiLoginTask(task)
+			return &cp
+		}
+	}
+	for i := len(p.kamiLoginTaskOrder) - 1; i >= 0; i-- {
+		task := p.kamiLoginTasks[p.kamiLoginTaskOrder[i]]
+		if task != nil && !task.Dismissed {
+			cp := cloneKamiLoginTask(task)
+			return &cp
+		}
+	}
+	return nil
+}
+
+// CancelKamiLogin 从正在运行的批量/单号登录队列中移除尚未开始的等待账号。
+func (p *ChatGPTProvider) CancelKamiLogin(taskID, accountID string, cancelAll bool) (*KamiLoginTask, int, error) {
+	p.kamiLoginMu.Lock()
+	targetID := strings.TrimSpace(taskID)
+	if targetID == "" {
+		targetID = p.kamiLoginRunning
+	}
+	task := p.kamiLoginTasks[targetID]
+	if task == nil || (task.Status != "queued" && task.Status != "running") {
+		p.kamiLoginMu.Unlock()
+		return nil, 0, errors.New("当前没有运行中的重登任务")
+	}
+	accountID = strings.TrimSpace(accountID)
+	if !cancelAll && accountID == "" {
+		p.kamiLoginMu.Unlock()
+		return nil, 0, errors.New("请指定要取消排队的账号或选择取消全部排队")
+	}
+	if !cancelAll && task.CurrentAccountID == accountID {
+		p.kamiLoginMu.Unlock()
+		return nil, 0, errors.New("该账号正在执行登录中，无法取消")
+	}
+
+	remaining := make([]kamiLoginQueueItem, 0, len(p.kamiLoginQueue))
+	cancelled := make([]KamiLoginTaskResult, 0)
+	for _, item := range p.kamiLoginQueue {
+		if item.account == nil {
+			continue
+		}
+		if cancelAll || item.account.ID == accountID {
+			cancelled = append(cancelled, KamiLoginTaskResult{
+				AccountID: item.account.ID,
+				Email:     item.account.Email,
+				OK:        false,
+				Cancelled: true,
+				Error:     "已取消排队",
+			})
+			continue
+		}
+		remaining = append(remaining, item)
+	}
+	if len(cancelled) == 0 {
+		p.kamiLoginMu.Unlock()
+		if cancelAll {
+			return nil, 0, errors.New("当前队列中没有等待执行的账号")
+		}
+		return nil, 0, errors.New("该账号不在等待队列中")
+	}
+
+	p.kamiLoginQueue = remaining
+	for _, res := range cancelled {
+		task.Results = append(task.Results, res)
+		task.Completed++
+		task.Cancelled++
+		p.pool.ClearAccountQueuedAction(res.AccountID, "已取消重登排队")
+		p.pool.SetAccountRenewState(res.AccountID, "idle")
+	}
+	p.rebuildKamiQueueSnapshotLocked(task)
+	snapshot := cloneKamiLoginTask(task)
+	p.kamiLoginMu.Unlock()
+
+	if p.auditLog != nil {
+		for _, res := range cancelled {
+			p.auditLog.RecordEvent("/admin/api/v1/providers/chatgpt/accounts/kami-login/cancel", res.Email, "", "kami_login_cancelled", res.Error)
+		}
+	}
+	return &snapshot, len(cancelled), nil
+}
+
+// DismissKamiLoginTask 将已完成的重登任务横幅标记为已关闭（刷新页面后不再提示）。
+func (p *ChatGPTProvider) DismissKamiLoginTask(taskID string) bool {
+	p.kamiLoginMu.Lock()
+	defer p.kamiLoginMu.Unlock()
+	taskID = strings.TrimSpace(taskID)
+	dismissed := false
+	if taskID != "" {
+		if task := p.kamiLoginTasks[taskID]; task != nil && task.Status == "completed" {
+			task.Dismissed = true
+			task.UpdatedAt = time.Now().Format(time.RFC3339)
+			dismissed = true
+		}
+		return dismissed
+	}
+	for _, task := range p.kamiLoginTasks {
+		if task != nil && task.Status == "completed" && !task.Dismissed {
+			task.Dismissed = true
+			task.UpdatedAt = time.Now().Format(time.RFC3339)
+			dismissed = true
+		}
+	}
+	return dismissed
+}
+
+func (p *ChatGPTProvider) kamiCooldownDuration() time.Duration {
+	p.kamiLoginMu.Lock()
+	d := p.kamiLoginCooldown
+	p.kamiLoginMu.Unlock()
+	if d > 0 {
+		return d
+	}
+	return 10 * time.Second
+}
+
+func (p *ChatGPTProvider) runKamiLoginTask(taskID string) {
 	p.updateKamiLoginTask(taskID, func(task *KamiLoginTask) {
 		task.Status = "running"
 	})
-	if p.proxyPool != nil && p.proxyPool.Count() > 0 {
-		probeCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		p.proxyPool.ProbeAll(probeCtx, nil, p.pool.BoundProxyCounts())
-		cancel()
-		p.pool.ReconcileProxies(
-			func(u string) bool { return !p.proxyPool.IsHealthy(u) },
-			func(exclude map[string]bool) string { return p.proxyPool.AllocateHealthy(exclude) },
-		)
-	}
+	probedProxiesOnce := false
+	ranBrowser := false
+	cooldown := p.kamiCooldownDuration()
 
-	recordFailure := func(result KamiLoginTaskResult) {
+	recordFailure := func(acct *accounts.Account, result KamiLoginTaskResult) {
 		log.Printf("[kami-login] failed account=%s error=%s", result.Email, result.Error)
 		if p.auditLog != nil {
 			p.auditLog.RecordEvent("/admin/api/v1/providers/chatgpt/accounts/kami-login", result.Email, "", "kami_login_failed", result.Error)
 		}
+		p.pool.FinishAccountAction(acct.ID, "login", false, "重登失败: "+summarizeActionError(result.Error))
+		p.pool.SetAccountRenewState(acct.ID, "idle")
 		p.kamiLoginMu.Lock()
 		if task := p.kamiLoginTasks[taskID]; task != nil {
 			task.Results = append(task.Results, result)
 			task.Completed++
 			task.Failed++
+			task.CurrentAccountID = ""
+			task.CurrentEmail = ""
+			task.CurrentPhase = ""
+			task.CurrentPhaseLabel = ""
+			task.CurrentStartedAt = ""
 			task.UpdatedAt = time.Now().Format(time.RFC3339)
 		}
 		p.kamiLoginMu.Unlock()
 	}
 
-	for i, acct := range targets {
-		if i > 0 {
-			time.Sleep(10 * time.Second)
+	for {
+		p.kamiLoginMu.Lock()
+		task := p.kamiLoginTasks[taskID]
+		if task == nil || len(p.kamiLoginQueue) == 0 {
+			if task != nil {
+				task.Status = "completed"
+				task.CurrentAccountID = ""
+				task.CurrentEmail = ""
+				task.CurrentPhase = ""
+				task.CurrentPhaseLabel = ""
+				task.CurrentStartedAt = ""
+				task.QueuedAccountIDs = nil
+				task.UpdatedAt = time.Now().Format(time.RFC3339)
+			}
+			if p.kamiLoginRunning == taskID {
+				p.kamiLoginRunning = ""
+			}
+			p.kamiLoginMu.Unlock()
+			return
 		}
+
+		if ranBrowser {
+			task.CurrentAccountID = ""
+			task.CurrentEmail = ""
+			task.CurrentPhase = "cooldown_wait"
+			task.CurrentPhaseLabel = KamiPhaseLabel("cooldown_wait")
+			task.CurrentStartedAt = time.Now().Format(time.RFC3339)
+			task.UpdatedAt = time.Now().Format(time.RFC3339)
+			p.kamiLoginMu.Unlock()
+
+			deadline := time.Now().Add(cooldown)
+			for time.Now().Before(deadline) {
+				step := time.Until(deadline)
+				if step > 100*time.Millisecond {
+					step = 100 * time.Millisecond
+				}
+				if step > 0 {
+					time.Sleep(step)
+				}
+				p.kamiLoginMu.Lock()
+				empty := len(p.kamiLoginQueue) == 0
+				p.kamiLoginMu.Unlock()
+				if empty {
+					break
+				}
+			}
+
+			p.kamiLoginMu.Lock()
+			task = p.kamiLoginTasks[taskID]
+			if task == nil || len(p.kamiLoginQueue) == 0 {
+				if task != nil {
+					task.Status = "completed"
+					task.CurrentAccountID = ""
+					task.CurrentEmail = ""
+					task.CurrentPhase = ""
+					task.CurrentPhaseLabel = ""
+					task.CurrentStartedAt = ""
+					task.QueuedAccountIDs = nil
+					task.UpdatedAt = time.Now().Format(time.RFC3339)
+				}
+				if p.kamiLoginRunning == taskID {
+					p.kamiLoginRunning = ""
+				}
+				p.kamiLoginMu.Unlock()
+				return
+			}
+		}
+
+		item := p.kamiLoginQueue[0]
+		p.kamiLoginQueue = p.kamiLoginQueue[1:]
+		acct := item.account
+		startedAt := time.Now()
+		task.CurrentAccountID = acct.ID
+		task.CurrentEmail = acct.Email
+		task.CurrentPhase = "checking_proxy"
+		task.CurrentPhaseLabel = KamiPhaseLabel("checking_proxy")
+		task.CurrentStartedAt = startedAt.Format(time.RFC3339)
+		p.rebuildKamiQueueSnapshotLocked(task)
+		p.pool.SetAccountRenewState(acct.ID, "running")
+		p.pool.SetAccountActionState(acct.ID, "login", "checking_proxy", KamiPhaseLabel("checking_proxy"), taskID, 0, startedAt)
+		p.kamiLoginMu.Unlock()
+
 		if p.proxyPool != nil && p.proxyPool.Count() > 0 {
+			if !probedProxiesOnce {
+				probedProxiesOnce = true
+				probeCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+				p.proxyPool.ProbeAll(probeCtx, nil, p.pool.BoundProxyCounts())
+				cancel()
+				p.pool.ReconcileProxies(
+					func(u string) bool { return !p.proxyPool.IsHealthy(u) },
+					func(exclude map[string]bool) string { return p.proxyPool.AllocateHealthy(exclude) },
+				)
+			}
 			if acct.Proxy == "" {
 				proxyURL := p.proxyPool.AllocateHealthy(nil)
 				if proxyURL == "" || !p.proxyPool.IsHealthy(proxyURL) {
-					recordFailure(KamiLoginTaskResult{AccountID: acct.ID, Email: acct.Email, Error: "代理预检失败：没有健康代理节点，登录未启动"})
+					recordFailure(acct, KamiLoginTaskResult{AccountID: acct.ID, Email: acct.Email, Error: "代理预检失败：没有健康代理节点，登录未启动"})
 					continue
 				}
 				if err := p.pool.RebindAccountProxy(acct, proxyURL); err != nil {
-					recordFailure(KamiLoginTaskResult{AccountID: acct.ID, Email: acct.Email, Error: "绑定代理失败: " + err.Error()})
+					recordFailure(acct, KamiLoginTaskResult{AccountID: acct.ID, Email: acct.Email, Error: "绑定代理失败: " + err.Error()})
 					continue
 				}
 			}
 			if !p.proxyPool.IsHealthy(acct.Proxy) {
-				recordFailure(KamiLoginTaskResult{AccountID: acct.ID, Email: acct.Email, Error: "账号绑定代理未通过连通性预检，登录未启动；请更换健康代理"})
+				recordFailure(acct, KamiLoginTaskResult{AccountID: acct.ID, Email: acct.Email, Error: "账号绑定代理未通过连通性预检，登录未启动；请更换健康代理"})
 				continue
 			}
 		}
-		p.updateKamiLoginTask(taskID, func(task *KamiLoginTask) {
-			task.CurrentEmail = acct.Email
-		})
 
-		outcomes, err := p.loginKamiAccounts([]*accounts.Account{acct}, headless)
+		onPhase := func(accountID, phase, label string) {
+			if label == "" {
+				label = KamiPhaseLabel(phase)
+			}
+			p.pool.SetAccountActionState(accountID, "login", phase, label, taskID, 0, startedAt)
+			p.updateKamiLoginTask(taskID, func(t *KamiLoginTask) {
+				if t.CurrentAccountID == accountID {
+					t.CurrentPhase = phase
+					t.CurrentPhaseLabel = label
+				}
+			})
+		}
+
+		onPhase(acct.ID, "launch_browser", KamiPhaseLabel("launch_browser"))
+		ranBrowser = true
+		outcomes, err := p.loginKamiAccountsWithProgress([]*accounts.Account{acct}, item.headless, onPhase)
 		result := KamiLoginTaskResult{AccountID: acct.ID, Email: acct.Email}
 		if err != nil {
 			result.Error = err.Error()
@@ -996,7 +1420,16 @@ func (p *ChatGPTProvider) runKamiLoginTask(taskID string, targets []*accounts.Ac
 			if err := p.PersistAccessTokens(); err != nil {
 				log.Printf("[kami-login] persist access_tokens failed: %v", err)
 			}
+			p.pool.FinishAccountAction(acct.ID, "login", true, "重登成功，Token 已更新")
+		} else {
+			errSummary := summarizeActionError(result.Error)
+			if errSummary == "" {
+				errSummary = "未获取到有效 Token"
+			}
+			p.pool.FinishAccountAction(acct.ID, "login", false, "重登失败: "+errSummary)
 		}
+		p.pool.SetAccountRenewState(acct.ID, "idle")
+
 		p.kamiLoginMu.Lock()
 		if task := p.kamiLoginTasks[taskID]; task != nil {
 			task.Results = append(task.Results, result)
@@ -1006,21 +1439,15 @@ func (p *ChatGPTProvider) runKamiLoginTask(taskID string, targets []*accounts.Ac
 			} else {
 				task.Failed++
 			}
+			task.CurrentAccountID = ""
+			task.CurrentEmail = ""
+			task.CurrentPhase = ""
+			task.CurrentPhaseLabel = ""
+			task.CurrentStartedAt = ""
 			task.UpdatedAt = time.Now().Format(time.RFC3339)
 		}
 		p.kamiLoginMu.Unlock()
 	}
-
-	p.kamiLoginMu.Lock()
-	if task := p.kamiLoginTasks[taskID]; task != nil {
-		task.Status = "completed"
-		task.CurrentEmail = ""
-		task.UpdatedAt = time.Now().Format(time.RFC3339)
-	}
-	if p.kamiLoginRunning == taskID {
-		p.kamiLoginRunning = ""
-	}
-	p.kamiLoginMu.Unlock()
 }
 
 func (p *ChatGPTProvider) updateKamiLoginTask(taskID string, update func(*KamiLoginTask)) {

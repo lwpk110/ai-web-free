@@ -28,7 +28,9 @@
   - 定期健康检查与 `401` 失效反馈共同触发：识别包含 `Email + Password + TOTPSecret` 且无 `RefreshToken`/`SessionToken` 的卡密账号，当 `StatusExpired` 或距离 `ExpiresAt < 24h`（主动提前续期）且冷却时间到期时入队。
   - 单消费者串行执行（同时最多启动 **1 个** 无头 `chromedp` 实例），避免多浏览器并发触发内存峰值与集中风控。
   - 连续失败采用指数退避（`5m → 30m → 2h`）；成功提取 Token 后同步更新 JWT 元数据、`StatusActive` 并原子回写 `access_tokens.txt`。
-- **可观测接口**：`KamiRenewWorker.Stats()` 聚合进 `GET /admin/api/v1/overview` 的 `kami_worker` 字段。
+- **可观测接口与账号级运行时状态回现**：
+  - `KamiRenewWorker.Stats()` 聚合进 `GET /admin/api/v1/overview` 与 `GET /admin/api/v1/providers/:provider/accounts` 的 `kami_worker` 字段（包含 `running_account_id`、`running_phase`、`running_phase_label`、`running_started_at`、`queued_account_ids`）。
+  - `Account` / `AccountSnapshot` 维护纯内存线程安全运行时动作状态（`active_action`、`action_phase`、`action_phase_label`、`action_queue_pos`、`action_task_id`、`action_started_at`）及最近一次完成摘要（`last_action`、`last_action_ok`、`last_action_summary`、`last_action_at`），页面刷新（`F5`）与路由切换时自动恢复。
 
 ### 2.3 代理池节点健康矩阵与自动漂移
 - **状态追踪**（`internal/proxy/pool.go`）：
@@ -39,7 +41,11 @@
   - `POST /admin/api/v1/proxies/probe`：并发探测代理列表连通性与延迟并返回结果。
   - `POST /admin/api/v1/proxies`：更新代理池（支持持久化 `proxies.txt`）并自动校准失效绑定账号。
   - `POST /admin/api/v1/providers/:provider/accounts/bulk-proxy`：将选中账号统一绑定到健康代理并原子重建各自的 TLS Client；代理池已有节点时禁止把批量激活目标设为直连。绑定在当前运行期生效，重启后按代理池重新初始化。
-  - `POST /admin/api/v1/providers/:provider/accounts/kami-login`：创建单消费者异步卡密登录任务；`GET .../accounts/kami-login/tasks/:taskID` 增量返回进度和逐账号结果。启动浏览器前先探测代理；仅经健康代理登录，代理池无健康节点时逐账号失败并保留原绑定，禁止退化为直连。任务串行运行，每个账号之间至少间隔 `10s`；成功 Token 立即回写，失败结果进入审计日志。任务状态保存在内存中，服务重启后任务历史清空。
+  - `POST /admin/api/v1/providers/:provider/accounts/kami-login` 与单账号 `POST /admin/api/v1/providers/:provider/accounts/:id/action`（`action: "login"`, 可选 `headless`）：均以单消费者串行队列异步运行；若已有重登任务正在运行，新触发的单账号或批量账号会自动去重并追加至当前任务等待队列（更新 `queued_account_ids` 与 `action_queue_pos`）。
+  - **细粒度执行阶段实时回显**：`chromedp` 登录流程实时上报阶段（`queued` → `checking_proxy` → `launch_browser` → `open_login` → `enter_email` → `enter_password` → `enter_totp` / `waiting_challenge` → `wait_session_token`，多账号间隔为可中断 `cooldown_wait`），通过 `GET /admin/api/v1/overview`、`GET /admin/api/v1/providers/:provider/accounts` 内联 `login_task` 与 `GET .../accounts/kami-login/tasks/:taskID` 返回；登录成功时同步清理残留冷却与 `LastRenewError`。
+  - `POST /admin/api/v1/providers/:provider/accounts/kami-login/cancel`：支持按 `account_id` 取消单个等待账号或设置 `cancel_all: true` 取消全部剩余排队账号（正在执行中的账号不可中止，其余队列立即释放并记录取消原因）。
+  - `POST /admin/api/v1/providers/:provider/pool/probe-all?async=true` 与 `POST /admin/api/v1/providers/:provider/tasks/dismiss`：支持全池测活异步执行与 `probe_task` 进度回显，以及在重登/测活完成后保留可展开战报直到管理员手动关闭（`dismissed=true`）。
+  - 启动浏览器前先探测代理；仅经健康代理登录，代理池无健康节点时逐账号失败并保留原绑定，禁止退化为直连。任务串行运行，多账号之间等待可取消 `10s` 间隔；成功 Token 立即回写，失败结果进入审计日志。任务状态保存在内存中，服务重启后任务历史清空。
 
 ### 2.4 零 CGO 请求审计环形缓冲与可选 JSONL 落盘
 - **组件**：`internal/audit/` 提供线程安全定长 `RingBuffer`（默认保留最近 `1000` 条记录），记录网关请求（时间、Method/Path、Model、命中账号、代理节点、耗时 `ms`、HTTP 状态、`failover_trace`、错误信息）与关键号池运维事件。

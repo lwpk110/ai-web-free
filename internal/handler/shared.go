@@ -44,7 +44,10 @@ func resolveAccount(c *gin.Context, pool *accounts.Pool, cfg *config.Config, nee
 
 // resolveAccountForCapability 按目标能力与排除列表从号池解析可用账号，外部透传 Token 不受号池退避影响。
 func resolveAccountForCapability(c *gin.Context, pool *accounts.Pool, cfg *config.Config, needsPaid bool, capName string, exclude map[string]bool) (*accounts.Account, int, error) {
-	authHeader := c.GetHeader("Authorization")
+	var authHeader string
+	if c != nil {
+		authHeader = c.GetHeader("Authorization")
+	}
 
 	// 提取 Bearer token
 	payload := strings.TrimSpace(authHeader)
@@ -59,17 +62,25 @@ func resolveAccountForCapability(c *gin.Context, pool *accounts.Pool, cfg *confi
 	}
 
 	// 补充检查专用 header: ChatGPT-Account-ID, Team-Account-ID 等
-	for _, header := range []string{"ChatGPT-Account-ID", "Chatgpt-Account-Id", "Team-Account-ID", "X-ChatGPT-Account-ID"} {
-		if value := strings.TrimSpace(c.GetHeader(header)); value != "" {
-			teamAccountID = value
-			break
+	if c != nil {
+		for _, header := range []string{"ChatGPT-Account-ID", "Chatgpt-Account-Id", "Team-Account-ID", "X-ChatGPT-Account-ID"} {
+			if value := strings.TrimSpace(c.GetHeader(header)); value != "" {
+				teamAccountID = value
+				break
+			}
 		}
 	}
 
-	expected := cfg.Authorization
+	expected := ""
+	if cfg != nil {
+		expected = cfg.Authorization
+	}
 
 	// 无 token 或匹配全局密钥 → 先尝试 free,仅当非付费且未开启 exclude 重试时 fallback 到 noauth
 	if token == "" || (expected != "" && token == expected) {
+		if pool == nil {
+			return nil, http.StatusUnauthorized, ErrNoAvailable
+		}
 		acct, err := pool.AcquireForCapability(accounts.TypeFree, capName, exclude)
 		if err != nil || acct == nil {
 			if !needsPaid || len(exclude) == 0 {
@@ -87,13 +98,19 @@ func resolveAccountForCapability(c *gin.Context, pool *accounts.Pool, cfg *confi
 
 	// access_token (JWT) → 创建/复用临时账号 (受 ENABLE_EXTERNAL_TOKEN 控制)
 	if strings.HasPrefix(token, "eyJ") {
-		if !cfg.EnableExternalToken {
+		if cfg != nil && !cfg.EnableExternalToken {
 			return nil, http.StatusUnauthorized, errors.New("external access token disabled (set ENABLE_EXTERNAL_TOKEN=true)")
 		}
-		userAgent := c.GetHeader("User-Agent")
-		proxyURL := cfg.ProxyURL
-		if proxyURL == "" {
-			proxyURL = cfg.HTTPProxy
+		userAgent := ""
+		if c != nil {
+			userAgent = c.GetHeader("User-Agent")
+		}
+		proxyURL := ""
+		if cfg != nil {
+			proxyURL = cfg.ProxyURL
+			if proxyURL == "" {
+				proxyURL = cfg.HTTPProxy
+			}
 		}
 		acct := pool.GetOrCreateTempAccount(token, userAgent, proxyURL)
 		acct.TeamUserID = teamAccountID
@@ -116,7 +133,11 @@ func resolveAccountForCapability(c *gin.Context, pool *accounts.Pool, cfg *confi
 	// refresh_token → 换 access_token
 	if teamAccountID != "" || len(token) > 64 {
 		client := bogdanfinn.NewStdClient()
-		result, status, err := chatgpt.GETTokenForRefreshToken(client, token, cfg.ProxyURL)
+		proxyURL := ""
+		if cfg != nil {
+			proxyURL = cfg.ProxyURL
+		}
+		result, status, err := chatgpt.GETTokenForRefreshToken(client, token, proxyURL)
 		if err != nil {
 			return nil, status, err
 		}
@@ -124,7 +145,7 @@ func resolveAccountForCapability(c *gin.Context, pool *accounts.Pool, cfg *confi
 			if accessToken, ok := data["access_token"].(string); ok && accessToken != "" {
 				acct := accounts.NewAccount(accessToken, accounts.TypeFree, accessToken)
 				acct.TeamUserID = teamAccountID
-				acct.Proxy = cfg.ProxyURL
+				acct.Proxy = proxyURL
 				acct.RefreshToken = token
 				if err := acct.InitClient(); err != nil {
 					return nil, http.StatusInternalServerError, err
@@ -137,6 +158,9 @@ func resolveAccountForCapability(c *gin.Context, pool *accounts.Pool, cfg *confi
 	}
 
 	// 兜底：从池里取
+	if pool == nil {
+		return nil, http.StatusUnauthorized, ErrNoAvailable
+	}
 	acct, err := pool.Acquire(accounts.TypeFree)
 	if err != nil {
 		return nil, http.StatusUnauthorized, ErrNoAvailable

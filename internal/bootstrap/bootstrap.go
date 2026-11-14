@@ -16,6 +16,7 @@ import (
 	"ai-web-free/internal/chatgpt"
 	"ai-web-free/internal/config"
 	"ai-web-free/internal/handler"
+	"ai-web-free/internal/promptplaza"
 	"ai-web-free/internal/provider"
 	"ai-web-free/internal/proxy"
 
@@ -231,6 +232,20 @@ func Init() (*App, error) {
 			}
 		}()
 	}
+	rtForPlaza := &handler.GatewayRuntime{
+		AccountPool: accountPool,
+		ProxyPool:   proxyPool,
+		KamiWorker:  kamiWorker,
+		AuditLog:    auditLog,
+		Config:      &cfg,
+	}
+	plazaMgr := promptplaza.NewManager(promptplaza.Options{
+		PersistFile:  cfg.PromptPlazaFile,
+		ProxyFunc:    proxyPool.Allocate,
+		ChatExecutor: handler.NewPoolChatExecutor(rtForPlaza, accountPool, &cfg),
+	})
+	stopPromptSync := plazaMgr.StartScheduler(time.Duration(cfg.PromptSyncIntervalHours) * time.Hour)
+
 	router := handler.RegisterRouterWithDeps(handler.RouterDeps{
 		AccountPool: accountPool,
 		ProxyPool:   proxyPool,
@@ -238,6 +253,7 @@ func Init() (*App, error) {
 		Config:      &cfg,
 		KamiWorker:  kamiWorker,
 		AuditLog:    auditLog,
+		PromptPlaza: plazaMgr,
 	})
 
 	return &App{
@@ -248,6 +264,7 @@ func Init() (*App, error) {
 			stopHealthCheck()
 			stopTempGC()
 			stopKamiScan()
+			stopPromptSync()
 			kamiWorker.Stop()
 		},
 	}, nil

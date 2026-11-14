@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Renderer } from "@openuidev/react-lang";
 import { ThemeProvider } from "@openuidev/react-ui";
 import {
@@ -11,6 +11,7 @@ import {
   KeyRound,
   Layers,
   MessageSquare,
+  RefreshCw,
   RotateCcw,
   SendHorizontal,
   ShieldAlert,
@@ -26,11 +27,10 @@ import {
 } from "../lib/openui-library";
 import {
   fetchDiagnostics,
-  fetchModelsCatalog,
   streamChatCompletion,
   type DiagnosticsReport,
 } from "../api/client";
-import { classifyModel } from "../lib/models";
+import { FALLBACK_CATALOG_IDS, useModelsCatalog } from "../lib/models";
 import {
   clearStoredChat,
   loadStoredChat,
@@ -57,13 +57,19 @@ diagCard = PlatformDiagnosisCard("平台全链路健康与异常根因扫描", "
 poolCard = PoolOverviewCard("chatgpt", "ChatGPT Web 免费号池实时监控")
 \`\`\``;
 
-const DEFAULT_CHAT_MODELS = [
-  "gpt-5-6",
-  "gpt-5-3",
-  "gpt-5-mini",
-  "gpt-4o",
-  "gpt-4o-mini",
-];
+const CHAT_MODEL_STORAGE_KEY = "ai_web_free_chat_model";
+
+const FALLBACK_CHAT_MODELS = FALLBACK_CATALOG_IDS.filter(
+  (id) => !id.includes("image") && !id.includes("dall-e") && !id.includes("tts") && !id.includes("transcribe") && !id.includes("whisper")
+);
+
+function getStoredChatModel(): string {
+  try {
+    return window.sessionStorage.getItem(CHAT_MODEL_STORAGE_KEY) || "gpt-5-6";
+  } catch {
+    return "gpt-5-6";
+  }
+}
 
 interface SkillDefinition {
   command: string;
@@ -154,18 +160,24 @@ const OPENUI_INTENT_RE = /(openui|交互卡片|交互式|仪表盘|看板|可视
 
 function parseInputWithSlash(
   rawText: string,
-  pinnedSkill: CopilotSkill
+  pinnedSkill: CopilotSkill,
+  preferredImageModel = "gpt-image-2.5-sunburst"
 ): {
   cleanPrompt: string;
   explicitSkill: CopilotSkill | "clear" | null;
 } {
+  const resolveDefaultPrompt = (item: SkillDefinition) =>
+    item.skill === "image"
+      ? item.defaultPrompt.replace("gpt-image-2.5-sunburst", preferredImageModel)
+      : item.defaultPrompt;
+
   const trimmed = rawText.trim();
   const lower = trimmed.toLowerCase();
   for (const item of SLASH_SKILLS) {
     if (lower === item.command || lower.startsWith(`${item.command} `)) {
       const rest = trimmed.slice(item.command.length).trim();
       return {
-        cleanPrompt: rest || item.defaultPrompt,
+        cleanPrompt: rest || resolveDefaultPrompt(item),
         explicitSkill: item.skill,
       };
     }
@@ -174,7 +186,7 @@ function parseInputWithSlash(
     const matched = SLASH_SKILLS.find((s) => s.skill === pinnedSkill);
     if (matched) {
       return {
-        cleanPrompt: matched.defaultPrompt,
+        cleanPrompt: resolveDefaultPrompt(matched),
         explicitSkill: matched.skill,
       };
     }
@@ -339,18 +351,38 @@ export const GenerativeWorkbench: React.FC<{
   const [hydrated, setHydrated] = useState(false);
   const [idbSynced, setIdbSynced] = useState(false);
 
+  const {
+    chatModels: catalogChatModels,
+    imageModels: catalogImageModels,
+    source: modelsSource,
+    loading: modelsLoading,
+    refresh: refreshModels,
+  } = useModelsCatalog();
+
+  const chatModels = useMemo(() => {
+    const ids = catalogChatModels.map((m) => m.id);
+    if (ids.length > 0) return ids;
+    return FALLBACK_CHAT_MODELS;
+  }, [catalogChatModels]);
+
+  const preferredImageModel =
+    catalogImageModels.find((m) => m.id === "gpt-image-2.5-sunburst")?.id ||
+    catalogImageModels[0]?.id ||
+    "gpt-image-2.5-sunburst";
+
   const [input, setInput] = useState("");
-  const [model, setModel] = useState("gpt-5-6");
-  const [chatModels, setChatModels] = useState<string[]>(DEFAULT_CHAT_MODELS);
+  const [model, setModel] = useState<string>(getStoredChatModel);
   const [pinnedSkill, setPinnedSkill] = useState<CopilotSkill>("auto");
   const [apiKey, setApiKey] = useState("");
   const [isSending, setIsSending] = useState(false);
   const [showSystemPromptModal, setShowSystemPromptModal] = useState(false);
   const [showQuickMenu, setShowQuickMenu] = useState(false);
+  const [slashMenuIndex, setSlashMenuIndex] = useState(0);
   const [copiedPrompt, setCopiedPrompt] = useState(false);
 
   const streamEndRef = useRef<HTMLDivElement | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -362,26 +394,23 @@ export const GenerativeWorkbench: React.FC<{
       setIdbSynced(true);
       setHydrated(true);
     });
-    fetchModelsCatalog()
-      .then((list) => {
-        if (!alive || list.length === 0) return;
-        const dynamicChat = list
-          .map((m) => classifyModel(m.id))
-          .filter((m) => m.category === "chat")
-          .map((m) => m.id);
-        const merged = Array.from(
-          new Set([...dynamicChat, ...DEFAULT_CHAT_MODELS])
-        );
-        if (merged.length > 0) {
-          setChatModels(merged);
-          setModel((prev) => (merged.includes(prev) ? prev : merged[0]));
-        }
-      })
-      .catch(() => {});
     return () => {
       alive = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (chatModels.length === 0) return;
+    setModel((prev) => (chatModels.includes(prev) ? prev : chatModels[0]));
+  }, [chatModels]);
+
+  useEffect(() => {
+    try {
+      window.sessionStorage.setItem(CHAT_MODEL_STORAGE_KEY, model);
+    } catch {
+      // ignore storage errors
+    }
+  }, [model]);
 
   useEffect(() => {
     if (!hydrated || isSending) return;
@@ -406,7 +435,11 @@ export const GenerativeWorkbench: React.FC<{
   };
 
   const sendPrompt = async (rawPrompt: string, forcedSkill?: CopilotSkill) => {
-    const parsed = parseInputWithSlash(rawPrompt, forcedSkill ?? pinnedSkill);
+    const parsed = parseInputWithSlash(
+      rawPrompt,
+      forcedSkill ?? pinnedSkill,
+      preferredImageModel
+    );
     if (parsed.explicitSkill === "clear") {
       setShowQuickMenu(false);
       setInput("");
@@ -629,18 +662,71 @@ export const GenerativeWorkbench: React.FC<{
     }
   };
 
+  const focusComposerAtEnd = () => {
+    window.requestAnimationFrame(() => {
+      const el = textareaRef.current;
+      if (!el) return;
+      el.focus();
+      const len = el.value.length;
+      el.setSelectionRange(len, len);
+    });
+  };
+
+  const filteredSlashSkills = (() => {
+    if (input.startsWith("/") && !/\s/.test(input)) {
+      const prefix = input.toLowerCase();
+      const matched = SLASH_SKILLS.filter((item) =>
+        item.command.toLowerCase().startsWith(prefix)
+      );
+      if (matched.length > 0) return matched;
+    }
+    return SLASH_SKILLS;
+  })();
+
+  const activeSlashIndex =
+    filteredSlashSkills.length > 0
+      ? Math.min(slashMenuIndex, filteredSlashSkills.length - 1)
+      : 0;
+
+  const selectSlashSkill = (item: SkillDefinition) => {
+    setShowQuickMenu(false);
+    setSlashMenuIndex(0);
+    if (item.skill === "clear") {
+      setInput("");
+      void handleReset();
+      focusComposerAtEnd();
+      return;
+    }
+    setPinnedSkill(item.skill);
+    const trimmed = input.trim();
+    const stripped = trimmed.startsWith("/")
+      ? trimmed.replace(/^\/\S*\s*/, "").trim()
+      : trimmed;
+    setInput(stripped ? `${item.command} ${stripped}` : `${item.command} `);
+    focusComposerAtEnd();
+  };
+
   const handleSkillClick = (item: SkillDefinition) => {
     setShowQuickMenu(false);
     if (item.skill === "clear") {
+      setInput("");
       void handleReset();
+      focusComposerAtEnd();
       return;
     }
     const targetSkill: CopilotSkill = item.skill;
-    if (input.trim()) {
-      void sendPrompt(`${item.command} ${input.trim()}`);
-      return;
+    const isTogglingOff = pinnedSkill === targetSkill;
+    setPinnedSkill(isTogglingOff ? "auto" : targetSkill);
+    const trimmed = input.trim();
+    if (trimmed.startsWith("/")) {
+      const rest = trimmed.replace(/^\/\S*\s*/, "");
+      if (isTogglingOff) {
+        setInput(rest);
+      } else {
+        setInput(rest ? `${item.command} ${rest}` : `${item.command} `);
+      }
     }
-    setPinnedSkill((prev) => (prev === targetSkill ? "auto" : targetSkill));
+    focusComposerAtEnd();
   };
 
   return (
@@ -666,18 +752,42 @@ export const GenerativeWorkbench: React.FC<{
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          <select
-            value={model}
-            onChange={(e) => setModel(e.target.value)}
-            className="px-2.5 py-1.5 rounded-xl p-input font-mono-num text-xs"
-            aria-label="选择对话模型"
-          >
-            {chatModels.map((m) => (
-              <option key={m} value={m}>
-                模型：{m}
-              </option>
-            ))}
-          </select>
+          <div className="inline-flex items-center gap-1">
+            <select
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+              className="px-2.5 py-1.5 rounded-xl p-input font-mono-num text-xs"
+              aria-label="选择对话模型"
+            >
+              {chatModels.map((m) => (
+                <option key={m} value={m}>
+                  模型：{m}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              onClick={() =>
+                void refreshModels({
+                  forceRefresh: true,
+                  apiKey: apiKey.trim() || undefined,
+                })
+              }
+              disabled={modelsLoading}
+              title={
+                modelsSource === "fallback"
+                  ? "刷新可用模型列表（当前内置参考）"
+                  : "刷新可用模型列表（已缓存复用）"
+              }
+              className="p-1.5 rounded-xl border z-border z-surface z-ghost-btn cursor-pointer"
+              aria-label="刷新模型列表"
+            >
+              <RefreshCw
+                size={12}
+                className={modelsLoading ? "animate-spin" : ""}
+              />
+            </button>
+          </div>
 
           <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl p-input">
             <KeyRound size={12} className="z-text-muted shrink-0" />
@@ -723,7 +833,14 @@ export const GenerativeWorkbench: React.FC<{
                   key={item.label}
                   type="button"
                   disabled={isSending}
-                  onClick={() => sendPrompt(item.prompt)}
+                  onClick={() =>
+                    sendPrompt(
+                      item.prompt.replace(
+                        "gpt-image-2.5-sunburst",
+                        preferredImageModel
+                      )
+                    )
+                  }
                   className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full border z-border z-surface z-ghost-btn cursor-pointer"
                 >
                   <Icon size={12} className="z-text-muted" />
@@ -855,29 +972,26 @@ export const GenerativeWorkbench: React.FC<{
       >
         <div className="max-w-3xl mx-auto relative space-y-2">
           {showQuickMenu && (
-            <div className="absolute bottom-full left-0 mb-2 w-full sm:w-96 p-surface rounded-2xl p-2 shadow-xl space-y-1 z-20 text-xs">
-              <div className="px-2 py-1 z-text-muted font-medium">
-                / 技能命令与快速诊断模板
+            <div className="absolute bottom-full left-0 mb-2 w-full sm:w-[26rem] p-surface rounded-2xl p-2 shadow-xl space-y-1 z-20 text-xs">
+              <div className="px-2 py-1 z-text-muted font-medium flex items-center justify-between gap-2">
+                <span>/ 技能命令与快速诊断模板</span>
+                <span className="text-[11px] font-normal">点击填入后可继续补充说明</span>
               </div>
-              {SLASH_SKILLS.map((item) => {
+              {filteredSlashSkills.map((item, idx) => {
                 const Icon = item.icon;
+                const isActive = idx === activeSlashIndex;
                 return (
-                  <button
+                  <div
                     key={item.command}
-                    type="button"
-                    onClick={() => {
-                      if (item.skill === "clear") {
-                        setShowQuickMenu(false);
-                        setInput("");
-                        void handleReset();
-                      } else {
-                        setShowQuickMenu(false);
-                        void sendPrompt(item.command);
-                      }
-                    }}
-                    className="w-full flex items-center justify-between gap-2 px-2.5 py-2 rounded-xl z-row-hover text-left cursor-pointer"
+                    className={`w-full flex items-center justify-between gap-2 px-2 py-1.5 rounded-xl transition-colors ${
+                      isActive ? "z-muted" : "z-row-hover"
+                    }`}
                   >
-                    <div className="flex items-center gap-2 min-w-0">
+                    <button
+                      type="button"
+                      onClick={() => selectSlashSkill(item)}
+                      className="flex-1 flex items-center gap-2 min-w-0 text-left cursor-pointer"
+                    >
                       <Icon size={13} className="shrink-0 z-text-muted" />
                       <div className="min-w-0">
                         <div className="font-mono-num font-medium">
@@ -890,11 +1004,29 @@ export const GenerativeWorkbench: React.FC<{
                           {item.description}
                         </div>
                       </div>
-                    </div>
-                    <span className="font-mono-num z-text-muted shrink-0">
-                      执行 →
-                    </span>
-                  </button>
+                    </button>
+                    {item.skill === "clear" ? (
+                      <button
+                        type="button"
+                        onClick={() => selectSlashSkill(item)}
+                        className="font-mono-num px-2 py-0.5 rounded-md border z-border z-text-muted shrink-0 cursor-pointer"
+                      >
+                        清空
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowQuickMenu(false);
+                          void sendPrompt(item.command);
+                        }}
+                        className="font-mono-num px-2 py-0.5 rounded-md border z-border z-ghost-btn z-text-muted shrink-0 cursor-pointer"
+                        title="不附加自定义内容，直接使用默认模板发送"
+                      >
+                        直接执行 →
+                      </button>
+                    )}
+                  </div>
                 );
               })}
             </div>
@@ -938,17 +1070,53 @@ export const GenerativeWorkbench: React.FC<{
 
           <div className="p-surface rounded-2xl p-3 space-y-2">
             <textarea
+              ref={textareaRef}
               rows={2}
               value={input}
               onChange={(e) => {
                 const v = e.target.value;
                 setInput(v);
-                if (v === "/") setShowQuickMenu(true);
-                else if (showQuickMenu && !v.startsWith("/")) {
+                if (v.startsWith("/") && !/\s/.test(v)) {
+                  setShowQuickMenu(true);
+                  setSlashMenuIndex(0);
+                } else if (showQuickMenu) {
                   setShowQuickMenu(false);
                 }
               }}
               onKeyDown={(e) => {
+                if (e.nativeEvent.isComposing) return;
+                if (showQuickMenu && filteredSlashSkills.length > 0) {
+                  if (e.key === "ArrowDown") {
+                    e.preventDefault();
+                    setSlashMenuIndex(
+                      (i) => (i + 1) % filteredSlashSkills.length
+                    );
+                    return;
+                  }
+                  if (e.key === "ArrowUp") {
+                    e.preventDefault();
+                    setSlashMenuIndex(
+                      (i) =>
+                        (i - 1 + filteredSlashSkills.length) %
+                        filteredSlashSkills.length
+                    );
+                    return;
+                  }
+                  if (e.key === "Tab") {
+                    e.preventDefault();
+                    selectSlashSkill(filteredSlashSkills[activeSlashIndex]);
+                    return;
+                  }
+                  if (
+                    e.key === "Enter" &&
+                    !e.shiftKey &&
+                    (input.trim() === "" || /^\/\S*$/.test(input.trim()))
+                  ) {
+                    e.preventDefault();
+                    selectSlashSkill(filteredSlashSkills[activeSlashIndex]);
+                    return;
+                  }
+                }
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
                   void sendPrompt(input);
@@ -978,7 +1146,7 @@ export const GenerativeWorkbench: React.FC<{
                   / 技能列表
                 </button>
                 <span className="hidden sm:inline">
-                  Enter 发送 · Shift+Enter 换行 · 支持自动诊断与混合 OpenUI 渲染
+                  选择 / 命令仅填入前缀便于继续输入 · Enter 发送 · Shift+Enter 换行
                 </span>
               </div>
               {isSending ? (
