@@ -39,6 +39,7 @@ import {
   type StoredChatMessage,
 } from "../lib/storage";
 import {
+  containsOpenUIDSL,
   MarkdownContent,
   splitHybridSegments,
 } from "../components/MarkdownContent";
@@ -221,24 +222,50 @@ function buildSystemPromptForSkill(
     return getOpenUISystemPrompt();
   }
   if ((skill === "diagnose" || skill === "fix") && diag) {
-    const jsonTelemetry = JSON.stringify(buildCompactTelemetryPayload(diag));
     return [
-      "你是 AI-Web-Free 平台的 SRE / 运维诊断 Copilot，必须严格基于下方提供的实时系统遥测 JSON 回答问题，严禁编造未出现的账号、代理或状态数据。",
+      "你是 AI-Web-Free 平台的 SRE / 运维诊断 Copilot，必须严格基于用户消息末尾附带的实时系统遥测 JSON 回答问题，严禁编造未出现的账号、代理或状态数据。",
       "请使用清晰、结构化的中文 Markdown 输出分析：点明健康评分、具体失败原因（永久封禁 status=banned、403 WAF/Cloudflare 代理风控、401 令牌过期/卡密续期退避、429 全局限流/生图限流、代理节点连续失败熔断）、受影响账号/代理及对应处置步骤。",
-      "如需在回复中挂载交互式修复界面（强烈推荐），请在 Markdown 总结末尾嵌入 **一个** ```openui 代码块，例如：",
+      "如需在回复中挂载交互式修复界面，请在 Markdown 总结末尾嵌入一个 ```openui 代码块，例如：",
       "```openui",
-      'root = Card([header, diagCard, tableCard])',
+      "root = Card([header, diagCard, tableCard])",
       'header = CardHeader("全平台根因诊断与修复台", "支持点击安全自愈或二次确认清理封禁账号")',
       'diagCard = PlatformDiagnosisCard("平台全链路诊断与一键自愈", "all")',
       'tableCard = AccountDiagnosticTable("chatgpt")',
       "```",
-      `当前平台实时诊断遥测 JSON：\n${jsonTelemetry}`,
     ].join("\n\n");
   }
   if (skill === "diagnose" || skill === "fix") {
     return "你是 AI-Web-Free 平台架构与运维 Copilot。当前管理端遥测接口暂未返回数据（可能启用了 ADMIN_TOKEN 鉴权未解锁）。请向用户解释 5 类常见平台故障定位方法（403 WAF vs account_deactivated 永久封禁 vs 401 续期退避 vs 429 限流 vs 代理 3 次失败熔断），并提示其可在控制台解锁后重新执行 `/diagnose`。";
   }
   return "你是 AI-Web-Free 智能助手与网关架构顾问。请以准确、简洁的中文 Markdown 回复用户问题；不要编造本地实时遥测数据。若用户想检查网关号池状态或生成交互看板，可提示其使用 `/diagnose`、`/fix` 或 `/openui`。";
+}
+
+function buildUserPayloadForSkill(
+  promptText: string,
+  skill: Exclude<CopilotSkill, "auto">,
+  diag: DiagnosticsReport | null
+): string {
+  if (skill === "diagnose" || skill === "fix") {
+    if (diag) {
+      const jsonTelemetry = JSON.stringify(buildCompactTelemetryPayload(diag));
+      return [
+        promptText,
+        "",
+        "---",
+        "[平台实时诊断上下文 · 请严格基于下方真实遥测 JSON 用中文 Markdown 输出根因分析与处置建议；严禁编造未出现的账号或代理；如需交互卡片可在末尾附加 ```openui 块]",
+        "```json",
+        jsonTelemetry,
+        "```",
+      ].join("\n");
+    }
+    return [
+      promptText,
+      "",
+      "---",
+      "[平台提示：当前未能读取 `/admin/api/v1/diagnostics` 实时遥测（可能开启了 ADMIN_TOKEN 尚未解锁）。请勿编造实时账号/代理数据，请用中文 Markdown 说明 5 类故障排查路径并提醒用户先在控制台右上角解锁管理令牌。]",
+    ].join("\n");
+  }
+  return promptText;
 }
 
 function buildOfflineFallbackContent(
@@ -261,7 +288,10 @@ function getSkillMetaLabel(msg: StoredChatMessage): string {
   if (msg.isOfflineFallback) return "本地离线诊断兜底";
   if (msg.skill === "diagnose") return "平台诊断 · 混合渲染";
   if (msg.skill === "fix") return "自愈方案 · 混合渲染";
-  if (msg.skill === "openui" || msg.skill === "image" || msg.openuiMode) {
+  if (msg.openuiMode && (msg.skill === "openui" || msg.skill === "image")) {
+    return "Thesys OpenUI 交互卡片";
+  }
+  if (msg.openuiMode) {
     return "Thesys OpenUI 交互卡片";
   }
   return "Copilot Markdown 对话";
@@ -273,12 +303,31 @@ function createDefaultMessages(): StoredChatMessage[] {
       id: "welcome-1",
       role: "assistant",
       content: INITIAL_COPILOT_MESSAGE,
-      openuiMode: false,
+      openuiMode: true,
       skill: "diagnose",
       isStreaming: false,
       showSource: false,
     },
   ];
+}
+
+function migrateStoredMessages(saved: StoredChatMessage[]): StoredChatMessage[] {
+  const defaultWelcome = createDefaultMessages()[0];
+  return saved.map((m) => {
+    if (m.id === "welcome-1" && !m.content.includes("PlatformDiagnosisCard")) {
+      return defaultWelcome;
+    }
+    if (m.role === "assistant") {
+      const hasDsl = containsOpenUIDSL(m.content);
+      return {
+        ...m,
+        openuiMode: hasDsl,
+        isStreaming: false,
+        showSource: false,
+      };
+    }
+    return { ...m, isStreaming: false };
+  });
 }
 
 export const GenerativeWorkbench: React.FC<{
@@ -308,7 +357,7 @@ export const GenerativeWorkbench: React.FC<{
     loadStoredChat("default").then((saved) => {
       if (!alive) return;
       if (saved && saved.length > 0) {
-        setMessages(saved);
+        setMessages(migrateStoredMessages(saved));
       }
       setIdbSynced(true);
       setHydrated(true);
@@ -433,10 +482,15 @@ export const GenerativeWorkbench: React.FC<{
       }
 
       const systemContent = buildSystemPromptForSkill(effectiveSkill, liveDiag);
+      const userPayload = buildUserPayloadForSkill(
+        promptText,
+        effectiveSkill,
+        liveDiag
+      );
       const apiMessages: Array<{ role: string; content: string }> = [
         { role: "system", content: systemContent },
         ...historyWindow,
-        { role: "user", content: promptText },
+        { role: "user", content: userPayload },
       ];
 
       const finalText = await streamChatCompletion({
@@ -446,15 +500,15 @@ export const GenerativeWorkbench: React.FC<{
         apiKey: apiKey.trim() || undefined,
         signal: controller.signal,
         onDelta: (_delta, fullText) => {
-          const nextContent = sendOpenUIHeader
-            ? fullText
-                .replace(/^```(?:openui-lang|openui)?\s*\n?/i, "")
-                .replace(/\n?```\s*$/i, "")
-            : fullText;
           setMessages((prev) =>
             prev.map((m) =>
               m.id === assistantId
-                ? { ...m, content: nextContent, isStreaming: true }
+                ? {
+                    ...m,
+                    content: fullText,
+                    openuiMode: containsOpenUIDSL(fullText),
+                    isStreaming: true,
+                  }
                 : m
             )
           );
@@ -465,16 +519,45 @@ export const GenerativeWorkbench: React.FC<{
         throw new Error("上游未返回有效响应内容");
       }
 
+      let finalRenderedText = finalText;
+      if (
+        (effectiveSkill === "diagnose" || effectiveSkill === "fix") &&
+        !finalText.includes("PlatformDiagnosisCard")
+      ) {
+        const diagCardBlock = [
+          "```openui",
+          "root = Card([diagHeader, diagCard, diagTable])",
+          'diagHeader = CardHeader("平台实时诊断与一键修复台", "支持安全自愈（切换健康代理、卡密续期、补充匿名 UUID）与二次确认清理封禁账号")',
+          'diagCard = PlatformDiagnosisCard("平台全链路根因诊断与修复台", "all")',
+          'diagTable = AccountDiagnosticTable("chatgpt")',
+          "```",
+        ].join("\n");
+        finalRenderedText = `${finalText.trimEnd()}\n\n${diagCardBlock}`;
+      }
+
       setMessages((prev) =>
         prev.map((m) =>
-          m.id === assistantId ? { ...m, isStreaming: false } : m
+          m.id === assistantId
+            ? {
+                ...m,
+                content: finalRenderedText,
+                openuiMode: containsOpenUIDSL(finalRenderedText),
+                isStreaming: false,
+              }
+            : m
         )
       );
     } catch (err: unknown) {
       if (err instanceof DOMException && err.name === "AbortError") {
         setMessages((prev) =>
           prev.map((m) =>
-            m.id === assistantId ? { ...m, isStreaming: false } : m
+            m.id === assistantId
+              ? {
+                  ...m,
+                  openuiMode: containsOpenUIDSL(m.content),
+                  isStreaming: false,
+                }
+              : m
           )
         );
         return;
@@ -495,7 +578,7 @@ export const GenerativeWorkbench: React.FC<{
           if (liveDiag) {
             return {
               ...m,
-              openuiMode: false,
+              openuiMode: true,
               skill: "diagnose",
               isOfflineFallback: true,
               isStreaming: false,
@@ -528,7 +611,11 @@ export const GenerativeWorkbench: React.FC<{
 
   const updateSourceLive = (id: string, newCode: string) => {
     setMessages((prev) =>
-      prev.map((m) => (m.id === id ? { ...m, content: newCode } : m))
+      prev.map((m) =>
+        m.id === id
+          ? { ...m, content: newCode, openuiMode: containsOpenUIDSL(newCode) }
+          : m
+      )
     );
   };
 
@@ -625,111 +712,111 @@ export const GenerativeWorkbench: React.FC<{
       </div>
 
       {/* Hybrid Markdown + Scoped OpenUI Message Stream */}
-      <ThemeProvider mode={themeMode}>
-        <div className="openui-scope flex-1 overflow-y-auto px-4 py-5 min-h-0">
-          <div className="max-w-3xl mx-auto space-y-4 text-xs">
-            {/* Starter Prompt Chips */}
-            <div className="flex flex-wrap gap-2">
-              {STARTER_PROMPTS.map((item) => {
-                const Icon = item.icon;
-                return (
-                  <button
-                    key={item.label}
-                    type="button"
-                    disabled={isSending}
-                    onClick={() => sendPrompt(item.prompt)}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full border z-border z-surface z-ghost-btn cursor-pointer"
-                  >
-                    <Icon size={12} className="z-text-muted" />
-                    <span>{item.label}</span>
-                  </button>
-                );
-              })}
-            </div>
-
-            {messages.map((msg) => {
-              const segments =
-                msg.role === "assistant"
-                  ? splitHybridSegments(msg.content, msg.openuiMode)
-                  : [];
-              const hasOpenUI = segments.some((s) => s.type === "openui");
-
+      <div className="flex-1 overflow-y-auto px-4 py-5 min-h-0">
+        <div className="max-w-3xl mx-auto space-y-4 text-xs">
+          {/* Starter Prompt Chips */}
+          <div className="flex flex-wrap gap-2">
+            {STARTER_PROMPTS.map((item) => {
+              const Icon = item.icon;
               return (
-                <div
-                  key={msg.id}
-                  className={
-                    msg.role === "user" ? "flex justify-end" : "w-full"
-                  }
+                <button
+                  key={item.label}
+                  type="button"
+                  disabled={isSending}
+                  onClick={() => sendPrompt(item.prompt)}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full border z-border z-surface z-ghost-btn cursor-pointer"
                 >
-                  {msg.role === "user" ? (
-                    <div className="px-4 py-2.5 rounded-2xl z-primary-btn max-w-xl leading-relaxed whitespace-pre-wrap">
-                      {msg.content}
-                    </div>
-                  ) : (
-                    <div className="p-card rounded-2xl p-4 space-y-3">
-                      <div className="flex flex-wrap items-center justify-between gap-2 pb-2.5 border-b z-border">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span
-                            className={
-                              msg.isStreaming
-                                ? "status-dot-amber animate-pulse"
-                                : "status-dot-green"
-                            }
-                          />
-                          <span className="font-medium z-text-sec">
-                            {msg.isStreaming
-                              ? `${getSkillMetaLabel(msg)} · 流式生成中`
-                              : getSkillMetaLabel(msg)}
-                          </span>
-                          {msg.isOfflineFallback && (
-                            <span className="diag-score-pill diag-sev-degraded">
-                              0 可用账号 · 离线诊断引擎
-                            </span>
-                          )}
-                        </div>
+                  <Icon size={12} className="z-text-muted" />
+                  <span>{item.label}</span>
+                </button>
+              );
+            })}
+          </div>
 
-                        {hasOpenUI && (
-                          <button
-                            type="button"
-                            onClick={() => toggleSource(msg.id)}
-                            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border z-border z-surface z-ghost-btn cursor-pointer"
-                          >
-                            <Code2 size={12} />
-                            <span>
-                              {msg.showSource ? "收起源码" : "查看 / 编辑源码"}
-                            </span>
-                          </button>
+          {messages.map((msg) => {
+            const segments =
+              msg.role === "assistant"
+                ? splitHybridSegments(msg.content, msg.openuiMode)
+                : [];
+            const hasOpenUI = segments.some((s) => s.type === "openui");
+
+            return (
+              <div
+                key={msg.id}
+                className={
+                  msg.role === "user" ? "flex justify-end" : "w-full"
+                }
+              >
+                {msg.role === "user" ? (
+                  <div className="px-4 py-2.5 rounded-2xl z-primary-btn max-w-xl leading-relaxed whitespace-pre-wrap">
+                    {msg.content}
+                  </div>
+                ) : (
+                  <div className="p-card rounded-2xl p-4 space-y-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2 pb-2.5 border-b z-border">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span
+                          className={
+                            msg.isStreaming
+                              ? "status-dot-amber animate-pulse"
+                              : "status-dot-green"
+                          }
+                        />
+                        <span className="font-medium z-text-sec">
+                          {msg.isStreaming
+                            ? `${getSkillMetaLabel(msg)} · 流式生成中`
+                            : getSkillMetaLabel(msg)}
+                        </span>
+                        {msg.isOfflineFallback && (
+                          <span className="inline-flex items-center px-2 py-0.5 rounded-full border z-pill-warn text-[11px] font-medium">
+                            0 可用账号 · 离线诊断引擎
+                          </span>
                         )}
                       </div>
 
-                      {msg.showSource && hasOpenUI && (
-                        <div className="space-y-1.5">
-                          <div className="z-text-muted">
-                            消息原文（支持直接微调其中的 Markdown 或 OpenUI DSL 片段）
-                          </div>
-                          <textarea
-                            rows={6}
-                            value={msg.content}
-                            onChange={(e) =>
-                              updateSourceLive(msg.id, e.target.value)
-                            }
-                            className="w-full p-3 rounded-xl p-code-box font-mono-num resize-y focus:outline-none"
-                          />
-                        </div>
+                      {hasOpenUI && (
+                        <button
+                          type="button"
+                          onClick={() => toggleSource(msg.id)}
+                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border z-border z-surface z-ghost-btn cursor-pointer"
+                        >
+                          <Code2 size={12} />
+                          <span>
+                            {msg.showSource ? "收起源码" : "查看 / 编辑源码"}
+                          </span>
+                        </button>
                       )}
+                    </div>
 
-                      <div className="min-w-0 space-y-3 overflow-x-auto">
-                        {segments.map((seg, idx) =>
-                          seg.type === "markdown" ? (
-                            <MarkdownContent
-                              key={`${msg.id}-md-${idx}`}
-                              content={seg.text}
-                            />
-                          ) : (
-                            <div
-                              key={`${msg.id}-oui-${idx}`}
-                              className="openui-scope"
-                            >
+                    {msg.showSource && hasOpenUI && (
+                      <div className="space-y-1.5">
+                        <div className="z-text-muted">
+                          消息原文（支持直接微调其中的 Markdown 或 OpenUI DSL 片段）
+                        </div>
+                        <textarea
+                          rows={6}
+                          value={msg.content}
+                          onChange={(e) =>
+                            updateSourceLive(msg.id, e.target.value)
+                          }
+                          className="w-full p-3 rounded-xl p-code-box font-mono-num resize-y focus:outline-none"
+                        />
+                      </div>
+                    )}
+
+                    <div className="min-w-0 space-y-3 overflow-x-auto">
+                      {segments.map((seg, idx) =>
+                        seg.type === "markdown" ? (
+                          <MarkdownContent
+                            key={`${msg.id}-md-${idx}`}
+                            content={seg.text}
+                          />
+                        ) : (
+                          <ThemeProvider
+                            key={`${msg.id}-oui-${idx}`}
+                            mode={themeMode}
+                          >
+                            <div className="openui-scope">
                               <Renderer
                                 library={aiWebFreeLibrary}
                                 response={seg.code}
@@ -745,18 +832,18 @@ export const GenerativeWorkbench: React.FC<{
                                 }}
                               />
                             </div>
-                          )
-                        )}
-                      </div>
+                          </ThemeProvider>
+                        )
+                      )}
                     </div>
-                  )}
-                </div>
-              );
-            })}
-            <div ref={streamEndRef} />
-          </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+          <div ref={streamEndRef} />
         </div>
-      </ThemeProvider>
+      </div>
 
       {/* Floating Glass Composer with / Skill Pills */}
       <form
