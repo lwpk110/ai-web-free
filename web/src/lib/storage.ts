@@ -21,11 +21,21 @@ export interface HydratedImageItem extends StoredImageRecord {
   isObjectUrl: boolean;
 }
 
+export type CopilotSkill =
+  | "auto"
+  | "diagnose"
+  | "fix"
+  | "openui"
+  | "image"
+  | "chat";
+
 export interface StoredChatMessage {
   id: string;
   role: "user" | "assistant";
   content: string;
   openuiMode: boolean;
+  skill?: CopilotSkill;
+  isOfflineFallback?: boolean;
   isStreaming?: boolean;
   showSource?: boolean;
   timestamp?: number;
@@ -271,4 +281,31 @@ export async function clearStoredChat(key = "default"): Promise<boolean> {
       resolve(false);
     }
   });
+}
+
+const FAVORITE_PROMPTS_KEY = "ai_web_free_fav_prompts_v1";
+
+export function loadFavoritePromptIds(): string[] {
+  try {
+    const raw = window.localStorage.getItem(FAVORITE_PROMPTS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed)
+      ? parsed.filter((x): x is string => typeof x === "string")
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+export function toggleFavoritePromptId(id: string): string[] {
+  const current = loadFavoritePromptIds();
+  const exists = current.includes(id);
+  const next = exists ? current.filter((x) => x !== id) : [id, ...current];
+  try {
+    window.localStorage.setItem(FAVORITE_PROMPTS_KEY, JSON.stringify(next));
+  } catch {
+    // ignore storage quota errors
+  }
+  return next;
 }

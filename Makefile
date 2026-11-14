@@ -6,7 +6,7 @@ CGO_ENABLED ?= 0
 
 .DEFAULT_GOAL := help
 
-.PHONY: help web-install web-check web-build build build-go test test-go test-py run dev dev-backend dev-frontend stop docker-build docker-up docker-down clean
+.PHONY: help web-install web-check web-build build build-go test test-go test-py adr-sync run dev dev-backend dev-frontend stop docker-build docker-up docker-down clean
 
 help: ## 显示可用命令列表
 	@awk 'BEGIN {FS = ":.*##"; printf "\n用法: make <target> [PORT=18080] [WEB_PORT=5173]\n\n"} /^[a-zA-Z0-9_-]+:.*?##/ {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -33,6 +33,9 @@ test-py: ## 运行 Python 辅助脚本单元测试
 
 test: test-go test-py ## 运行 Go + Python 全部测试
 
+adr-sync: ## 回填并同步 /grill-me 访谈记录到 docs/adr/
+	python3 .agents/hooks/grill_me_adr.py --backfill
+
 run: build-go ## 编译并启动本地生产模式单二进制服务 (默认 PORT=18080)
 	SERVER_PORT=$(PORT) ./$(BIN)
 
@@ -53,9 +56,8 @@ dev: ## 本地联调模式：同时启动 Go 后端与 Vite 前端热更新 (默
 	'
 
 stop: ## 停止本项目的本地运行进程
-	@pkill -f "$(CURDIR)/$(BIN)" 2>/dev/null || true
-	@pkill -f "./$(BIN)" 2>/dev/null || true
-	@pkill -f "$(CURDIR)/web/node_modules/.bin/vite" 2>/dev/null || true
+	@pkill -x "$(BIN)" 2>/dev/null || true
+	@pkill -f "node_modules/.bin/vite" 2>/dev/null || true
 	@echo "已停止本地项目进程"
 
 docker-build: ## 构建 Docker 镜像

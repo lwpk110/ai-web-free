@@ -15,6 +15,7 @@ import (
 	"ai-web-free/internal/audit"
 	"ai-web-free/internal/chatgpt"
 	"ai-web-free/internal/config"
+	"ai-web-free/internal/promptplaza"
 	"ai-web-free/internal/provider"
 	"ai-web-free/internal/proxy"
 
@@ -28,6 +29,7 @@ type GatewayRuntime struct {
 	ProxyPool   *proxy.Pool
 	KamiWorker  *provider.KamiRenewWorker
 	AuditLog    *audit.RingBuffer
+	PromptPlaza *promptplaza.Manager
 	Config      *config.Config
 }
 
@@ -63,6 +65,8 @@ type failureKind int
 
 const (
 	failFatal failureKind = iota
+	failBanned
+	failWAFChallenge
 	failUnauthorized
 	failRateLimit
 	failProxyTransport
@@ -135,13 +139,17 @@ func classifyFailure(status int, err error, body string, isImageHint bool) (fail
 	isImgLimit := uImgLimit || chatgpt.LooksLikeImageLimit(status, msg)
 
 	switch {
-	case status == http.StatusUnauthorized:
+	case chatgpt.LooksLikeAccountBanned(status, msg):
+		return failBanned, false
+	case chatgpt.LooksLikeCloudflareOrWAF(status, msg):
+		return failWAFChallenge, false
+	case status == http.StatusUnauthorized || (status == http.StatusForbidden && !chatgpt.LooksLikeCloudflareOrWAF(status, msg)):
 		return failUnauthorized, false
 	case status == http.StatusTooManyRequests || (isImgLimit && status == 0):
 		return failRateLimit, isImgLimit || isImageHint
 	case status == 0 && isProxyTransportError(err):
 		return failProxyTransport, false
-	case status == http.StatusForbidden || status == http.StatusRequestTimeout || status >= http.StatusInternalServerError:
+	case status == http.StatusRequestTimeout || status >= http.StatusInternalServerError:
 		return failRetryable, false
 	default:
 		return failFatal, false
@@ -313,6 +321,10 @@ func joinFailoverSteps(steps []string, attempts int) string {
 
 func failureTag(kind failureKind, imgLimit bool) string {
 	switch kind {
+	case failBanned:
+		return "banned"
+	case failWAFChallenge:
+		return "waf_403"
 	case failUnauthorized:
 		return "401"
 	case failRateLimit:
@@ -329,11 +341,36 @@ func failureTag(kind failureKind, imgLimit bool) string {
 	}
 }
 
+func (rt *GatewayRuntime) reportProxyFailureAndMigrate(pool *accounts.Pool, acct *accounts.Account, errMsg string) {
+	if rt.ProxyPool == nil || acct == nil || acct.Proxy == "" {
+		return
+	}
+	failedProxy := acct.Proxy
+	if tripped := rt.ProxyPool.ReportFailure(failedProxy, errMsg); tripped {
+		migrated := pool.ReconcileProxies(
+			func(u string) bool { return !rt.ProxyPool.IsHealthy(u) },
+			func(excl map[string]bool) string { return rt.ProxyPool.AllocateHealthy(excl) },
+		)
+		log.Printf("[proxy-breaker] node %s tripped after consecutive errors; migrated %d account(s)", failedProxy, migrated)
+		if rt.AuditLog != nil {
+			rt.AuditLog.RecordEvent("/internal/proxy-breaker", acct.Email, failedProxy, fmt.Sprintf("tripped_migrated_%d", migrated), errMsg)
+		}
+	}
+}
+
 func (rt *GatewayRuntime) applyFailureSideEffects(pool *accounts.Pool, acct *accounts.Account, kind failureKind, imgLimit bool, errMsg string) {
 	if acct == nil || pool == nil {
 		return
 	}
 	switch kind {
+	case failBanned:
+		pool.MarkBanned(acct, errMsg)
+		if rt.AuditLog != nil {
+			rt.AuditLog.RecordEvent("/internal/account-banned", acct.Email, acct.Proxy, "banned", errMsg)
+		}
+	case failWAFChallenge:
+		pool.RecordProxyBlock(acct, 2*time.Minute, errMsg)
+		rt.reportProxyFailureAndMigrate(pool, acct, errMsg)
 	case failUnauthorized:
 		pool.MarkExpired(acct, errMsg)
 		if rt.KamiWorker != nil {
@@ -346,19 +383,7 @@ func (rt *GatewayRuntime) applyFailureSideEffects(pool *accounts.Pool, acct *acc
 		}
 		pool.ReportRateLimit(acct, imgLimit, cd, errMsg)
 	case failProxyTransport:
-		if rt.ProxyPool != nil && acct.Proxy != "" {
-			failedProxy := acct.Proxy
-			if tripped := rt.ProxyPool.ReportFailure(failedProxy, errMsg); tripped {
-				migrated := pool.ReconcileProxies(
-					func(u string) bool { return !rt.ProxyPool.IsHealthy(u) },
-					func(excl map[string]bool) string { return rt.ProxyPool.AllocateHealthy(excl) },
-				)
-				log.Printf("[proxy-breaker] node %s tripped after consecutive errors; migrated %d account(s)", failedProxy, migrated)
-				if rt.AuditLog != nil {
-					rt.AuditLog.RecordEvent("/internal/proxy-breaker", acct.Email, failedProxy, fmt.Sprintf("tripped_migrated_%d", migrated), errMsg)
-				}
-			}
-		}
+		rt.reportProxyFailureAndMigrate(pool, acct, errMsg)
 	}
 }
 

@@ -63,3 +63,157 @@ func ExtractUpstreamStatus(err error) (status int, isImageLimit bool, ok bool) {
 	}
 	return 0, false, false
 }
+
+// ErrorCategory 常量定义诊断与状态机共用的根因分类标识。
+const (
+	ErrCategoryBanned         = "banned"
+	ErrCategoryWAFProxy       = "waf_proxy_block"
+	ErrCategoryTokenExpired   = "token_expired"
+	ErrCategoryImageLimit     = "image_rate_limit"
+	ErrCategoryRateLimit      = "rate_limit"
+	ErrCategoryProxyTransport = "proxy_transport"
+	ErrCategoryOther          = "other"
+)
+
+func containsAny(lower string, keywords []string) bool {
+	for _, kw := range keywords {
+		if strings.Contains(lower, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+var accountBannedKeywords = []string{
+	"account_deactivated",
+	"account deactivated",
+	"account has been deactivated",
+	"account is deactivated",
+	"user is deactivated",
+	"user has been deactivated",
+	"account_suspended",
+	"account suspended",
+	"account has been suspended",
+	"account_disabled",
+	"account disabled",
+	"account is disabled",
+	"account has been disabled",
+	"user_disabled",
+	"user is disabled",
+	"account_deleted",
+	"account deleted",
+	"account_terminated",
+	"account terminated",
+	"permanently banned",
+	"has been banned",
+	"user_banned",
+	"abuse_detected",
+	"terms of service violation",
+	"violation of our terms",
+	"账号已封禁",
+	"账号封禁",
+	"已被停用",
+}
+
+var cloudflareWAFKeywords = []string{
+	"cloudflare",
+	"cf-ray",
+	"cf_chl",
+	"just a moment",
+	"attention required",
+	"you have been blocked",
+	"checking your browser",
+	"enable javascript and cookies to continue",
+	"challenge-platform",
+	"challenge_required",
+	"turnstile",
+	"arkose",
+	"sentinel",
+	"forbidden by waf",
+	"waf",
+	"ip blocked",
+	"unable to load site",
+	"unusual activity",
+}
+
+var proxyTransportKeywords = []string{
+	"socks",
+	"proxy",
+	"connection refused",
+	"connection reset",
+	"broken pipe",
+	"unexpected eof",
+	"eof",
+	"i/o timeout",
+	"tls:",
+	"no such host",
+	"network is unreachable",
+	"context deadline exceeded",
+}
+
+var tokenExpiredKeywords = []string{
+	"http 401",
+	"status 401",
+	"unauthorized",
+	"token_expired",
+	"token_invalidated",
+	"invalid_token",
+	"invalidated",
+	"session expired",
+	"token expired",
+	"refresh_token",
+}
+
+// LooksLikeAccountBanned 判断上游错误或账号错误信息是否明确指向账号永久封禁/停用。
+func LooksLikeAccountBanned(statusCode int, message string) bool {
+	lower := strings.ToLower(message)
+	return containsAny(lower, accountBannedKeywords)
+}
+
+// LooksLikeCloudflareOrWAF 判断错误是否属于 Cloudflare / Sentinel / WAF / IP 风控拦截。
+// 必须先排除明确账号封禁，避免将账号永久封禁误判为代理风控。
+func LooksLikeCloudflareOrWAF(statusCode int, message string) bool {
+	if LooksLikeAccountBanned(statusCode, message) {
+		return false
+	}
+	lower := strings.ToLower(message)
+	if containsAny(lower, cloudflareWAFKeywords) {
+		return true
+	}
+	if statusCode == http.StatusForbidden || strings.Contains(lower, "http 403") || strings.Contains(lower, "status 403") {
+		// 仅当 403 明确声明 token 自身过期且无 WAF 痕迹时才不视作 WAF
+		if containsAny(lower, []string{"token_expired", "token_invalidated"}) {
+			return false
+		}
+		return true
+	}
+	return false
+}
+
+// ClassifyAccountErrorReason 对账号最近错误与可选 HTTP 状态码进行统一 5 类根因归类。
+func ClassifyAccountErrorReason(statusCode int, message string) string {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	if LooksLikeAccountBanned(statusCode, message) {
+		return ErrCategoryBanned
+	}
+	if LooksLikeCloudflareOrWAF(statusCode, message) {
+		return ErrCategoryWAFProxy
+	}
+	if LooksLikeImageLimit(statusCode, message) {
+		return ErrCategoryImageLimit
+	}
+	if statusCode == http.StatusTooManyRequests ||
+		strings.Contains(lower, "http 429") ||
+		strings.Contains(lower, "status 429") ||
+		strings.Contains(lower, "rate limit") ||
+		strings.Contains(lower, "too many requests") {
+		return ErrCategoryRateLimit
+	}
+	if statusCode == http.StatusUnauthorized || containsAny(lower, tokenExpiredKeywords) {
+		return ErrCategoryTokenExpired
+	}
+	if containsAny(lower, proxyTransportKeywords) {
+		return ErrCategoryProxyTransport
+	}
+	return ErrCategoryOther
+}

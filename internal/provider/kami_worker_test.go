@@ -106,3 +106,67 @@ func TestKamiRenewWorkerSerialAndBackoff(t *testing.T) {
 		t.Fatalf("expected 2 audit events for renew success+failure, got %d", len(entries))
 	}
 }
+
+func TestKamiRenewWorkerCancelQueuedAndPhaseSync(t *testing.T) {
+	pool := accounts.NewPool(nil)
+	acct1 := accounts.CreateAccount("", accounts.TypeFree, accounts.DefaultProfiles)
+	acct1.ID = "kw-1"
+	acct1.Email = "kw1@example.com"
+	acct1.Password = "p1"
+	acct1.TOTPSecret = "SECRET1"
+	acct1.Status = accounts.StatusExpired
+
+	acct2 := accounts.CreateAccount("", accounts.TypeFree, accounts.DefaultProfiles)
+	acct2.ID = "kw-2"
+	acct2.Email = "kw2@example.com"
+	acct2.Password = "p2"
+	acct2.TOTPSecret = "SECRET2"
+	acct2.Status = accounts.StatusExpired
+
+	pool.AddAccount(acct1)
+	pool.AddAccount(acct2)
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	w := NewKamiRenewWorker(pool, "", true, nil, nil)
+	w.SetLoginExecutor(func(acct *accounts.Account, _ string, _ bool) KamiLoginOutcome {
+		close(started)
+		<-release
+		return KamiLoginOutcome{Email: acct.Email, OK: true, AccessToken: "kw-tok-1"}
+	})
+	w.Start()
+	defer w.Stop()
+
+	if !w.Enqueue(acct1, "test") || !w.Enqueue(acct2, "test") {
+		t.Fatalf("expected both accounts to enqueue")
+	}
+	<-started
+
+	// kw-1 should expose running action state, kw-2 is queued and cancellable.
+	st := w.Stats()
+	if !st.Running || st.RunningAccountID != acct1.ID || st.QueueLength != 1 {
+		t.Fatalf("unexpected worker stats while running: %+v", st)
+	}
+	if !w.CancelQueued(acct2.ID) {
+		t.Fatalf("expected CancelQueued(kw-2) to return true")
+	}
+	if w.Stats().QueueLength != 0 {
+		t.Fatalf("expected queue length 0 after cancel")
+	}
+	snap2 := pool.ListSnapshots("", "", "kw2@example.com")
+	if len(snap2) != 1 || snap2[0].ActiveAction != "" || snap2[0].RenewState != "idle" {
+		t.Fatalf("expected kw-2 state cleared on cancel, got %+v", snap2)
+	}
+
+	close(release)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if !w.Stats().Running && w.Stats().TotalSucceeded == 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if w.Stats().TotalSucceeded != 1 || acct1.LastActionSummary != "后台自动续期成功，Token 已更新" {
+		t.Fatalf("expected acct1 completed renew action summary, stats=%+v sum=%q", w.Stats(), acct1.LastActionSummary)
+	}
+}

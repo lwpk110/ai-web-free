@@ -1,9 +1,14 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
+  AlertCircle,
   Check,
+  CheckCircle2,
+  ChevronDown,
+  ChevronUp,
   Copy,
   Download,
+  Loader2,
   LogIn,
   Plus,
   RefreshCw,
@@ -11,10 +16,11 @@ import {
   X,
 } from "lucide-react";
 import {
+  cancelKamiLogin,
+  dismissAdminTask,
   executeAccountAction,
   bulkUpdateAccountProxy,
   fetchAccounts,
-  fetchKamiLoginTask,
   fetchOverview,
   fetchProxies,
   importAccounts,
@@ -25,15 +31,19 @@ import {
   type KamiWorkerStats,
   type KamiLoginTask,
   type PoolStats,
+  type ProbeTask,
   type ProviderSummary,
   type ProxyNodeStatus,
 } from "../api/client";
 import {
+  formatElapsedSeconds,
+  formatRelativeTimeAgo,
   formatRemainingCountdown,
   NoticeBanner,
   StatusBadge,
   TotpRingModal,
 } from "../components/ui";
+import { seedModelsCatalogFromSlugs } from "../lib/models";
 
 const IMPORT_PLACEHOLDERS: Record<string, string> = {
   kami: "每行一条卡密，格式: email----password----2FA_secret\n例如: user@example.com----DemoPass123----JBSWY3DPEHPK3PXP",
@@ -90,9 +100,13 @@ export const PoolConsole: React.FC<{
   const [loading, setLoading] = useState(false);
   const [probingAll, setProbingAll] = useState(false);
   const [loggingInKami, setLoggingInKami] = useState(false);
-  const [loginTaskId, setLoginTaskId] = useState("");
-  const [loginTaskProvider, setLoginTaskProvider] = useState("");
+  const [cancellingQueue, setCancellingQueue] = useState(false);
   const [loginTask, setLoginTask] = useState<KamiLoginTask | null>(null);
+  const [probeTask, setProbeTask] = useState<ProbeTask | null>(null);
+  const [expandLoginDetails, setExpandLoginDetails] = useState(false);
+  const [expandProbeDetails, setExpandProbeDetails] = useState(false);
+  const trackedLoginIdRef = useRef<string | null>(null);
+  const trackedProbeIdRef = useRef<string | null>(null);
   const [updatingProxy, setUpdatingProxy] = useState(false);
   const [headlessLogin, setHeadlessLogin] = useState(true);
   const [proxyNodes, setProxyNodes] = useState<ProxyNodeStatus[]>([]);
@@ -133,47 +147,124 @@ export const PoolConsole: React.FC<{
     [providers, activeProvider]
   );
 
-  const loadData = async () => {
-    setLoading(true);
-    try {
-      const ov = await fetchOverview();
-      setProviders(ov.providers || []);
-      setWorkerStats(ov.kami_worker || null);
-
-      const targetSummary = (ov.providers || []).find(
-        (p) => p.descriptor.id === activeProvider
-      );
-      if (targetSummary?.descriptor.status === "enabled") {
-        const backendStatus =
-          statusFilter === "image_limited" || statusFilter === "renewing"
-            ? ""
-            : statusFilter;
-        const accRes = await fetchAccounts(
-          activeProvider,
-          backendStatus,
-          typeFilter,
-          ""
-        );
-        setStats(accRes.stats);
-        setAccounts(accRes.accounts || []);
-      } else {
-        setStats(targetSummary?.stats || null);
-        setAccounts([]);
+  const applySyncedTasks = useCallback(
+    (
+      nextLoginTask?: KamiLoginTask | null,
+      nextProbeTask?: ProbeTask | null,
+      nextWorker?: KamiWorkerStats | null
+    ) => {
+      if (nextWorker !== undefined) {
+        setWorkerStats(nextWorker || null);
       }
-      window.dispatchEvent(new Event("pool-updated"));
-    } catch (e: any) {
-      setNotice({
-        type: "error",
-        text: `加载数据失败: ${e?.message || "未知错误"}`,
-      });
-    } finally {
-      setLoading(false);
-    }
-  };
+      if (nextLoginTask !== undefined) {
+        setLoginTask(nextLoginTask || null);
+        if (nextLoginTask) {
+          if (
+            nextLoginTask.status === "queued" ||
+            nextLoginTask.status === "running"
+          ) {
+            trackedLoginIdRef.current = nextLoginTask.id;
+          } else if (
+            nextLoginTask.status === "completed" &&
+            trackedLoginIdRef.current === nextLoginTask.id
+          ) {
+            trackedLoginIdRef.current = null;
+            const failures = (nextLoginTask.results || []).filter(
+              (item) => !item.ok && !item.cancelled
+            );
+            const examples = failures
+              .slice(0, 3)
+              .map(
+                (item) =>
+                  `${item.email || item.account_id}: ${item.error || "登录失败"}`
+              );
+            const cancelPart = nextLoginTask.cancelled
+              ? `，${nextLoginTask.cancelled} 已取消`
+              : "";
+            setNotice({
+              type: nextLoginTask.failed > 0 ? "info" : "success",
+              text: `后台登录任务完成：${nextLoginTask.success} 成功，${nextLoginTask.failed} 失败${cancelPart}${examples.length ? `；${examples.join("；")}${failures.length > examples.length ? `；另有 ${failures.length - examples.length} 项失败` : ""}` : ""}`,
+            });
+            setSelectedAccountIds(new Set());
+          }
+        }
+      }
+      if (nextProbeTask !== undefined) {
+        setProbeTask(nextProbeTask || null);
+        if (nextProbeTask) {
+          if (nextProbeTask.status === "running") {
+            trackedProbeIdRef.current = nextProbeTask.id;
+          } else if (
+            nextProbeTask.status === "completed" &&
+            trackedProbeIdRef.current === nextProbeTask.id
+          ) {
+            trackedProbeIdRef.current = null;
+            setNotice({
+              type: nextProbeTask.failed > 0 ? "info" : "success",
+              text: `全池测活完成：共探测 ${nextProbeTask.probed} 个账号，正常 ${nextProbeTask.passed} 个，异常 ${nextProbeTask.failed} 个`,
+            });
+          }
+        }
+      }
+    },
+    []
+  );
+
+  const loadData = useCallback(
+    async (silent = false) => {
+      if (!silent) {
+        setLoading(true);
+      }
+      try {
+        const ov = await fetchOverview();
+        setProviders(ov.providers || []);
+
+        const targetSummary = (ov.providers || []).find(
+          (p) => p.descriptor.id === activeProvider
+        );
+        if (targetSummary?.descriptor.status === "enabled") {
+          const backendStatus =
+            statusFilter === "image_limited" || statusFilter === "renewing"
+              ? ""
+              : statusFilter;
+          const accRes = await fetchAccounts(
+            activeProvider,
+            backendStatus,
+            typeFilter,
+            ""
+          );
+          setStats(accRes.stats);
+          setAccounts(accRes.accounts || []);
+          applySyncedTasks(
+            accRes.login_task ?? ov.login_task,
+            accRes.probe_task ?? ov.probe_task,
+            accRes.kami_worker ?? ov.kami_worker
+          );
+        } else {
+          setStats(targetSummary?.stats || null);
+          setAccounts([]);
+          applySyncedTasks(ov.login_task, ov.probe_task, ov.kami_worker);
+        }
+        window.dispatchEvent(new Event("pool-updated"));
+      } catch (e: any) {
+        if (!silent) {
+          setNotice({
+            type: "error",
+            text: `加载数据失败: ${e?.message || "未知错误"}`,
+          });
+        }
+      } finally {
+        if (!silent) {
+          setLoading(false);
+        }
+      }
+    },
+    [activeProvider, statusFilter, typeFilter, applySyncedTasks]
+  );
 
   useEffect(() => {
-    loadData();
-  }, [activeProvider, statusFilter, typeFilter]);
+    void loadData(false);
+  }, [loadData]);
 
   useEffect(() => {
     setSelectedAccountIds(new Set());
@@ -186,7 +277,10 @@ export const PoolConsole: React.FC<{
         if (cancelled) return;
         setProxyNodes(res.nodes || []);
         setBulkProxyUrl(
-          (current) => current || res.nodes.find((node) => node.status === "active")?.url || ""
+          (current) =>
+            current ||
+            res.nodes.find((node) => node.status === "active")?.url ||
+            ""
         );
       })
       .catch(() => {});
@@ -195,62 +289,42 @@ export const PoolConsole: React.FC<{
     };
   }, []);
 
+  const hasActiveOperations = useMemo(() => {
+    const loginBusy = Boolean(
+      loginTask &&
+        (loginTask.status === "queued" || loginTask.status === "running")
+    );
+    const probeBusy = Boolean(probeTask && probeTask.status === "running");
+    const workerBusy = Boolean(
+      workerStats && (workerStats.running || workerStats.queue_length > 0)
+    );
+    const rowBusy = accounts.some(
+      (acc) =>
+        Boolean(acc.active_action) ||
+        acc.renew_state === "running" ||
+        acc.renew_state === "queued"
+    );
+    return loginBusy || probeBusy || workerBusy || rowBusy;
+  }, [loginTask, probeTask, workerStats, accounts]);
+
   useEffect(() => {
-    if (!loginTaskId || !loginTaskProvider) return;
+    if (!hasActiveOperations) return;
     let cancelled = false;
     let timer = 0;
-    let lastUpdatedAt = "";
 
-    const poll = async () => {
-      try {
-        const { task } = await fetchKamiLoginTask(loginTaskProvider, loginTaskId);
-        if (cancelled) return;
-        setLoginTask(task);
-        if (task.updated_at !== lastUpdatedAt) {
-          lastUpdatedAt = task.updated_at;
-          if (loginTaskProvider === activeProvider) {
-            const backendStatus =
-              statusFilter === "image_limited" || statusFilter === "renewing"
-                ? ""
-                : statusFilter;
-            const accRes = await fetchAccounts(
-              activeProvider,
-              backendStatus,
-              typeFilter,
-              ""
-            );
-            if (!cancelled) {
-              setStats(accRes.stats);
-              setAccounts(accRes.accounts || []);
-            }
-          }
-        }
-        if (task.status === "completed" || task.status === "failed") {
-          const failures = task.results.filter((item) => !item.ok);
-          const examples = failures
-            .slice(0, 3)
-            .map((item) => `${item.email || item.account_id}: ${item.error || "登录失败"}`);
-          setNotice({
-            type: task.failed > 0 ? "info" : "success",
-            text: `后台登录任务完成：${task.success} 成功，${task.failed} 失败${examples.length ? `；${examples.join("；")}${failures.length > examples.length ? `；另有 ${failures.length - examples.length} 项失败，详见链路日志` : ""}` : ""}`,
-          });
-          setSelectedAccountIds(new Set());
-          setLoginTaskId("");
-          setLoggingInKami(false);
-          return;
-        }
-        timer = window.setTimeout(poll, 1500);
-      } catch {
-        if (!cancelled) timer = window.setTimeout(poll, 3000);
+    const tick = async () => {
+      await loadData(true);
+      if (!cancelled) {
+        timer = window.setTimeout(tick, 1200);
       }
     };
 
-    void poll();
+    timer = window.setTimeout(tick, 1200);
     return () => {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [loginTaskId, loginTaskProvider, activeProvider, statusFilter, typeFilter]);
+  }, [hasActiveOperations, loadData]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNowMs(Date.now()), 1000);
@@ -292,6 +366,7 @@ export const PoolConsole: React.FC<{
       if (statusFilter === "image_limited" && !a.image_limited) return false;
       if (
         statusFilter === "renewing" &&
+        !a.active_action &&
         a.renew_state !== "queued" &&
         a.renew_state !== "running"
       ) {
@@ -320,7 +395,12 @@ export const PoolConsole: React.FC<{
   const handleAction = async (acc: AccountView, action: AccountActionType) => {
     setActionLoadingKey(`${acc.id}:${action}`);
     try {
-      const res = await executeAccountAction(activeProvider, acc.id, action);
+      const res = await executeAccountAction(
+        activeProvider,
+        acc.id,
+        action,
+        action === "login" ? { headless: headlessLogin } : undefined
+      );
       if (action === "totp" && res.result?.totp_code) {
         setTotpInfo({
           accountId: acc.id,
@@ -329,7 +409,24 @@ export const PoolConsole: React.FC<{
           remainingSeconds: res.result.remaining_seconds ?? 30,
         });
         setCopiedTotp(false);
+      } else if (action === "login" && res.result?.task) {
+        trackedLoginIdRef.current = res.result.task.id;
+        setLoginTask(res.result.task);
+        setNotice({
+          type: "info",
+          text:
+            res.result?.message ||
+            `账号 ${acc.email || acc.id} 已加入后台重登队列`,
+        });
       } else {
+        if (
+          action === "probe" &&
+          res.result?.ok &&
+          Array.isArray(res.result?.models) &&
+          res.result.models.length > 0
+        ) {
+          seedModelsCatalogFromSlugs(res.result.models);
+        }
         const msg =
           res.result?.message ||
           (action === "probe"
@@ -343,7 +440,7 @@ export const PoolConsole: React.FC<{
           text: msg,
         });
       }
-      await loadData();
+      await loadData(true);
     } catch (e: any) {
       setNotice({
         type: "error",
@@ -356,14 +453,30 @@ export const PoolConsole: React.FC<{
 
   const handleProbeAll = async () => {
     setProbingAll(true);
-    setNotice({ type: "info", text: "正在并发测活池内全部可用账号..." });
+    setNotice({ type: "info", text: "正在创建全池并发测活任务..." });
     try {
-      const res = await probeAllAccounts(activeProvider);
-      setNotice({
-        type: res.failed > 0 ? "info" : "success",
-        text: `全池测活完成：共探测 ${res.probed} 个账号，正常 ${res.passed} 个，异常 ${res.failed} 个`,
-      });
-      await loadData();
+      const res = await probeAllAccounts(activeProvider, true);
+      if (res.task) {
+        trackedProbeIdRef.current = res.task.id;
+        setProbeTask(res.task);
+        if (res.task.status === "running") {
+          setNotice({
+            type: "info",
+            text: `全池测活已启动：共 ${res.task.total} 个账号，实时进度将在上方与列表回显`,
+          });
+        } else {
+          setNotice({
+            type: res.task.failed > 0 ? "info" : "success",
+            text: `全池测活完成：共探测 ${res.task.probed} 个账号，正常 ${res.task.passed} 个，异常 ${res.task.failed} 个`,
+          });
+        }
+      } else {
+        setNotice({
+          type: res.failed > 0 ? "info" : "success",
+          text: `全池测活完成：共探测 ${res.probed} 个账号，正常 ${res.passed} 个，异常 ${res.failed} 个`,
+        });
+      }
+      await loadData(true);
     } catch (e: any) {
       setNotice({
         type: "error",
@@ -382,10 +495,13 @@ export const PoolConsole: React.FC<{
     });
     try {
       const res = await loginKamiAccounts(activeProvider, headlessLogin, false);
+      trackedLoginIdRef.current = res.task.id;
       setLoginTask(res.task);
-      setLoginTaskProvider(activeProvider);
-      setLoginTaskId(res.task.id);
-      setNotice({ type: "info", text: `后台登录任务已启动：${res.task.total} 个待激活账号。` });
+      setNotice({
+        type: "info",
+        text: `后台登录任务已更新：当前队列共 ${res.task.total} 个账号`,
+      });
+      await loadData(true);
     } catch (e: any) {
       setNotice({
         type: "error",
@@ -396,11 +512,84 @@ export const PoolConsole: React.FC<{
     }
   };
 
+  const handleCancelQueuedAccount = async (acc: AccountView) => {
+    setActionLoadingKey(`${acc.id}:cancel`);
+    try {
+      const res = await cancelKamiLogin(activeProvider, {
+        task_id: acc.action_task_id || loginTask?.id,
+        account_id: acc.id,
+      });
+      if (res.task !== undefined) {
+        setLoginTask(res.task || null);
+      }
+      setNotice({
+        type: "info",
+        text: `已取消 ${acc.email || acc.id} 的排队等待`,
+      });
+      await loadData(true);
+    } catch (e: any) {
+      setNotice({
+        type: "error",
+        text: `取消排队失败: ${e?.message || "未知错误"}`,
+      });
+    } finally {
+      setActionLoadingKey(null);
+    }
+  };
+
+  const handleCancelRemainingLogin = async () => {
+    if (!loginTask) return;
+    setCancellingQueue(true);
+    try {
+      const res = await cancelKamiLogin(activeProvider, {
+        task_id: loginTask.id,
+        cancel_all: true,
+      });
+      if (res.task !== undefined) {
+        setLoginTask(res.task || null);
+      }
+      setNotice({
+        type: "info",
+        text: `已取消剩余 ${res.cancelled} 个排队账号，当前执行中的账号完成后任务结束`,
+      });
+      await loadData(true);
+    } catch (e: any) {
+      setNotice({
+        type: "error",
+        text: `取消剩余排队失败: ${e?.message || "未知错误"}`,
+      });
+    } finally {
+      setCancellingQueue(false);
+    }
+  };
+
+  const handleDismissTask = async (kind: "login" | "probe", taskId?: string) => {
+    try {
+      await dismissAdminTask(activeProvider, { kind, task_id: taskId });
+      if (kind === "login") {
+        setLoginTask(null);
+        setExpandLoginDetails(false);
+      } else {
+        setProbeTask(null);
+        setExpandProbeDetails(false);
+      }
+      await loadData(true);
+    } catch (e: any) {
+      setNotice({
+        type: "error",
+        text: `关闭战报失败: ${e?.message || "未知错误"}`,
+      });
+    }
+  };
+
   const eligibleVisibleAccounts = filteredAccounts.filter(
     (acc) => acc.has_kami_credentials && acc.status !== "disabled"
   );
   const selectedCount = selectedAccountIds.size;
-  const loginTaskActive = Boolean(loginTaskId);
+  const loginTaskActive = Boolean(
+    loginTask && (loginTask.status === "queued" || loginTask.status === "running")
+  );
+  const probeTaskActive = Boolean(probeTask && probeTask.status === "running");
   const proxyUnavailable =
     proxyNodes.length > 0 && !proxyNodes.some((node) => node.status === "active");
   const allVisibleSelected =
@@ -453,14 +642,20 @@ export const PoolConsole: React.FC<{
     setLoggingInKami(true);
     setNotice({
       type: "info",
-      text: `正在为 ${ids.length} 个账号创建后台登录任务，账号间间隔 10 秒...`,
+      text: loginTaskActive
+        ? `正在将 ${ids.length} 个账号追加至运行中的重登队列...`
+        : `正在为 ${ids.length} 个账号创建后台登录任务，账号间间隔 10 秒...`,
     });
     try {
       const res = await loginKamiAccounts(activeProvider, headlessLogin, false, ids);
+      trackedLoginIdRef.current = res.task.id;
       setLoginTask(res.task);
-      setLoginTaskProvider(activeProvider);
-      setLoginTaskId(res.task.id);
-      setNotice({ type: "info", text: `后台登录任务已启动：${res.task.total} 个账号已排队。` });
+      setSelectedAccountIds(new Set());
+      setNotice({
+        type: "info",
+        text: `后台登录队列已更新：任务总计 ${res.task.total} 个账号。`,
+      });
+      await loadData(true);
     } catch (e: any) {
       setNotice({
         type: "error",
@@ -555,20 +750,36 @@ export const PoolConsole: React.FC<{
           <button
             type="button"
             onClick={handleProbeAll}
-            disabled={probingAll || Boolean(isPlannedProvider)}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border z-border z-surface z-ghost-btn font-medium cursor-pointer"
+            disabled={probingAll || probeTaskActive || Boolean(isPlannedProvider)}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border z-border z-surface z-ghost-btn font-medium cursor-pointer disabled:opacity-50"
           >
-            <Activity size={13} />
-            <span>{probingAll ? "测活中..." : "全池测活"}</span>
+            {probingAll || probeTaskActive ? (
+              <Loader2 size={13} className="animate-spin" />
+            ) : (
+              <Activity size={13} />
+            )}
+            <span>
+              {probeTaskActive && probeTask
+                ? `测活中 (${probeTask.probed}/${probeTask.total})`
+                : probingAll
+                  ? "启动测活..."
+                  : "全池测活"}
+            </span>
           </button>
           <button
             type="button"
             onClick={handleLoginKami}
-            disabled={loggingInKami || loginTaskActive || proxyUnavailable || Boolean(isPlannedProvider)}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border z-border z-surface z-ghost-btn font-medium cursor-pointer"
+            disabled={loggingInKami || proxyUnavailable || Boolean(isPlannedProvider)}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border z-border z-surface z-ghost-btn font-medium cursor-pointer disabled:opacity-50"
           >
             <LogIn size={13} />
-            <span>{loggingInKami ? "创建任务..." : "待激活批量登录"}</span>
+            <span>
+              {loggingInKami
+                ? "提交中..."
+                : loginTaskActive
+                  ? "追加待激活到队列"
+                  : "待激活批量登录"}
+            </span>
           </button>
           <label className="inline-flex items-center gap-1.5 px-2 py-1.5 border z-border rounded-xl z-text-sec">
             <input
@@ -642,10 +853,13 @@ export const PoolConsole: React.FC<{
 
         {workerStats && (workerStats.running || workerStats.queue_length > 0) && (
           <div className="mb-1.5 inline-flex items-center gap-2 px-2.5 py-1 rounded-full border z-pill-info font-mono-num">
+            {workerStats.running && (
+              <Loader2 size={11} className="animate-spin shrink-0" />
+            )}
             <span>
-              串行续期队列：{workerStats.queue_length} 排队
+              自动续期队列：{workerStats.queue_length} 排队
               {workerStats.running && workerStats.running_email
-                ? ` · 正在登录 ${workerStats.running_email}`
+                ? ` · ${workerStats.running_email}${workerStats.running_phase_label ? ` (${workerStats.running_phase_label})` : ""}`
                 : ""}
             </span>
           </div>
@@ -660,23 +874,239 @@ export const PoolConsole: React.FC<{
         />
       )}
 
-      {loginTaskActive && loginTask && (
-        <div className="p-card rounded-xl px-3.5 py-3 space-y-2 text-xs" role="status" aria-live="polite">
+      {loginTask && !loginTask.dismissed && (
+        <div
+          className="p-card rounded-xl px-3.5 py-3 space-y-2.5 text-xs"
+          role="status"
+          aria-live="polite"
+        >
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <span className="font-medium">
-              后台登录任务：{loginTask.completed}/{loginTask.total}
-            </span>
-            <span className="z-text-muted">
-              {loginTask.current_email ? `正在处理 ${loginTask.current_email}` : "等待执行"}
-              {` · ${loginTask.success} 成功 · ${loginTask.failed} 失败`}
-            </span>
+            <div className="flex items-center gap-2 min-w-0">
+              {loginTaskActive ? (
+                <Loader2 size={14} className="animate-spin shrink-0" style={{ color: "var(--pill-info-text)" }} />
+              ) : loginTask.failed > 0 ? (
+                <AlertCircle size={14} className="shrink-0" style={{ color: "var(--pill-warn-text)" }} />
+              ) : (
+                <CheckCircle2 size={14} className="shrink-0" style={{ color: "var(--pill-success-text)" }} />
+              )}
+              <span className="font-medium">
+                {loginTaskActive
+                  ? `后台重登任务：${loginTask.completed}/${loginTask.total}`
+                  : `重登任务已完成：${loginTask.total} 个账号`}
+              </span>
+              {loginTaskActive && (
+                <span className="font-mono-num z-text-sec truncate">
+                  {loginTask.current_email
+                    ? `${loginTask.current_email} · ${loginTask.current_phase_label || loginTask.current_phase || "执行中"}${formatElapsedSeconds(loginTask.current_started_at, nowMs) ? ` (${formatElapsedSeconds(loginTask.current_started_at, nowMs)})` : ""}`
+                    : loginTask.current_phase === "cooldown_wait"
+                      ? `${loginTask.current_phase_label || "等待账号间隔"}${formatElapsedSeconds(loginTask.current_started_at, nowMs) ? ` (${formatElapsedSeconds(loginTask.current_started_at, nowMs)})` : ""}`
+                      : "准备队列中"}
+                </span>
+              )}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
+              <span className="z-text-muted font-mono-num">
+                {`${loginTask.success} 成功 · ${loginTask.failed} 失败${loginTask.cancelled ? ` · ${loginTask.cancelled} 已取消` : ""}${(loginTask.queued_account_ids?.length ?? 0) > 0 ? ` · ${loginTask.queued_account_ids!.length} 排队` : ""}`}
+              </span>
+              {loginTaskActive && (loginTask.queued_account_ids?.length ?? 0) > 0 && (
+                <button
+                  type="button"
+                  disabled={cancellingQueue}
+                  onClick={handleCancelRemainingLogin}
+                  className="px-2 py-0.5 rounded-lg border z-border hover:underline cursor-pointer disabled:opacity-50"
+                  style={{ color: "var(--pill-danger-text)" }}
+                >
+                  {cancellingQueue
+                    ? "取消中..."
+                    : `取消剩余排队 (${loginTask.queued_account_ids!.length})`}
+                </button>
+              )}
+              {(loginTask.results?.length ?? 0) > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setExpandLoginDetails((v) => !v)}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg border z-border z-ghost-btn cursor-pointer"
+                >
+                  <span>
+                    {expandLoginDetails
+                      ? "收起明细"
+                      : `展开明细 (${loginTask.results.length})`}
+                  </span>
+                  {expandLoginDetails ? (
+                    <ChevronUp size={12} />
+                  ) : (
+                    <ChevronDown size={12} />
+                  )}
+                </button>
+              )}
+              {!loginTaskActive && (
+                <button
+                  type="button"
+                  onClick={() => handleDismissTask("login", loginTask.id)}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg border z-border z-ghost-btn cursor-pointer"
+                  aria-label="关闭重登战报"
+                >
+                  <X size={12} />
+                  <span>关闭战报</span>
+                </button>
+              )}
+            </div>
           </div>
+
           <progress
             className="w-full h-1.5 accent-emerald-600"
             max={Math.max(loginTask.total, 1)}
             value={loginTask.completed}
             aria-label="批量登录进度"
           />
+
+          {expandLoginDetails && (loginTask.results?.length ?? 0) > 0 && (
+            <div className="max-h-44 overflow-y-auto border-t z-border pt-2 space-y-1">
+              {loginTask.results.map((item, idx) => (
+                <div
+                  key={`${item.account_id}-${idx}`}
+                  className="flex flex-wrap items-center justify-between gap-2 py-1 px-2 rounded-lg"
+                  style={{ background: "var(--bg-input)" }}
+                >
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span
+                      className={`px-1.5 py-0.25 rounded-full border text-[11px] font-medium shrink-0 ${
+                        item.ok
+                          ? "z-pill-success"
+                          : item.cancelled
+                            ? "z-pill-warn"
+                            : "z-pill-danger"
+                      }`}
+                    >
+                      {item.ok ? "成功" : item.cancelled ? "已取消" : "失败"}
+                    </span>
+                    <span className="font-mono-num truncate max-w-[260px]">
+                      {item.email || item.account_id}
+                    </span>
+                  </div>
+                  {item.error && (
+                    <span
+                      className="font-mono-num truncate max-w-[420px]"
+                      style={{
+                        color: item.cancelled
+                          ? "var(--pill-warn-text)"
+                          : "var(--pill-danger-text)",
+                      }}
+                      title={item.error}
+                    >
+                      {item.error}
+                    </span>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {probeTask && !probeTask.dismissed && (
+        <div
+          className="p-card rounded-xl px-3.5 py-3 space-y-2.5 text-xs"
+          role="status"
+          aria-live="polite"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2 min-w-0">
+              {probeTaskActive ? (
+                <Loader2 size={14} className="animate-spin shrink-0" style={{ color: "var(--pill-info-text)" }} />
+              ) : probeTask.failed > 0 ? (
+                <AlertCircle size={14} className="shrink-0" style={{ color: "var(--pill-warn-text)" }} />
+              ) : (
+                <CheckCircle2 size={14} className="shrink-0" style={{ color: "var(--pill-success-text)" }} />
+              )}
+              <span className="font-medium">
+                {probeTaskActive
+                  ? `全池测活进行中：${probeTask.probed}/${probeTask.total}`
+                  : `全池测活已完成：共探测 ${probeTask.probed}/${probeTask.total} 个账号`}
+              </span>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
+              <span className="z-text-muted font-mono-num">
+                {`正常 ${probeTask.passed} · 异常 ${probeTask.failed}`}
+              </span>
+              {(probeTask.results?.length ?? 0) > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setExpandProbeDetails((v) => !v)}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg border z-border z-ghost-btn cursor-pointer"
+                >
+                  <span>
+                    {expandProbeDetails
+                      ? "收起明细"
+                      : `展开明细 (${probeTask.results!.length})`}
+                  </span>
+                  {expandProbeDetails ? (
+                    <ChevronUp size={12} />
+                  ) : (
+                    <ChevronDown size={12} />
+                  )}
+                </button>
+              )}
+              {!probeTaskActive && (
+                <button
+                  type="button"
+                  onClick={() => handleDismissTask("probe", probeTask.id)}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg border z-border z-ghost-btn cursor-pointer"
+                  aria-label="关闭测活战报"
+                >
+                  <X size={12} />
+                  <span>关闭战报</span>
+                </button>
+              )}
+            </div>
+          </div>
+
+          <progress
+            className="w-full h-1.5 accent-emerald-600"
+            max={Math.max(probeTask.total, 1)}
+            value={probeTask.probed}
+            aria-label="全池测活进度"
+          />
+
+          {expandProbeDetails && (probeTask.results?.length ?? 0) > 0 && (
+            <div className="max-h-44 overflow-y-auto border-t z-border pt-2 space-y-1">
+              {probeTask.results!.map((item, idx) => (
+                <div
+                  key={`${item.id || "probe"}-${idx}`}
+                  className="flex flex-wrap items-center justify-between gap-2 py-1 px-2 rounded-lg"
+                  style={{ background: "var(--bg-input)" }}
+                >
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span
+                      className={`px-1.5 py-0.25 rounded-full border text-[11px] font-medium shrink-0 ${
+                        item.ok ? "z-pill-success" : "z-pill-danger"
+                      }`}
+                    >
+                      {item.ok ? "正常" : "异常"}
+                    </span>
+                    <span className="font-mono-num truncate max-w-[260px]">
+                      {item.email || item.id}
+                    </span>
+                  </div>
+                  <span
+                    className="font-mono-num truncate max-w-[420px]"
+                    style={{
+                      color: item.ok
+                        ? "var(--text-muted)"
+                        : "var(--pill-danger-text)",
+                    }}
+                    title={item.error || ""}
+                  >
+                    {item.ok
+                      ? `${item.latency_ms ?? 0}ms`
+                      : item.error || "探测失败"}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
@@ -786,8 +1216,7 @@ export const PoolConsole: React.FC<{
                 type="button"
                 onClick={selectVisibleKamiAccounts}
                 disabled={
-                  eligibleVisibleAccounts.every((item) => item.status === "active") ||
-                  loginTaskActive
+                  eligibleVisibleAccounts.every((item) => item.status === "active")
                 }
                 className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl border z-border z-surface z-ghost-btn cursor-pointer disabled:opacity-50"
               >
@@ -796,7 +1225,7 @@ export const PoolConsole: React.FC<{
               <button
                 type="button"
                 onClick={selectVisibleAccounts}
-                disabled={filteredAccounts.length === 0 || loginTaskActive}
+                disabled={filteredAccounts.length === 0}
                 className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl border z-border z-surface z-ghost-btn cursor-pointer disabled:opacity-50"
               >
                 全量选择
@@ -807,7 +1236,7 @@ export const PoolConsole: React.FC<{
                   <button
                     type="button"
                     onClick={() => setSelectedAccountIds(new Set())}
-                    disabled={loggingInKami || loginTaskActive || updatingProxy}
+                    disabled={loggingInKami || updatingProxy}
                     className="px-2 py-1.5 rounded-xl z-text-muted z-ghost-btn cursor-pointer"
                   >
                     清除选择
@@ -837,7 +1266,7 @@ export const PoolConsole: React.FC<{
 
               <button
                 type="button"
-                onClick={loadData}
+                onClick={() => void loadData(false)}
                 disabled={loading}
                 className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl border z-border z-surface z-ghost-btn cursor-pointer"
               >
@@ -857,7 +1286,7 @@ export const PoolConsole: React.FC<{
                 <button
                   type="button"
                   onClick={() => setShowBulkEdit(true)}
-                  disabled={updatingProxy || loggingInKami || loginTaskActive || Boolean(isPlannedProvider)}
+                  disabled={updatingProxy || loggingInKami || Boolean(isPlannedProvider)}
                   className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl border z-border z-surface z-ghost-btn cursor-pointer disabled:opacity-50"
                 >
                   批量编辑
@@ -868,7 +1297,6 @@ export const PoolConsole: React.FC<{
                   disabled={
                     loggingInKami ||
                     updatingProxy ||
-                    loginTaskActive ||
                     proxyUnavailable ||
                     Boolean(isPlannedProvider) ||
                     selectedCount === 0
@@ -878,8 +1306,10 @@ export const PoolConsole: React.FC<{
                   <LogIn size={13} />
                   <span>
                     {loggingInKami
-                      ? "登录中..."
-                      : "批量重新登录"}
+                      ? "提交中..."
+                      : loginTaskActive
+                        ? "追加到重登队列"
+                        : "批量重新登录"}
                   </span>
                 </button>
               </div>
@@ -900,7 +1330,7 @@ export const PoolConsole: React.FC<{
                         type="checkbox"
                         checked={allVisibleSelected}
                         onChange={toggleVisibleSelection}
-                        disabled={filteredAccounts.length === 0 || loginTaskActive}
+                        disabled={filteredAccounts.length === 0}
                         aria-label="全量选择当前筛选账号"
                       />
                     </th>
@@ -929,6 +1359,43 @@ export const PoolConsole: React.FC<{
                       nowMs
                     );
                     const errTip = acc.last_renew_error || acc.last_error;
+                    const lastSummary =
+                      !acc.active_action && acc.last_action_summary
+                        ? `${formatRelativeTimeAgo(acc.last_action_at, nowMs) ? `${formatRelativeTimeAgo(acc.last_action_at, nowMs)} · ` : ""}${acc.last_action_summary}`
+                        : "";
+                    const showErrTip = errTip
+                      ? !lastSummary ||
+                        !acc.last_action_summary?.includes(errTip.slice(0, 24))
+                      : false;
+                    const isLocalBusy =
+                      actionLoadingKey?.startsWith(`${acc.id}:`) ?? false;
+                    const liveAction =
+                      acc.active_action ||
+                      (acc.renew_state === "running" || acc.renew_state === "queued"
+                        ? "renew"
+                        : "");
+                    const isRowQueued =
+                      liveAction !== "" &&
+                      (acc.action_phase === "queued" ||
+                        (!acc.active_action && acc.renew_state === "queued"));
+                    const isQueueCancellable =
+                      isRowQueued &&
+                      (acc.active_action === "login" ||
+                        acc.active_action === "renew" ||
+                        acc.renew_state === "queued");
+                    const isRowBusy = Boolean(liveAction) || isLocalBusy;
+                    const isProbing =
+                      acc.active_action === "probe" ||
+                      actionLoadingKey === `${acc.id}:probe`;
+                    const isLogging =
+                      acc.active_action === "login" ||
+                      acc.active_action === "renew" ||
+                      acc.renew_state === "running" ||
+                      acc.renew_state === "queued" ||
+                      actionLoadingKey === `${acc.id}:login`;
+                    const isRefreshing =
+                      acc.active_action === "refresh" ||
+                      actionLoadingKey === `${acc.id}:refresh`;
                     const ttlBar = getTtlBar(acc.remaining_days);
                     const subMeta = [
                       acc.token_preview || "",
@@ -944,9 +1411,7 @@ export const PoolConsole: React.FC<{
                             type="checkbox"
                             aria-label={`选择 ${acc.email || acc.id} 进行重新登录`}
                             checked={selectedAccountIds.has(acc.id)}
-                            disabled={
-                              loggingInKami || updatingProxy || loginTaskActive
-                            }
+                            disabled={loggingInKami || updatingProxy}
                             onChange={() => toggleAccountSelection(acc.id)}
                           />
                         </td>
@@ -1005,6 +1470,12 @@ export const PoolConsole: React.FC<{
                             status={acc.status}
                             imageLimited={acc.image_limited}
                             renewState={acc.renew_state}
+                            activeAction={acc.active_action}
+                            actionPhase={acc.action_phase}
+                            actionPhaseLabel={acc.action_phase_label}
+                            actionQueuePos={acc.action_queue_pos}
+                            actionStartedAt={acc.action_started_at}
+                            nowMs={nowMs}
                           />
                           {(fullCool || imgCool || renewCool) && (
                             <div className="font-mono-num z-text-muted mt-1">
@@ -1013,9 +1484,22 @@ export const PoolConsole: React.FC<{
                               {renewCool ? `重登退避 ${renewCool}` : ""}
                             </div>
                           )}
-                          {errTip && (
+                          {lastSummary && (
                             <div
-                              className="mt-1 max-w-[230px] truncate"
+                              className="mt-1 max-w-[240px] truncate"
+                              style={{
+                                color: acc.last_action_ok
+                                  ? "var(--pill-success-text)"
+                                  : "var(--pill-danger-text)",
+                              }}
+                              title={lastSummary}
+                            >
+                              {lastSummary}
+                            </div>
+                          )}
+                          {showErrTip && (
+                            <div
+                              className="mt-1 max-w-[240px] truncate"
                               style={{ color: "var(--pill-danger-text)" }}
                               title={errTip}
                             >
@@ -1052,53 +1536,89 @@ export const PoolConsole: React.FC<{
                         </td>
 
                         <td className="py-3 px-4 text-right whitespace-nowrap">
-                          <div className="inline-flex items-center gap-3 hover-reveal">
+                          <div
+                            className={`inline-flex items-center gap-3 ${isRowBusy ? "" : "hover-reveal"}`}
+                          >
                             <button
                               type="button"
-                              disabled={actionLoadingKey === `${acc.id}:probe`}
+                              disabled={isProbing || isLogging}
                               onClick={() => handleAction(acc, "probe")}
-                              className="z-text-sec hover:underline cursor-pointer disabled:opacity-50"
+                              className="z-text-sec hover:underline cursor-pointer disabled:opacity-60 inline-flex items-center gap-1"
                             >
-                              {actionLoadingKey === `${acc.id}:probe`
-                                ? "测活中"
-                                : "测活"}
+                              {isProbing && (
+                                <Loader2 size={11} className="animate-spin" />
+                              )}
+                              <span>{isProbing ? "测活中" : "测活"}</span>
                             </button>
                             {acc.has_kami_credentials && (
                               <>
                                 <button
                                   type="button"
-                                  disabled={
-                                    actionLoadingKey === `${acc.id}:totp`
-                                  }
+                                  disabled={actionLoadingKey === `${acc.id}:totp`}
                                   onClick={() => handleAction(acc, "totp")}
                                   className="z-text-sec hover:underline font-mono-num cursor-pointer disabled:opacity-50"
                                   title="获取实时 6 位 2FA 动态码"
                                 >
                                   2FA
                                 </button>
-                                <button
-                                  type="button"
-                                  disabled={
-                                    actionLoadingKey === `${acc.id}:login`
-                                  }
-                                  onClick={() => handleAction(acc, "login")}
-                                  className="z-text-sec hover:underline cursor-pointer disabled:opacity-50"
-                                >
-                                  重登
-                                </button>
+                                {isQueueCancellable ? (
+                                  <button
+                                    type="button"
+                                    disabled={
+                                      actionLoadingKey === `${acc.id}:cancel`
+                                    }
+                                    onClick={() =>
+                                      handleCancelQueuedAccount(acc)
+                                    }
+                                    className="hover:underline cursor-pointer disabled:opacity-50 font-medium"
+                                    style={{ color: "var(--pill-warn-text)" }}
+                                    title="从等待队列移除该账号"
+                                  >
+                                    {actionLoadingKey === `${acc.id}:cancel`
+                                      ? "取消中..."
+                                      : `取消排队${acc.action_queue_pos ? ` #${acc.action_queue_pos}` : ""}`}
+                                  </button>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    disabled={isLogging}
+                                    onClick={() => handleAction(acc, "login")}
+                                    className="z-text-sec hover:underline cursor-pointer disabled:opacity-75 inline-flex items-center gap-1"
+                                    style={
+                                      isLogging
+                                        ? { color: "var(--pill-info-text)" }
+                                        : undefined
+                                    }
+                                  >
+                                    {isLogging && (
+                                      <Loader2
+                                        size={11}
+                                        className="animate-spin"
+                                      />
+                                    )}
+                                    <span>
+                                      {isLogging
+                                        ? acc.action_phase_label
+                                          ? `重登 · ${acc.action_phase_label}`
+                                          : "重登中..."
+                                        : "重登"}
+                                    </span>
+                                  </button>
+                                )}
                               </>
                             )}
                             {(acc.has_refresh_token ||
                               acc.has_session_token) && (
                               <button
                                 type="button"
-                                disabled={
-                                  actionLoadingKey === `${acc.id}:refresh`
-                                }
+                                disabled={isRefreshing || isLogging}
                                 onClick={() => handleAction(acc, "refresh")}
-                                className="z-text-sec hover:underline cursor-pointer disabled:opacity-50"
+                                className="z-text-sec hover:underline cursor-pointer disabled:opacity-60 inline-flex items-center gap-1"
                               >
-                                续期
+                                {isRefreshing && (
+                                  <Loader2 size={11} className="animate-spin" />
+                                )}
+                                <span>{isRefreshing ? "续期中" : "续期"}</span>
                               </button>
                             )}
                             <button
@@ -1298,7 +1818,7 @@ export const PoolConsole: React.FC<{
                 id="bulk-proxy"
                 value={bulkProxyUrl}
                 onChange={(e) => setBulkProxyUrl(e.target.value)}
-                disabled={updatingProxy || loginTaskActive}
+                disabled={updatingProxy}
                 className="w-full px-3 py-2 rounded-lg p-input"
               >
                 {proxyNodes.length === 0 ? (
@@ -1336,7 +1856,6 @@ export const PoolConsole: React.FC<{
                 type="button"
                 disabled={
                   updatingProxy ||
-                  loginTaskActive ||
                   selectedCount === 0 ||
                   Boolean(isPlannedProvider) ||
                   (proxyNodes.length > 0 && !bulkProxyUrl)

@@ -10,6 +10,7 @@ import (
 	"ai-web-free/internal/audit"
 	"ai-web-free/internal/chatgpt"
 	"ai-web-free/internal/config"
+	"ai-web-free/internal/promptplaza"
 	"ai-web-free/internal/provider"
 	"ai-web-free/internal/proxy"
 	"ai-web-free/middlewares"
@@ -35,6 +36,7 @@ type RouterDeps struct {
 	Config      *config.Config
 	KamiWorker  *provider.KamiRenewWorker
 	AuditLog    *audit.RingBuffer
+	PromptPlaza *promptplaza.Manager
 }
 
 func RegisterRouter(accountPool *accounts.Pool, proxyPool *proxy.Pool, registry *provider.Registry, cfg *config.Config) *gin.Engine {
@@ -57,7 +59,23 @@ func RegisterRouterWithDeps(deps RouterDeps) *gin.Engine {
 		ProxyPool:   proxyPool,
 		KamiWorker:  deps.KamiWorker,
 		AuditLog:    deps.AuditLog,
+		PromptPlaza: deps.PromptPlaza,
 		Config:      cfg,
+	}
+	if rt.PromptPlaza == nil {
+		var proxyFn promptplaza.ProxyFunc
+		if proxyPool != nil {
+			proxyFn = proxyPool.Allocate
+		}
+		var persistFile string
+		if cfg != nil {
+			persistFile = cfg.PromptPlazaFile
+		}
+		rt.PromptPlaza = promptplaza.NewManager(promptplaza.Options{
+			PersistFile:  persistFile,
+			ProxyFunc:    proxyFn,
+			ChatExecutor: NewPoolChatExecutor(rt, accountPool, cfg),
+		})
 	}
 	chatHandler := NewChatHandler(accountPool, cfg)
 	imageHandler := NewImageHandler(accountPool, cfg)
@@ -120,6 +138,9 @@ func RegisterRouterWithDeps(deps RouterDeps) *gin.Engine {
 	{
 		adminGroup.GET("/auth/status", adminHandler.AuthStatus)
 		adminGroup.GET("/overview", adminHandler.Overview)
+		adminGroup.GET("/models", adminHandler.ListModelsCatalog)
+		adminGroup.GET("/diagnostics", adminHandler.Diagnostics)
+		adminGroup.POST("/diagnostics/repair", adminHandler.ExecuteDiagnosticRepair)
 		adminGroup.GET("/logs", adminHandler.ListLogs)
 		adminGroup.GET("/proxies", adminHandler.ListProxies)
 		adminGroup.POST("/proxies/probe", adminHandler.ProbeProxies)
@@ -131,9 +152,14 @@ func RegisterRouterWithDeps(deps RouterDeps) *gin.Engine {
 		adminGroup.GET("/providers/:provider/export", adminHandler.ExportAccounts)
 		adminGroup.POST("/providers/:provider/accounts/import", adminHandler.ImportAccounts)
 		adminGroup.POST("/providers/:provider/accounts/kami-login", adminHandler.LoginKamiAccounts)
+		adminGroup.POST("/providers/:provider/accounts/kami-login/cancel", adminHandler.CancelKamiLogin)
 		adminGroup.GET("/providers/:provider/accounts/kami-login/tasks/:taskID", adminHandler.KamiLoginTask)
+		adminGroup.POST("/providers/:provider/tasks/dismiss", adminHandler.DismissTask)
 		adminGroup.POST("/providers/:provider/accounts/:id/action", adminHandler.AccountAction)
 		adminGroup.POST("/providers/:provider/pool/probe-all", adminHandler.ProbeAllAccounts)
+		adminGroup.GET("/prompts", adminHandler.ListPrompts)
+		adminGroup.POST("/prompts/sync", adminHandler.SyncPrompts)
+		adminGroup.POST("/prompts/expand", adminHandler.ExpandPrompt)
 	}
 
 	router.POST("/auth/session", authHandler.Session)

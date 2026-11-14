@@ -25,6 +25,7 @@ import {
   SparklineSVG,
   type RouteKey,
 } from "../components/ui";
+import { useModelsCatalog } from "../lib/models";
 
 function buildThroughputSeries(logs: AuditEntry[]) {
   const buckets = 12;
@@ -105,6 +106,13 @@ export const OverviewView: React.FC<{
   const [error, setError] = useState<string | null>(null);
   const [copiedEndpoint, setCopiedEndpoint] = useState(false);
   const [selectedLog, setSelectedLog] = useState<AuditEntry | null>(null);
+  const {
+    catalog,
+    chatModels,
+    imageModels,
+    audioModels,
+    source: modelsSource,
+  } = useModelsCatalog();
 
   const load = async () => {
     setLoading(true);
@@ -129,11 +137,9 @@ export const OverviewView: React.FC<{
 
   useEffect(() => {
     load();
-    const timer = window.setInterval(load, 15000);
     const onPoolUpdated = () => load();
     window.addEventListener("pool-updated", onPoolUpdated);
     return () => {
-      window.clearInterval(timer);
       window.removeEventListener("pool-updated", onPoolUpdated);
     };
   }, []);
@@ -164,6 +170,26 @@ export const OverviewView: React.FC<{
       : 0;
 
   const worker = overview?.kami_worker;
+  const loginTask =
+    overview?.login_task &&
+    (overview.login_task.status === "queued" ||
+      overview.login_task.status === "running")
+      ? overview.login_task
+      : null;
+  const probeTask =
+    overview?.probe_task && overview.probe_task.status === "running"
+      ? overview.probe_task
+      : null;
+  const hasActiveOps = Boolean(
+    loginTask || probeTask || worker?.running || (worker?.queue_length ?? 0) > 0
+  );
+
+  useEffect(() => {
+    const intervalMs = hasActiveOps ? 2000 : 15000;
+    const timer = window.setInterval(load, intervalMs);
+    return () => window.clearInterval(timer);
+  }, [hasActiveOps]);
+
   const auditSum = overview?.audit_summary;
 
   const totalReqs = auditSum?.total_requests ?? 0;
@@ -378,41 +404,91 @@ export const OverviewView: React.FC<{
           </div>
         </div>
 
-        <div className="p-card rounded-2xl p-4 space-y-2.5 text-xs">
+        <div
+          className="p-card rounded-2xl p-4 space-y-2.5 text-xs cursor-pointer hover:opacity-95 transition-opacity"
+          onClick={() => onNavigate("pools")}
+          title="点击跳转到号池与供应商管理"
+        >
           <div className="flex items-center justify-between">
-            <span className="z-text-muted">卡密续期 Worker</span>
+            <span className="z-text-muted">
+              {loginTask
+                ? "后台重登任务"
+                : probeTask
+                  ? "全池测活进度"
+                  : "卡密续期 Worker"}
+            </span>
             <span
               className={`px-2 py-0.5 rounded-full border font-medium ${
-                worker?.running
+                loginTask || probeTask || worker?.running
                   ? "z-pill-info"
                   : (worker?.queue_length ?? 0) > 0
                     ? "z-pill-warn"
                     : "z-muted z-border z-text-sec"
               }`}
             >
-              {worker?.running
-                ? "续期执行中"
-                : (worker?.queue_length ?? 0) > 0
-                  ? "排队待执行"
-                  : "串行队列"}
+              {loginTask
+                ? "重登执行中"
+                : probeTask
+                  ? "测活进行中"
+                  : worker?.running
+                    ? "续期执行中"
+                    : (worker?.queue_length ?? 0) > 0
+                      ? "排队待执行"
+                      : "串行队列"}
             </span>
           </div>
           <div className="flex items-baseline justify-between gap-2">
-            <div className="flex items-baseline gap-1.5">
-              <span className="text-2xl font-semibold font-mono-num tracking-tight">
-                {worker ? worker.queue_length : 0}
-              </span>
-              <span className="z-text-muted">排队中</span>
-            </div>
-            <span className="font-mono-num z-text-muted">
-              成功 {worker?.total_succeeded ?? 0} · 失败{" "}
-              {worker?.total_failed ?? 0}
-            </span>
+            {loginTask ? (
+              <>
+                <div className="flex items-baseline gap-1.5">
+                  <span className="text-2xl font-semibold font-mono-num tracking-tight">
+                    {loginTask.completed}/{loginTask.total}
+                  </span>
+                  <span className="z-text-muted">
+                    ({loginTask.queued_account_ids?.length ?? 0} 排队)
+                  </span>
+                </div>
+                <span className="font-mono-num z-text-muted">
+                  成功 {loginTask.success} · 失败 {loginTask.failed}
+                </span>
+              </>
+            ) : probeTask ? (
+              <>
+                <div className="flex items-baseline gap-1.5">
+                  <span className="text-2xl font-semibold font-mono-num tracking-tight">
+                    {probeTask.probed}/{probeTask.total}
+                  </span>
+                  <span className="z-text-muted">已探测</span>
+                </div>
+                <span className="font-mono-num z-text-muted">
+                  正常 {probeTask.passed} · 异常 {probeTask.failed}
+                </span>
+              </>
+            ) : (
+              <>
+                <div className="flex items-baseline gap-1.5">
+                  <span className="text-2xl font-semibold font-mono-num tracking-tight">
+                    {worker ? worker.queue_length : 0}
+                  </span>
+                  <span className="z-text-muted">排队中</span>
+                </div>
+                <span className="font-mono-num z-text-muted">
+                  成功 {worker?.total_succeeded ?? 0} · 失败{" "}
+                  {worker?.total_failed ?? 0}
+                </span>
+              </>
+            )}
           </div>
           <div className="z-text-muted truncate font-mono-num">
-            {worker?.running && worker.running_email
-              ? `当前登录: ${worker.running_email}`
-              : "剩余 ≤ 24h 自动触发无头续期"}
+            {loginTask
+              ? loginTask.current_email
+                ? `${loginTask.current_email} · ${loginTask.current_phase_label || loginTask.current_phase || "执行中"}`
+                : loginTask.current_phase_label || "等待队列执行"
+              : probeTask
+                ? "正在并发探测号池健康度..."
+                : worker?.running && worker.running_email
+                  ? `${worker.running_email}${worker.running_phase_label ? ` · ${worker.running_phase_label}` : ""}`
+                  : "剩余 ≤ 24h 自动触发无头续期"}
           </div>
         </div>
       </div>
@@ -670,8 +746,9 @@ export const OverviewView: React.FC<{
                 模型目录
               </span>
               <span className="z-text-muted leading-relaxed">
-                已支持 <code className="font-mono-num">?include_builtins=true</code>{" "}
-                聚合实时对话 + 生图 + TTS / Whisper 全部模型，点击查看 →
+                {modelsSource === "fallback"
+                  ? `内置参考 ${catalog.length} 个模型：对话 ${chatModels.length} · 生图 ${imageModels.length} · 语音 ${audioModels.length}，点击查看 →`
+                  : `已缓存 ${catalog.length} 个可用模型：对话 ${chatModels.length} · 生图 ${imageModels.length} · 语音 ${audioModels.length}，点击查看 →`}
               </span>
             </button>
           </div>

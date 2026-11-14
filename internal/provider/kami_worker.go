@@ -8,6 +8,7 @@ import (
 
 	"ai-web-free/internal/accounts"
 	"ai-web-free/internal/audit"
+	"ai-web-free/internal/chatgpt"
 )
 
 // KamiLoginExecutor 执行单账号卡密登录并返回提取结果，可在单元测试中替换。
@@ -15,13 +16,18 @@ type KamiLoginExecutor func(acct *accounts.Account, defaultProxy string, headles
 
 // KamiWorkerStats 卡密后台串行续期队列的可观测快照。
 type KamiWorkerStats struct {
-	Running        bool   `json:"running"`
-	RunningEmail   string `json:"running_email,omitempty"`
-	QueueLength    int    `json:"queue_length"`
-	TotalSucceeded int64  `json:"total_succeeded"`
-	TotalFailed    int64  `json:"total_failed"`
-	LastRunAt      string `json:"last_run_at,omitempty"`
-	LastError      string `json:"last_error,omitempty"`
+	Running           bool     `json:"running"`
+	RunningAccountID  string   `json:"running_account_id,omitempty"`
+	RunningEmail      string   `json:"running_email,omitempty"`
+	RunningPhase      string   `json:"running_phase,omitempty"`
+	RunningPhaseLabel string   `json:"running_phase_label,omitempty"`
+	RunningStartedAt  string   `json:"running_started_at,omitempty"`
+	QueueLength       int      `json:"queue_length"`
+	QueuedAccountIDs  []string `json:"queued_account_ids,omitempty"`
+	TotalSucceeded    int64    `json:"total_succeeded"`
+	TotalFailed       int64    `json:"total_failed"`
+	LastRunAt         string   `json:"last_run_at,omitempty"`
+	LastError         string   `json:"last_error,omitempty"`
 }
 
 var kamiRenewBackoff = []time.Duration{
@@ -30,27 +36,33 @@ var kamiRenewBackoff = []time.Duration{
 	2 * time.Hour,
 }
 
+type kamiLoginProgressExecutor func(acct *accounts.Account, defaultProxy string, headless bool, onPhase KamiPhaseReporter) KamiLoginOutcome
+
 // KamiRenewWorker 单消费者串行卡密自动续期 Worker，同一时刻最多启动一个 chromedp 浏览器实例。
 type KamiRenewWorker struct {
-	pool         *accounts.Pool
-	defaultProxy string
-	headless     bool
-	persistFn    func() error
-	auditLog     *audit.RingBuffer
-	loginFn      KamiLoginExecutor
-	backoff      []time.Duration
+	pool            *accounts.Pool
+	defaultProxy    string
+	headless        bool
+	persistFn       func() error
+	auditLog        *audit.RingBuffer
+	loginFn         KamiLoginExecutor
+	loginProgressFn kamiLoginProgressExecutor
+	backoff         []time.Duration
 
-	mu             sync.Mutex
-	queue          []*accounts.Account
-	queued         map[string]bool
-	runningID      string
-	runningEmail   string
-	totalSucceeded int64
-	totalFailed    int64
-	lastRunAt      time.Time
-	lastError      string
-	started        bool
-	closed         bool
+	mu                sync.Mutex
+	queue             []*accounts.Account
+	queued            map[string]bool
+	runningID         string
+	runningEmail      string
+	runningPhase      string
+	runningPhaseLabel string
+	runningStartedAt  time.Time
+	totalSucceeded    int64
+	totalFailed       int64
+	lastRunAt         time.Time
+	lastError         string
+	started           bool
+	closed            bool
 
 	notifyCh chan struct{}
 	stopCh   chan struct{}
@@ -66,22 +78,27 @@ func NewKamiRenewWorker(
 	auditLog *audit.RingBuffer,
 ) *KamiRenewWorker {
 	return &KamiRenewWorker{
-		pool:         pool,
-		defaultProxy: defaultProxy,
-		headless:     headless,
-		persistFn:    persistFn,
-		auditLog:     auditLog,
-		loginFn:      defaultKamiLoginExecutor,
-		backoff:      kamiRenewBackoff,
-		queued:       make(map[string]bool),
-		notifyCh:     make(chan struct{}, 1),
-		stopCh:       make(chan struct{}),
-		doneCh:       make(chan struct{}),
+		pool:            pool,
+		defaultProxy:    defaultProxy,
+		headless:        headless,
+		persistFn:       persistFn,
+		auditLog:        auditLog,
+		loginFn:         defaultKamiLoginExecutor,
+		loginProgressFn: defaultKamiLoginProgressExecutor,
+		backoff:         kamiRenewBackoff,
+		queued:          make(map[string]bool),
+		notifyCh:        make(chan struct{}, 1),
+		stopCh:          make(chan struct{}),
+		doneCh:          make(chan struct{}),
 	}
 }
 
 func defaultKamiLoginExecutor(acct *accounts.Account, defaultProxy string, headless bool) KamiLoginOutcome {
-	res, err := RunKamiPlaywrightLogin([]*accounts.Account{acct}, defaultProxy, headless)
+	return defaultKamiLoginProgressExecutor(acct, defaultProxy, headless, nil)
+}
+
+func defaultKamiLoginProgressExecutor(acct *accounts.Account, defaultProxy string, headless bool, onPhase KamiPhaseReporter) KamiLoginOutcome {
+	res, err := RunKamiPlaywrightLoginWithProgress([]*accounts.Account{acct}, defaultProxy, headless, onPhase)
 	if err != nil {
 		return KamiLoginOutcome{Email: acct.Email, OK: false, Error: err.Error()}
 	}
@@ -98,6 +115,7 @@ func (w *KamiRenewWorker) SetLoginExecutor(fn KamiLoginExecutor) {
 	}
 	w.mu.Lock()
 	w.loginFn = fn
+	w.loginProgressFn = nil
 	w.mu.Unlock()
 }
 
@@ -131,6 +149,63 @@ func (w *KamiRenewWorker) Stop() {
 	}
 }
 
+func (w *KamiRenewWorker) setActionState(acct *accounts.Account, activeAction, phase, phaseLabel string, queuePos int, startedAt time.Time) {
+	if acct == nil {
+		return
+	}
+	if w.pool != nil {
+		w.pool.SetAccountActionState(acct.ID, activeAction, phase, phaseLabel, "", queuePos, startedAt)
+		return
+	}
+	acct.ActiveAction = activeAction
+	acct.ActionPhase = phase
+	acct.ActionPhaseLabel = phaseLabel
+	acct.ActionQueuePos = queuePos
+	acct.ActionTaskID = ""
+	acct.ActionStartedAt = startedAt
+}
+
+func (w *KamiRenewWorker) setRenewState(acct *accounts.Account, state string) {
+	if acct == nil {
+		return
+	}
+	if w.pool != nil {
+		w.pool.SetAccountRenewState(acct.ID, state)
+		return
+	}
+	acct.RenewState = state
+}
+
+func (w *KamiRenewWorker) finishAction(acct *accounts.Account, ok bool, summary string) {
+	if acct == nil {
+		return
+	}
+	if w.pool != nil {
+		w.pool.FinishAccountAction(acct.ID, "renew", ok, summary)
+		return
+	}
+	acct.ActiveAction = ""
+	acct.ActionPhase = ""
+	acct.ActionPhaseLabel = ""
+	acct.ActionQueuePos = 0
+	acct.ActionTaskID = ""
+	acct.ActionStartedAt = time.Time{}
+	acct.LastAction = "renew"
+	acct.LastActionOK = ok
+	acct.LastActionSummary = summary
+	acct.LastActionAt = time.Now()
+}
+
+func (w *KamiRenewWorker) refreshQueuePositionsLocked() {
+	for idx, item := range w.queue {
+		if item == nil {
+			continue
+		}
+		w.setRenewState(item, "queued")
+		w.setActionState(item, "renew", "queued", "排队等待自动续期", idx+1, time.Time{})
+	}
+}
+
 // Enqueue 将满足条件的卡密账号加入串行续期队列（按账号 ID 去重并遵守失败退避期）。
 func (w *KamiRenewWorker) Enqueue(acct *accounts.Account, reason string) bool {
 	if w == nil || acct == nil {
@@ -143,6 +218,9 @@ func (w *KamiRenewWorker) Enqueue(acct *accounts.Account, reason string) bool {
 		return false
 	}
 	if acct.Status == accounts.StatusDisabled || acct.Status == accounts.StatusBanned {
+		return false
+	}
+	if acct.ActiveAction == "login" {
 		return false
 	}
 
@@ -160,9 +238,9 @@ func (w *KamiRenewWorker) Enqueue(acct *accounts.Account, reason string) bool {
 		return false
 	}
 
-	acct.RenewState = "queued"
 	w.queue = append(w.queue, acct)
 	w.queued[acct.ID] = true
+	w.refreshQueuePositionsLocked()
 	if reason != "" {
 		log.Printf("[kami-worker] enqueued %s (%s)", acct.Email, reason)
 	}
@@ -171,6 +249,50 @@ func (w *KamiRenewWorker) Enqueue(acct *accounts.Account, reason string) bool {
 	default:
 	}
 	return true
+}
+
+// CancelQueued 从自动续期等待队列中移除指定账号（如果尚未开始运行）。
+func (w *KamiRenewWorker) CancelQueued(accountID string) bool {
+	if w == nil || strings.TrimSpace(accountID) == "" {
+		return false
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if !w.queued[accountID] {
+		return false
+	}
+	next := make([]*accounts.Account, 0, len(w.queue))
+	var removedAcct *accounts.Account
+	for _, item := range w.queue {
+		if item != nil && item.ID == accountID {
+			removedAcct = item
+			continue
+		}
+		next = append(next, item)
+	}
+	w.queue = next
+	delete(w.queued, accountID)
+	w.refreshQueuePositionsLocked()
+	if removedAcct != nil {
+		if w.pool != nil {
+			w.pool.ClearAccountQueuedAction(accountID, "已取消自动续期排队")
+			w.pool.SetAccountRenewState(accountID, "idle")
+		} else {
+			removedAcct.ActiveAction = ""
+			removedAcct.ActionPhase = ""
+			removedAcct.ActionPhaseLabel = ""
+			removedAcct.ActionQueuePos = 0
+			removedAcct.ActionTaskID = ""
+			removedAcct.ActionStartedAt = time.Time{}
+			removedAcct.RenewState = "idle"
+			removedAcct.LastAction = "renew"
+			removedAcct.LastActionOK = false
+			removedAcct.LastActionSummary = "已取消自动续期排队"
+			removedAcct.LastActionAt = time.Now()
+		}
+	}
+	return removedAcct != nil
 }
 
 // EnqueueDue 扫描号池中过期或临期（< within）的卡密账号并入队。
@@ -196,13 +318,26 @@ func (w *KamiRenewWorker) Stats() KamiWorkerStats {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
+	queuedIDs := make([]string, 0, len(w.queue))
+	for _, item := range w.queue {
+		if item != nil {
+			queuedIDs = append(queuedIDs, item.ID)
+		}
+	}
 	st := KamiWorkerStats{
-		Running:        w.runningID != "",
-		RunningEmail:   w.runningEmail,
-		QueueLength:    len(w.queue),
-		TotalSucceeded: w.totalSucceeded,
-		TotalFailed:    w.totalFailed,
-		LastError:      w.lastError,
+		Running:           w.runningID != "",
+		RunningAccountID:  w.runningID,
+		RunningEmail:      w.runningEmail,
+		RunningPhase:      w.runningPhase,
+		RunningPhaseLabel: w.runningPhaseLabel,
+		QueueLength:       len(w.queue),
+		QueuedAccountIDs:  queuedIDs,
+		TotalSucceeded:    w.totalSucceeded,
+		TotalFailed:       w.totalFailed,
+		LastError:         w.lastError,
+	}
+	if !w.runningStartedAt.IsZero() {
+		st.RunningStartedAt = w.runningStartedAt.Format(time.RFC3339)
 	}
 	if !w.lastRunAt.IsZero() {
 		st.LastRunAt = w.lastRunAt.Format(time.RFC3339)
@@ -236,22 +371,49 @@ func (w *KamiRenewWorker) popNext() *accounts.Account {
 	w.queue[0] = nil
 	w.queue = w.queue[1:]
 	delete(w.queued, acct.ID)
+	startedAt := time.Now()
 	w.runningID = acct.ID
 	w.runningEmail = acct.Email
+	w.runningPhase = "launch_browser"
+	w.runningPhaseLabel = KamiPhaseLabel("launch_browser")
+	w.runningStartedAt = startedAt
+	w.refreshQueuePositionsLocked()
+	w.setRenewState(acct, "running")
+	w.setActionState(acct, "renew", w.runningPhase, w.runningPhaseLabel, 0, startedAt)
 	return acct
 }
 
 func (w *KamiRenewWorker) processOne(acct *accounts.Account) {
-	acct.RenewState = "running"
-
 	w.mu.Lock()
 	loginFn := w.loginFn
+	loginProgressFn := w.loginProgressFn
 	defaultProxy := w.defaultProxy
 	headless := w.headless
 	backoffTable := w.backoff
+	startedAt := w.runningStartedAt
 	w.mu.Unlock()
 
-	outcome := loginFn(acct, defaultProxy, headless)
+	onPhase := func(accountID, phase, label string) {
+		if label == "" {
+			label = KamiPhaseLabel(phase)
+		}
+		w.mu.Lock()
+		if w.runningID == accountID {
+			w.runningPhase = phase
+			w.runningPhaseLabel = label
+		}
+		w.mu.Unlock()
+		if acct != nil && acct.ID == accountID {
+			w.setActionState(acct, "renew", phase, label, 0, startedAt)
+		}
+	}
+
+	var outcome KamiLoginOutcome
+	if loginProgressFn != nil {
+		outcome = loginProgressFn(acct, defaultProxy, headless, onPhase)
+	} else {
+		outcome = loginFn(acct, defaultProxy, headless)
+	}
 	now := time.Now()
 
 	if outcome.OK && outcome.AccessToken != "" {
@@ -266,15 +428,20 @@ func (w *KamiRenewWorker) processOne(acct *accounts.Account) {
 		if acct.ExpiresAt.IsZero() && outcome.ExpiresAt > 0 {
 			acct.ExpiresAt = time.Unix(outcome.ExpiresAt, 0)
 		}
-		acct.Status = accounts.StatusActive
+		if w.pool != nil {
+			w.pool.SetStatus(acct.ID, accounts.StatusActive)
+		} else {
+			acct.Status = accounts.StatusActive
+		}
 		acct.CooldownUntil = time.Time{}
 		acct.ImageCooldownUntil = time.Time{}
-		acct.RenewState = "idle"
+		w.setRenewState(acct, "idle")
 		acct.RenewFailures = 0
 		acct.RenewCooldownUntil = time.Time{}
 		acct.LastRenewError = ""
 		acct.LastError = ""
 		acct.LastChecked = now
+		w.finishAction(acct, true, "后台自动续期成功，Token 已更新")
 
 		if w.persistFn != nil {
 			if err := w.persistFn(); err != nil {
@@ -291,6 +458,9 @@ func (w *KamiRenewWorker) processOne(acct *accounts.Account) {
 		w.lastError = ""
 		w.runningID = ""
 		w.runningEmail = ""
+		w.runningPhase = ""
+		w.runningPhaseLabel = ""
+		w.runningStartedAt = time.Time{}
 		w.mu.Unlock()
 		return
 	}
@@ -298,6 +468,31 @@ func (w *KamiRenewWorker) processOne(acct *accounts.Account) {
 	errMsg := outcome.Error
 	if errMsg == "" {
 		errMsg = "kami auto renew failed"
+	}
+	if chatgpt.LooksLikeAccountBanned(0, errMsg) {
+		if w.pool != nil {
+			w.pool.MarkBanned(acct, errMsg)
+		} else {
+			acct.Status = accounts.StatusBanned
+			acct.LastError = errMsg
+			acct.RenewState = ""
+			acct.RenewCooldownUntil = time.Time{}
+		}
+		w.finishAction(acct, false, "账号已被封禁: "+summarizeActionError(errMsg))
+		if w.auditLog != nil {
+			w.auditLog.RecordEvent("/internal/account-banned", acct.Email, acct.Proxy, "kami_renew_banned", errMsg)
+		}
+		w.mu.Lock()
+		w.totalFailed++
+		w.lastRunAt = now
+		w.lastError = errMsg
+		w.runningID = ""
+		w.runningEmail = ""
+		w.runningPhase = ""
+		w.runningPhaseLabel = ""
+		w.runningStartedAt = time.Time{}
+		w.mu.Unlock()
+		return
 	}
 	acct.RenewFailures++
 	idx := acct.RenewFailures - 1
@@ -307,10 +502,11 @@ func (w *KamiRenewWorker) processOne(acct *accounts.Account) {
 	if idx >= len(backoffTable) {
 		idx = len(backoffTable) - 1
 	}
-	acct.RenewState = "cooldown"
+	w.setRenewState(acct, "cooldown")
 	acct.RenewCooldownUntil = now.Add(backoffTable[idx])
 	acct.LastRenewError = errMsg
 	acct.LastChecked = now
+	w.finishAction(acct, false, "自动续期失败: "+summarizeActionError(errMsg))
 
 	if w.auditLog != nil {
 		w.auditLog.RecordEvent("/internal/kami-renew", acct.Email, acct.Proxy, "renew_failed", errMsg)
@@ -322,5 +518,8 @@ func (w *KamiRenewWorker) processOne(acct *accounts.Account) {
 	w.lastError = errMsg
 	w.runningID = ""
 	w.runningEmail = ""
+	w.runningPhase = ""
+	w.runningPhaseLabel = ""
+	w.runningStartedAt = time.Time{}
 	w.mu.Unlock()
 }

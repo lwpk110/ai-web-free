@@ -3,6 +3,7 @@ import {
   AlertCircle,
   Check,
   CheckCircle2,
+  Clock,
   Copy,
   Download,
   Info,
@@ -68,9 +69,9 @@ export const NAV_ITEMS: NavItemConfig[] = [
   {
     id: "chat",
     group: "studio",
-    label: "对话 · OpenUI",
+    label: "AI Copilot · 诊断",
     hash: "#/chat",
-    description: "Thesys OpenUI 声明式流式界面生成与 IndexedDB 会话持久化",
+    description: "多轮对话、平台故障诊断自愈与 Thesys OpenUI 混合生成",
   },
   {
     id: "image",
@@ -96,6 +97,38 @@ export function formatRemainingCountdown(
   const hours = Math.floor(mins / 60);
   const remMins = mins % 60;
   return `${hours}h ${remMins}m`;
+}
+
+export function formatElapsedSeconds(
+  isoString?: string,
+  nowMs: number = Date.now()
+): string {
+  if (!isoString) return "";
+  const started = Date.parse(isoString);
+  if (Number.isNaN(started)) return "";
+  const diffSec = Math.max(0, Math.floor((nowMs - started) / 1000));
+  if (diffSec < 60) return `${diffSec}s`;
+  const mins = Math.floor(diffSec / 60);
+  const secs = diffSec % 60;
+  return `${mins}m ${String(secs).padStart(2, "0")}s`;
+}
+
+export function formatRelativeTimeAgo(
+  isoString?: string,
+  nowMs: number = Date.now()
+): string {
+  if (!isoString) return "";
+  const ts = Date.parse(isoString);
+  if (Number.isNaN(ts)) return "";
+  const diffSec = Math.max(0, Math.floor((nowMs - ts) / 1000));
+  if (diffSec < 15) return "刚刚";
+  if (diffSec < 60) return `${diffSec} 秒前`;
+  const mins = Math.floor(diffSec / 60);
+  if (mins < 60) return `${mins} 分钟前`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours} 小时前`;
+  const days = Math.floor(hours / 24);
+  return `${days} 天前`;
 }
 
 export function formatClockTime(isoString?: string): string {
@@ -164,7 +197,23 @@ export const StatusBadge: React.FC<{
   status: string;
   imageLimited?: boolean;
   renewState?: string;
-}> = ({ status, imageLimited, renewState }) => {
+  activeAction?: string;
+  actionPhase?: string;
+  actionPhaseLabel?: string;
+  actionQueuePos?: number;
+  actionStartedAt?: string;
+  nowMs?: number;
+}> = ({
+  status,
+  imageLimited,
+  renewState,
+  activeAction,
+  actionPhase,
+  actionPhaseLabel,
+  actionQueuePos,
+  actionStartedAt,
+  nowMs,
+}) => {
   const effectiveKey =
     imageLimited && status === "active" ? "image_limited" : status;
   const spec = STATUS_STYLE_MAP[effectiveKey] || {
@@ -172,6 +221,44 @@ export const StatusBadge: React.FC<{
     cls: "z-muted z-border z-text-muted",
     dot: "status-dot-muted",
   };
+  const liveAction =
+    activeAction ||
+    (renewState === "running" || renewState === "queued" ? "renew" : "");
+  const isQueued = actionPhase === "queued" || (!activeAction && renewState === "queued");
+  const elapsed = !isQueued ? formatElapsedSeconds(actionStartedAt, nowMs) : "";
+
+  let actionBadgeText = "";
+  let actionBadgeCls = "z-pill-info";
+  if (liveAction) {
+    if (isQueued) {
+      const posSuffix = actionQueuePos && actionQueuePos > 0 ? ` #${actionQueuePos}` : "";
+      if (liveAction === "probe") {
+        actionBadgeText = `等待测活`;
+      } else if (liveAction === "renew") {
+        actionBadgeText = `续期排队${posSuffix}`;
+      } else {
+        actionBadgeText = `重登排队${posSuffix}`;
+      }
+      actionBadgeCls = "z-pill-warn";
+    } else {
+      const fallback =
+        liveAction === "probe"
+          ? "测活中"
+          : liveAction === "refresh"
+            ? "续期刷新中"
+            : liveAction === "renew"
+              ? "自动续期中"
+              : "重登中";
+      actionBadgeText = actionPhaseLabel || fallback;
+      if (elapsed) {
+        actionBadgeText = `${actionBadgeText} · ${elapsed}`;
+      }
+      if (actionPhase === "waiting_challenge") {
+        actionBadgeCls = "z-pill-warn";
+      }
+    }
+  }
+
   return (
     <div className="inline-flex flex-wrap items-center gap-1.5">
       <span
@@ -180,13 +267,19 @@ export const StatusBadge: React.FC<{
         <span className={spec.dot} />
         <span>{spec.label}</span>
       </span>
-      {(renewState === "queued" || renewState === "running") && (
-        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full border z-pill-info text-xs font-medium whitespace-nowrap">
-          <Loader2 size={11} className="animate-spin" />
-          <span>{renewState === "running" ? "卡密续期中" : "续期排队"}</span>
+      {liveAction && (
+        <span
+          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full border ${actionBadgeCls} text-xs font-medium whitespace-nowrap`}
+        >
+          {isQueued ? (
+            <Clock size={11} className="shrink-0" />
+          ) : (
+            <Loader2 size={11} className="animate-spin shrink-0" />
+          )}
+          <span>{actionBadgeText}</span>
         </span>
       )}
-      {renewState === "failed" && (
+      {!liveAction && (renewState === "cooldown" || renewState === "failed") && (
         <span className="inline-flex items-center px-2 py-0.5 rounded-full border z-pill-danger text-xs font-medium whitespace-nowrap">
           续期退避
         </span>

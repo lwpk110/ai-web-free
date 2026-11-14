@@ -254,4 +254,13 @@ func TestListModelsIncludeBuiltins(t *testing.T) {
 			t.Errorf("model %q count = %d, want 1 (body=%s)", want, counts[want], w.Body.String())
 		}
 	}
+
+	// use_cache=true should reuse pool cache without additional upstream calls
+	wCache := httptest.NewRecorder()
+	cCache, _ := gin.CreateTestContext(wCache)
+	cCache.Request = httptest.NewRequest(http.MethodGet, "/v1/models?include_builtins=true&use_cache=true", nil)
+	h.ListModels(cCache)
+	if wCache.Code != 200 || client.calls != 1 || !strings.Contains(wCache.Body.String(), `"id":"gpt-5-6"`) {
+		t.Fatalf("expected cached /v1/models response with calls=1, got code=%d calls=%d body=%s", wCache.Code, client.calls, wCache.Body.String())
+	}
 }

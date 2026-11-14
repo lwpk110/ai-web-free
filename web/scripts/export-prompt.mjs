@@ -46,6 +46,26 @@ const ImageStudioCard = defineComponent({
   component: () => null,
 });
 
+const PlatformDiagnosisCard = defineComponent({
+  name: "PlatformDiagnosisCard",
+  description:
+    "Displays live 5-category platform root-cause diagnostics (account bans, 403 WAF/proxy blocks, 401 token expiry, 429 rate limits, proxy circuit-breakers) with one-click safe repairs and confirmed banned-account cleanup.",
+  props: z.object({
+    title: z.string().optional(),
+    focus: z
+      .enum([
+        "all",
+        "banned",
+        "waf_proxy_block",
+        "token_expired",
+        "rate_limit",
+        "proxy_breaker",
+      ])
+      .optional(),
+  }),
+  component: () => null,
+});
+
 const baseCard = openuiChatLibrary.components.Card;
 const origChildrenOptions =
   baseCard.props.shape.children._zod.def.element._zod.def.options;
@@ -60,6 +80,7 @@ const ExtendedCard = defineComponent({
         PoolOverviewCard.ref,
         AccountDiagnosticTable.ref,
         ImageStudioCard.ref,
+        PlatformDiagnosisCard.ref,
       ])
     ),
     sources: baseCard.props.shape.sources,
@@ -77,6 +98,7 @@ const aiWebFreeLibrary = createLibrary({
     PoolOverviewCard,
     AccountDiagnosticTable,
     ImageStudioCard,
+    PlatformDiagnosisCard,
   ],
   componentGroups: [
     ...openuiChatComponentGroups,
@@ -86,6 +108,7 @@ const aiWebFreeLibrary = createLibrary({
         "PoolOverviewCard",
         "AccountDiagnosticTable",
         "ImageStudioCard",
+        "PlatformDiagnosisCard",
       ],
     },
   ],
@@ -94,11 +117,12 @@ const aiWebFreeLibrary = createLibrary({
 const prompt = aiWebFreeLibrary.prompt({
   ...openuiChatPromptOptions,
   preamble:
-    "You are the AI-Web-Free Generative UI Assistant powered by Thesys OpenUI Lang. Always respond with valid OpenUI Lang starting with `root = Card([...])`. Combine built-in OpenUI components (CardHeader, TextContent, BarChart, LineChart, PieChart, Table, Tabs, Form, Callout, CodeBlock) and custom AI-Web-Free components (PoolOverviewCard, AccountDiagnosticTable, ImageStudioCard) to build rich, interactive interfaces.",
+    "You are the AI-Web-Free Generative UI & Operations Copilot powered by Thesys OpenUI Lang. Always respond with valid OpenUI Lang starting with `root = Card([...])`. Combine built-in OpenUI components (CardHeader, TextContent, BarChart, LineChart, PieChart, Table, Tabs, Form, Callout, CodeBlock) and custom AI-Web-Free components (PoolOverviewCard, AccountDiagnosticTable, ImageStudioCard, PlatformDiagnosisCard) to build rich, interactive interfaces.",
   additionalRules: [
     ...(openuiChatPromptOptions.additionalRules || []),
-    "When the user asks about account pool status, health metrics, or provider overview, include PoolOverviewCard(\"chatgpt\", \"ChatGPT 免费号池实时健康大盘\") and/or AccountDiagnosticTable(\"chatgpt\") inside Card.",
-    "When the user wants to generate or preview an image, include ImageStudioCard(prompt, \"gpt-image-2.5-sunburst\", \"1024x1024\", \"hd\") inside Card.",
+    'When the user asks to diagnose platform issues, pool circuit-breakers, banned accounts, 403 WAF blocks, or 401 expiry, include PlatformDiagnosisCard("全平台异常根因诊断与自愈台", "all") inside Card.',
+    'When the user asks about account pool status, health metrics, or provider overview, include PoolOverviewCard("chatgpt", "ChatGPT 免费号池实时健康大盘") and/or AccountDiagnosticTable("chatgpt") inside Card.',
+    'When the user wants to generate or preview an image, include ImageStudioCard(prompt, "gpt-image-2.5-sunburst", "1024x1024", "hd") inside Card.',
   ],
 });
 

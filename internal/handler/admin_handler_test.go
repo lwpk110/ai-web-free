@@ -2,9 +2,11 @@ package handler
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +15,7 @@ import (
 	"ai-web-free/internal/audit"
 	"ai-web-free/internal/chatgpt"
 	"ai-web-free/internal/config"
+	"ai-web-free/internal/promptplaza"
 	"ai-web-free/internal/provider"
 	"ai-web-free/internal/proxy"
 
@@ -360,5 +363,504 @@ func TestAdminLogsFilterAndAccountsExportRedaction(t *testing.T) {
 	router.ServeHTTP(w, req)
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "test-access-token") {
 		t.Fatalf("expected access_tokens output, got %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestAdminDiagnosticsAndRepair(t *testing.T) {
+	router, pool, pxPool, auditLog := setupTestAdminRouter(t, "", []string{"http://127.0.0.1:18081", "http://127.0.0.1:18082"})
+
+	// 将初始账号标为永久封禁，并添加 403 WAF 与 401 过期账号，制造 active == 0 故障场景
+	for _, a := range pool.AllPersistentAccounts() {
+		pool.MarkBanned(a, "HTTP 403: account_deactivated")
+	}
+
+	wafAcct := accounts.CreateAccount("eyJ.waf.tok", accounts.TypeFree, accounts.DefaultProfiles)
+	wafAcct.ID = "acc-waf-2"
+	wafAcct.Email = "waf-2@example.com"
+	wafAcct.Proxy = "http://127.0.0.1:18081"
+	wafAcct.Status = accounts.StatusActive
+	pool.AddAccount(wafAcct)
+	pool.RecordProxyBlock(wafAcct, 2*time.Minute, "HTTP 403: Just a moment Cloudflare cf-ray")
+	pxPool.ReportFailure("http://127.0.0.1:18081", "HTTP 403 WAF")
+
+	expAcct := accounts.CreateAccount("eyJ.exp.tok", accounts.TypeFree, accounts.DefaultProfiles)
+	expAcct.ID = "acc-exp-3"
+	expAcct.Email = "exp-3@example.com"
+	expAcct.Status = accounts.StatusActive
+	pool.AddAccount(expAcct)
+	pool.MarkExpired(expAcct, "HTTP 401: token_expired")
+
+	auditLog.RecordEvent("/v1/chat/completions", "waf-2@example.com", "http://127.0.0.1:18081", "waf_403", "Cloudflare challenge")
+
+	// 1. 查询全平台诊断报告
+	req := httptest.NewRequest(http.MethodGet, "/admin/api/v1/diagnostics", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 on diagnostics, got %d body=%s", w.Code, w.Body.String())
+	}
+	var diag DiagnosticsReport
+	if err := json.Unmarshal(w.Body.Bytes(), &diag); err != nil {
+		t.Fatalf("unmarshal diagnostics: %v", err)
+	}
+	if diag.OverallSeverity != "critical" || diag.HealthScore > 20 {
+		t.Fatalf("expected critical severity & low health score when active==0, got sev=%s score=%d", diag.OverallSeverity, diag.HealthScore)
+	}
+	if !strings.Contains(diag.MarkdownReport, "平台全链路诊断报告") {
+		t.Fatalf("expected non-empty chinese markdown_report, got %s", diag.MarkdownReport)
+	}
+	seenCats := map[string]bool{}
+	for _, rc := range diag.RootCauses {
+		seenCats[rc.Category] = true
+	}
+	for _, reqCat := range []string{"banned", "waf_proxy_block", "token_expired"} {
+		if !seenCats[reqCat] {
+			t.Fatalf("expected root cause category %s in report, got %+v", reqCat, diag.RootCauses)
+		}
+	}
+
+	// 2. 删除封禁账号缺少 confirm=true 必须拒绝 (400)
+	req = httptest.NewRequest(http.MethodPost, "/admin/api/v1/diagnostics/repair", strings.NewReader(`{"action":"delete_banned","confirm":false}`))
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 when delete_banned without confirm, got %d body=%s", w.Code, w.Body.String())
+	}
+
+	// 3. confirm=true 后允许清理封禁账号
+	req = httptest.NewRequest(http.MethodPost, "/admin/api/v1/diagnostics/repair", strings.NewReader(`{"action":"delete_banned","confirm":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 on confirmed delete_banned, got %d body=%s", w.Code, w.Body.String())
+	}
+	if pool.Stats().Banned != 0 {
+		t.Fatalf("expected banned count 0 after deletion, got %d", pool.Stats().Banned)
+	}
+
+	// 4. 在 0 可用账号状态下执行 smart_heal 应自动补充匿名 UUID 恢复可用态
+	req = httptest.NewRequest(http.MethodPost, "/admin/api/v1/diagnostics/repair", strings.NewReader(`{"action":"smart_heal"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 on smart_heal, got %d body=%s", w.Code, w.Body.String())
+	}
+	var repairResp struct {
+		OK          bool              `json:"ok"`
+		Details     map[string]int    `json:"details"`
+		Diagnostics DiagnosticsReport `json:"diagnostics"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &repairResp); err != nil {
+		t.Fatalf("unmarshal smart_heal resp: %v", err)
+	}
+	if !repairResp.OK || repairResp.Diagnostics.PoolStats.Active < 3 {
+		t.Fatalf("expected smart_heal to restore >=3 active accounts via emergency free_uuid, got active=%d resp=%s",
+			repairResp.Diagnostics.PoolStats.Active, w.Body.String())
+	}
+}
+
+func TestAdminTasksInlineOverviewCancelDismissAndAsyncProbe(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"models":[{"slug":"gpt-4o","title":"GPT-4o"}]}`))
+	}))
+	defer upstream.Close()
+
+	origBaseURL := chatgpt.BaseURL
+	chatgpt.BaseURL = upstream.URL + "/backend-api"
+	defer func() { chatgpt.BaseURL = origBaseURL }()
+
+	pool := accounts.NewPool(nil)
+	makeKami := func(id, email string) *accounts.Account {
+		a := accounts.CreateAccount("", accounts.TypeFree, accounts.DefaultProfiles)
+		a.ID = id
+		a.Email = email
+		a.Password = "secret"
+		a.TOTPSecret = "JBSWY3DPEHPK3PXP"
+		a.Status = accounts.StatusExpired
+		pool.AddAccount(a)
+		return a
+	}
+	a1 := makeKami("adm-1", "one@example.com")
+	a2 := makeKami("adm-2", "two@example.com")
+
+	cfg := &config.Config{KamiAutoRenew: false}
+	cg := provider.NewChatGPTProvider(pool, nil, cfg, nil)
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	cg.SetKamiLoginExecutor(func(targets []*accounts.Account, _ string, _ bool, onPhase provider.KamiPhaseReporter) (map[string]provider.KamiLoginOutcome, error) {
+		out := make(map[string]provider.KamiLoginOutcome, len(targets))
+		for _, acct := range targets {
+			if onPhase != nil {
+				onPhase(acct.ID, "wait_session_token", "提取会话 Token")
+			}
+			select {
+			case started <- struct{}{}:
+			default:
+			}
+			<-release
+			out[strings.ToLower(acct.Email)] = provider.KamiLoginOutcome{
+				Email:       acct.Email,
+				OK:          true,
+				AccessToken: "tok-" + acct.ID,
+				ExpiresAt:   time.Now().Add(5 * 24 * time.Hour).Unix(),
+			}
+		}
+		return out, nil
+	})
+
+	reg := provider.NewRegistry()
+	provider.RegisterDefaultProviders(reg, cg)
+	auditLog := audit.NewRingBuffer(50, "", 0)
+	worker := provider.NewKamiRenewWorker(pool, "", true, nil, auditLog)
+	cg.SetKamiWorker(worker)
+	cg.SetAuditLog(auditLog)
+
+	router := RegisterRouterWithDeps(RouterDeps{
+		AccountPool: pool,
+		Registry:    reg,
+		Config:      cfg,
+		KamiWorker:  worker,
+		AuditLog:    auditLog,
+	})
+
+	// 1. Trigger single-account login via POST /accounts/:id/action with headless=false
+	req := httptest.NewRequest(http.MethodPost, "/admin/api/v1/providers/chatgpt/accounts/"+a1.ID+"/action", strings.NewReader(`{"action":"login","headless":false}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 on single login action, got %d body=%s", w.Code, w.Body.String())
+	}
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for mock login")
+	}
+
+	// Queue second account dynamically while first is running
+	req = httptest.NewRequest(http.MethodPost, "/admin/api/v1/providers/chatgpt/accounts/"+a2.ID+"/action", strings.NewReader(`{"action":"login","headless":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 queueing second account, got %d body=%s", w.Code, w.Body.String())
+	}
+
+	// 2. GET /overview & GET /accounts inline current login_task & phase
+	req = httptest.NewRequest(http.MethodGet, "/admin/api/v1/overview", nil)
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	var ov struct {
+		LoginTask *provider.KamiLoginTask `json:"login_task"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &ov); err != nil || ov.LoginTask == nil || ov.LoginTask.CurrentPhase != "wait_session_token" {
+		t.Fatalf("expected inline login_task in overview with wait_session_token, got body=%s", w.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/admin/api/v1/providers/chatgpt/accounts", nil)
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	var accResp struct {
+		Accounts  []accounts.AccountSnapshot `json:"accounts"`
+		LoginTask *provider.KamiLoginTask    `json:"login_task"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &accResp); err != nil || accResp.LoginTask == nil || len(accResp.Accounts) != 2 {
+		t.Fatalf("expected inline login_task & 2 accounts, got body=%s", w.Body.String())
+	}
+
+	// 3. Cancel queued a2 via POST .../kami-login/cancel
+	req = httptest.NewRequest(http.MethodPost, "/admin/api/v1/providers/chatgpt/accounts/kami-login/cancel", strings.NewReader(`{"account_id":"`+a2.ID+`"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 on cancel, got %d body=%s", w.Code, w.Body.String())
+	}
+
+	close(release)
+	deadline := time.Now().Add(2 * time.Second)
+	var taskID = ov.LoginTask.ID
+	for time.Now().Before(deadline) {
+		if snap, ok := cg.KamiLoginTaskSnapshot(taskID); ok && snap.Status == "completed" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// 4. Dismiss completed task via POST .../tasks/dismiss
+	req = httptest.NewRequest(http.MethodPost, "/admin/api/v1/providers/chatgpt/tasks/dismiss", strings.NewReader(`{"kind":"login","task_id":"`+taskID+`"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 on dismiss, got %d body=%s", w.Code, w.Body.String())
+	}
+	if cg.ActiveKamiLoginTask() != nil {
+		t.Fatalf("expected nil ActiveKamiLoginTask after HTTP dismiss")
+	}
+
+	// 5. Async probe-all returns 202 and transitions to completed
+	req = httptest.NewRequest(http.MethodPost, "/admin/api/v1/providers/chatgpt/pool/probe-all?async=true", nil)
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 on async probe-all, got %d body=%s", w.Code, w.Body.String())
+	}
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		pt := cg.ActiveProbeTask()
+		if pt != nil && pt.Status == "completed" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	pt := cg.ActiveProbeTask()
+	if pt == nil || pt.Status != "completed" || pt.Probed != 2 {
+		t.Fatalf("expected completed probe task for 2 accounts, got %+v", pt)
+	}
+}
+
+func TestAdminPromptPlazaEndpoints(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	mockCivitai := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"items": []map[string]any{
+				{
+					"id":     777,
+					"url":    "https://cdn.example.test/civitai-777.jpg",
+					"width":  1024,
+					"height": 1024,
+					"nsfw":   false,
+					"stats":  map[string]int{"likeCount": 250, "heartCount": 90},
+					"meta":   map[string]string{"prompt": "Minimalist glass coffee table with golden morning sunlight"},
+				},
+			},
+		})
+	}))
+	defer mockCivitai.Close()
+
+	mockEmpty := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{})
+	}))
+	defer mockEmpty.Close()
+
+	plazaMgr := promptplaza.NewManager(promptplaza.Options{
+		Endpoints: promptplaza.Endpoints{
+			CivitaiURL:     mockCivitai.URL,
+			LexicaURL:      mockEmpty.URL,
+			RedditURL:      mockEmpty.URL,
+			HuggingFaceURL: mockEmpty.URL,
+			LexicaTopics:   []string{"glass"},
+		},
+		ChatExecutor: func(ctx context.Context, sys, user string, useWebSearch bool) (string, error) {
+			if useWebSearch {
+				return `[{"title_zh":"AI 趋势测试卡","category":"3D 与微缩","prompt_en":"Tiny glowing crystal cube with [主体] inside","prompt_zh":"内部封装微缩[主体]的发光晶体方块","recommended_mode":"generations","recommended_model":"gpt-image-2.5-sunburst","recommended_size":"1024x1024","variables":[{"key":"主体","label":"核心主体","default_value":"floating bonsai","options":["floating bonsai"]}]}]`, nil
+			}
+			if strings.Contains(user, "创意想法：") {
+				return `{"title_zh":"霓虹猫咪咖啡馆","category":"摄影写实","prompt_en":"Cyberpunk ginger cat sipping espresso in neon rain, [光影材质]","prompt_zh":"霓虹雨夜喝咖啡的赛博朋克橘猫，[光影材质]","recommended_mode":"generations","recommended_model":"gpt-image-2.5-sunburst","recommended_size":"1792x1024","variables":[{"key":"光影材质","label":"氛围","default_value":"wet reflections","options":["wet reflections"]}]}`, nil
+			}
+			return `[]`, nil
+		},
+	})
+
+	pool := accounts.NewPool(nil)
+	proxyPool := proxy.NewPool(nil)
+	cfg := &config.Config{AdminToken: "plaza-secret"}
+	chatgptPlugin := provider.NewChatGPTProvider(pool, proxyPool, cfg, nil)
+	reg := provider.NewRegistry()
+	provider.RegisterDefaultProviders(reg, chatgptPlugin)
+
+	router := RegisterRouterWithDeps(RouterDeps{
+		AccountPool: pool,
+		ProxyPool:   proxyPool,
+		Registry:    reg,
+		Config:      cfg,
+		PromptPlaza: plazaMgr,
+	})
+
+	// 1. Unauthorized blocked
+	req := httptest.NewRequest(http.MethodGet, "/admin/api/v1/prompts", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without admin token, got %d", w.Code)
+	}
+
+	// 2. GET /prompts with token returns seeds + category stats
+	req = httptest.NewRequest(http.MethodGet, "/admin/api/v1/prompts?category="+url.QueryEscape(promptplaza.Category3DMiniature), nil)
+	req.Header.Set("X-Admin-Token", "plaza-secret")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 on GET /prompts, got %d body=%s", w.Code, w.Body.String())
+	}
+	var listResp promptplaza.ListResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &listResp); err != nil {
+		t.Fatalf("unmarshal listResp: %v", err)
+	}
+	if len(listResp.Items) == 0 || listResp.Categories["all"] < 24 {
+		t.Fatalf("expected seed items and total >= 24, got items=%d categories=%+v", len(listResp.Items), listResp.Categories)
+	}
+
+	// 3. POST /prompts/sync?wait=1 merges civitai & ai_search
+	req = httptest.NewRequest(http.MethodPost, "/admin/api/v1/prompts/sync?wait=1", nil)
+	req.Header.Set("X-Admin-Token", "plaza-secret")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 on POST /prompts/sync, got %d body=%s", w.Code, w.Body.String())
+	}
+	req = httptest.NewRequest(http.MethodGet, "/admin/api/v1/prompts?source=civitai", nil)
+	req.Header.Set("X-Admin-Token", "plaza-secret")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	var civResp promptplaza.ListResponse
+	_ = json.Unmarshal(w.Body.Bytes(), &civResp)
+	if len(civResp.Items) != 1 || civResp.Items[0].ID != "civitai-777" {
+		t.Fatalf("expected civitai-777 after sync, got %+v", civResp.Items)
+	}
+
+	// 4. POST /prompts/expand validates empty idea -> 400
+	req = httptest.NewRequest(http.MethodPost, "/admin/api/v1/prompts/expand", strings.NewReader(`{"idea":"  "}`))
+	req.Header.Set("X-Admin-Token", "plaza-secret")
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 on blank idea, got %d", w.Code)
+	}
+
+	// 5. POST /prompts/expand returns AI expanded prompt
+	req = httptest.NewRequest(http.MethodPost, "/admin/api/v1/prompts/expand", strings.NewReader(`{"idea":"赛博朋克猫咪喝咖啡","mode":"generations","size":"1792x1024"}`))
+	req.Header.Set("X-Admin-Token", "plaza-secret")
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 on valid expand, got %d body=%s", w.Code, w.Body.String())
+	}
+	var expResp promptplaza.ExpandResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &expResp); err != nil {
+		t.Fatalf("unmarshal expand response: %v", err)
+	}
+	if expResp.Source != "ai_pool" || expResp.TitleZH != "霓虹猫咪咖啡馆" {
+		t.Fatalf("unexpected expand response: %+v", expResp)
+	}
+}
+
+func TestAdminModelsCatalogCacheAndFallback(t *testing.T) {
+	// 1. No logged-in account (only noauth) -> fallback catalog with builtin models
+	noauthAcct := modelTestAccount(accounts.TypeNoAuth, &modelsTestClient{status: 200, body: `{"models":[]}`})
+	emptyPool := accounts.NewPool([]*accounts.Account{noauthAcct})
+	emptyReg := provider.NewRegistry()
+	provider.RegisterDefaultProviders(emptyReg, provider.NewChatGPTProvider(emptyPool, proxy.NewPool(nil), &config.Config{}, nil))
+	emptyRouter := RegisterRouterWithDeps(RouterDeps{
+		AccountPool: emptyPool,
+		ProxyPool:   proxy.NewPool(nil),
+		Registry:    emptyReg,
+		Config:      &config.Config{},
+	})
+	w := httptest.NewRecorder()
+	emptyRouter.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/admin/api/v1/models?include_builtins=true", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("fallback status = %d: %s", w.Code, w.Body.String())
+	}
+	var fallbackResp struct {
+		Source        string `json:"source"`
+		UpstreamCount int    `json:"upstream_count"`
+		Data          []struct {
+			ID     string `json:"id"`
+			Source string `json:"source"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &fallbackResp); err != nil {
+		t.Fatal(err)
+	}
+	if fallbackResp.Source != "fallback" || fallbackResp.UpstreamCount != 0 || len(fallbackResp.Data) < 10 {
+		t.Fatalf("unexpected fallback response: %+v", fallbackResp)
+	}
+
+	// 2. Pool with active free account: first call fetches live, second reuses cache, refresh=true re-fetches
+	client := &modelsTestClient{
+		status: 200,
+		body:   `{"models":[{"slug":"gpt-5-8"},{"slug":"gpt-5-6"}]}`,
+	}
+	freeAcct := modelTestAccount(accounts.TypeFree, client)
+	pool := accounts.NewPool([]*accounts.Account{freeAcct})
+	proxyPool := proxy.NewPool(nil)
+	cfg := &config.Config{}
+	chatgptPlugin := provider.NewChatGPTProvider(pool, proxyPool, cfg, nil)
+	reg := provider.NewRegistry()
+	provider.RegisterDefaultProviders(reg, chatgptPlugin)
+	router := RegisterRouterWithDeps(RouterDeps{
+		AccountPool: pool,
+		ProxyPool:   proxyPool,
+		Registry:    reg,
+		Config:      cfg,
+	})
+
+	// First fetch -> live (calls=1)
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/admin/api/v1/models?include_builtins=true", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("first fetch status = %d: %s", w.Code, w.Body.String())
+	}
+	var liveResp struct {
+		Source        string `json:"source"`
+		CachedAt      string `json:"cached_at"`
+		UpstreamCount int    `json:"upstream_count"`
+		Data          []struct {
+			ID     string `json:"id"`
+			Source string `json:"source"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &liveResp); err != nil {
+		t.Fatal(err)
+	}
+	if liveResp.Source != "live" || liveResp.UpstreamCount != 2 || client.calls != 1 || liveResp.CachedAt == "" {
+		t.Fatalf("expected live catalog calls=1, got %+v calls=%d", liveResp, client.calls)
+	}
+
+	// Second fetch without refresh -> cached (calls remains 1)
+	client.body = `{"models":[{"slug":"gpt-6-preview"}]}`
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/admin/api/v1/models?include_builtins=true", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("cached fetch status = %d: %s", w.Code, w.Body.String())
+	}
+	var cacheResp struct {
+		Source        string `json:"source"`
+		UpstreamCount int    `json:"upstream_count"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &cacheResp); err != nil {
+		t.Fatal(err)
+	}
+	if cacheResp.Source != "cache" || client.calls != 1 || cacheResp.UpstreamCount != 2 {
+		t.Fatalf("expected cached response calls=1, got %+v calls=%d", cacheResp, client.calls)
+	}
+
+	// Force refresh -> live again (calls=2) & merges previous models
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/admin/api/v1/models?include_builtins=true&refresh=true", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("refresh fetch status = %d: %s", w.Code, w.Body.String())
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &liveResp); err != nil {
+		t.Fatal(err)
+	}
+	if liveResp.Source != "live" || client.calls != 2 {
+		t.Fatalf("expected refreshed live response calls=2, got %+v calls=%d", liveResp, client.calls)
+	}
+	cached, _ := pool.CachedModels()
+	if len(cached) != 3 {
+		t.Fatalf("expected merged pool cache of 3 slugs, got %v", cached)
 	}
 }
