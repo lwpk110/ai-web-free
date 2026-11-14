@@ -8,6 +8,7 @@ import (
 
 	"ai-web-free/internal/accounts"
 	"ai-web-free/internal/audit"
+	"ai-web-free/internal/chatgpt"
 )
 
 // KamiLoginExecutor 执行单账号卡密登录并返回提取结果，可在单元测试中替换。
@@ -298,6 +299,20 @@ func (w *KamiRenewWorker) processOne(acct *accounts.Account) {
 	errMsg := outcome.Error
 	if errMsg == "" {
 		errMsg = "kami auto renew failed"
+	}
+	if chatgpt.LooksLikeAccountBanned(0, errMsg) {
+		if w.pool != nil {
+			w.pool.MarkBanned(acct, errMsg)
+		} else {
+			acct.Status = accounts.StatusBanned
+			acct.LastError = errMsg
+			acct.RenewState = ""
+			acct.RenewCooldownUntil = time.Time{}
+		}
+		if w.auditLog != nil {
+			w.auditLog.RecordEvent("/internal/account-banned", acct.Email, acct.Proxy, "kami_renew_banned", errMsg)
+		}
+		return
 	}
 	acct.RenewFailures++
 	idx := acct.RenewFailures - 1

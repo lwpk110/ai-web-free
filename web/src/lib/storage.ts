@@ -21,11 +21,21 @@ export interface HydratedImageItem extends StoredImageRecord {
   isObjectUrl: boolean;
 }
 
+export type CopilotSkill =
+  | "auto"
+  | "diagnose"
+  | "fix"
+  | "openui"
+  | "image"
+  | "chat";
+
 export interface StoredChatMessage {
   id: string;
   role: "user" | "assistant";
   content: string;
   openuiMode: boolean;
+  skill?: CopilotSkill;
+  isOfflineFallback?: boolean;
   isStreaming?: boolean;
   showSource?: boolean;
   timestamp?: number;

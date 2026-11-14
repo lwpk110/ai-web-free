@@ -422,15 +422,7 @@ func (h *AdminHandler) KamiLoginTask(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"provider": providerID, "task": task})
 }
 
-// ProbeAllAccounts 批量并发测活当前供应商的所有非免登账号
-func (h *AdminHandler) ProbeAllAccounts(c *gin.Context) {
-	providerID := c.Param("provider")
-	p, ok := h.registry.Get(providerID)
-	if !ok {
-		c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"message": "未找到供应商插件: " + providerID}})
-		return
-	}
-
+func probeAllProviderAccounts(p provider.ProviderPlugin) (probed, passed, failed int, results []map[string]interface{}) {
 	snapshots := p.ListAccounts("free", "", "")
 	puidSnaps := p.ListAccounts("puid", "", "")
 	snapshots = append(snapshots, puidSnaps...)
@@ -438,9 +430,6 @@ func (h *AdminHandler) ProbeAllAccounts(c *gin.Context) {
 	sem := make(chan struct{}, 3)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
-	var results []map[string]interface{}
-	passed := 0
-	failed := 0
 
 	for _, snap := range snapshots {
 		if snap.Status == "disabled" {
@@ -469,10 +458,23 @@ func (h *AdminHandler) ProbeAllAccounts(c *gin.Context) {
 		}(snap.ID)
 	}
 	wg.Wait()
+	return len(results), passed, failed, results
+}
+
+// ProbeAllAccounts 批量并发测活当前供应商的所有非免登账号
+func (h *AdminHandler) ProbeAllAccounts(c *gin.Context) {
+	providerID := c.Param("provider")
+	p, ok := h.registry.Get(providerID)
+	if !ok {
+		c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"message": "未找到供应商插件: " + providerID}})
+		return
+	}
+
+	probed, passed, failed, results := probeAllProviderAccounts(p)
 
 	c.JSON(http.StatusOK, gin.H{
 		"provider": providerID,
-		"probed":   len(results),
+		"probed":   probed,
 		"passed":   passed,
 		"failed":   failed,
 		"results":  results,

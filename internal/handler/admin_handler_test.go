@@ -362,3 +362,99 @@ func TestAdminLogsFilterAndAccountsExportRedaction(t *testing.T) {
 		t.Fatalf("expected access_tokens output, got %d %s", w.Code, w.Body.String())
 	}
 }
+
+func TestAdminDiagnosticsAndRepair(t *testing.T) {
+	router, pool, pxPool, auditLog := setupTestAdminRouter(t, "", []string{"http://127.0.0.1:18081", "http://127.0.0.1:18082"})
+
+	// 将初始账号标为永久封禁，并添加 403 WAF 与 401 过期账号，制造 active == 0 故障场景
+	for _, a := range pool.AllPersistentAccounts() {
+		pool.MarkBanned(a, "HTTP 403: account_deactivated")
+	}
+
+	wafAcct := accounts.CreateAccount("eyJ.waf.tok", accounts.TypeFree, accounts.DefaultProfiles)
+	wafAcct.ID = "acc-waf-2"
+	wafAcct.Email = "waf-2@example.com"
+	wafAcct.Proxy = "http://127.0.0.1:18081"
+	wafAcct.Status = accounts.StatusActive
+	pool.AddAccount(wafAcct)
+	pool.RecordProxyBlock(wafAcct, 2*time.Minute, "HTTP 403: Just a moment Cloudflare cf-ray")
+	pxPool.ReportFailure("http://127.0.0.1:18081", "HTTP 403 WAF")
+
+	expAcct := accounts.CreateAccount("eyJ.exp.tok", accounts.TypeFree, accounts.DefaultProfiles)
+	expAcct.ID = "acc-exp-3"
+	expAcct.Email = "exp-3@example.com"
+	expAcct.Status = accounts.StatusActive
+	pool.AddAccount(expAcct)
+	pool.MarkExpired(expAcct, "HTTP 401: token_expired")
+
+	auditLog.RecordEvent("/v1/chat/completions", "waf-2@example.com", "http://127.0.0.1:18081", "waf_403", "Cloudflare challenge")
+
+	// 1. 查询全平台诊断报告
+	req := httptest.NewRequest(http.MethodGet, "/admin/api/v1/diagnostics", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 on diagnostics, got %d body=%s", w.Code, w.Body.String())
+	}
+	var diag DiagnosticsReport
+	if err := json.Unmarshal(w.Body.Bytes(), &diag); err != nil {
+		t.Fatalf("unmarshal diagnostics: %v", err)
+	}
+	if diag.OverallSeverity != "critical" || diag.HealthScore > 20 {
+		t.Fatalf("expected critical severity & low health score when active==0, got sev=%s score=%d", diag.OverallSeverity, diag.HealthScore)
+	}
+	if !strings.Contains(diag.MarkdownReport, "平台全链路诊断报告") {
+		t.Fatalf("expected non-empty chinese markdown_report, got %s", diag.MarkdownReport)
+	}
+	seenCats := map[string]bool{}
+	for _, rc := range diag.RootCauses {
+		seenCats[rc.Category] = true
+	}
+	for _, reqCat := range []string{"banned", "waf_proxy_block", "token_expired"} {
+		if !seenCats[reqCat] {
+			t.Fatalf("expected root cause category %s in report, got %+v", reqCat, diag.RootCauses)
+		}
+	}
+
+	// 2. 删除封禁账号缺少 confirm=true 必须拒绝 (400)
+	req = httptest.NewRequest(http.MethodPost, "/admin/api/v1/diagnostics/repair", strings.NewReader(`{"action":"delete_banned","confirm":false}`))
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 when delete_banned without confirm, got %d body=%s", w.Code, w.Body.String())
+	}
+
+	// 3. confirm=true 后允许清理封禁账号
+	req = httptest.NewRequest(http.MethodPost, "/admin/api/v1/diagnostics/repair", strings.NewReader(`{"action":"delete_banned","confirm":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 on confirmed delete_banned, got %d body=%s", w.Code, w.Body.String())
+	}
+	if pool.Stats().Banned != 0 {
+		t.Fatalf("expected banned count 0 after deletion, got %d", pool.Stats().Banned)
+	}
+
+	// 4. 在 0 可用账号状态下执行 smart_heal 应自动补充匿名 UUID 恢复可用态
+	req = httptest.NewRequest(http.MethodPost, "/admin/api/v1/diagnostics/repair", strings.NewReader(`{"action":"smart_heal"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 on smart_heal, got %d body=%s", w.Code, w.Body.String())
+	}
+	var repairResp struct {
+		OK          bool              `json:"ok"`
+		Details     map[string]int    `json:"details"`
+		Diagnostics DiagnosticsReport `json:"diagnostics"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &repairResp); err != nil {
+		t.Fatalf("unmarshal smart_heal resp: %v", err)
+	}
+	if !repairResp.OK || repairResp.Diagnostics.PoolStats.Active < 3 {
+		t.Fatalf("expected smart_heal to restore >=3 active accounts via emergency free_uuid, got active=%d resp=%s",
+			repairResp.Diagnostics.PoolStats.Active, w.Body.String())
+	}
+}

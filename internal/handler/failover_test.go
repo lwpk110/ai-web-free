@@ -204,3 +204,121 @@ func TestFailoverExternalTokenNeverFallsBackToPool(t *testing.T) {
 		t.Fatalf("expected external token limited to 1 attempt with error, got attempts=%d err=%v", attempts, err)
 	}
 }
+
+func TestRunWithFailover_AccountBannedMarksBannedWithoutKamiEnqueue(t *testing.T) {
+	pool := accounts.NewPool(nil)
+	banned := accounts.CreateAccount("eyJ.banned.tok", accounts.TypeFree, accounts.DefaultProfiles)
+	banned.ID = "banned-1"
+	banned.Email = "banned@example.com"
+	banned.Password = "pw"
+	banned.TOTPSecret = "JBSWY3DPEHPK3PXP"
+	banned.Status = accounts.StatusActive
+
+	healthy := accounts.CreateAccount("eyJ.good.tok", accounts.TypeFree, accounts.DefaultProfiles)
+	healthy.ID = "good-1"
+	healthy.Email = "good@example.com"
+	healthy.Status = accounts.StatusActive
+
+	pool.AddAccount(banned)
+	pool.AddAccount(healthy)
+
+	auditLog := audit.NewRingBuffer(50, "", 0)
+	worker := provider.NewKamiRenewWorker(pool, "", true, nil, auditLog)
+
+	rt := &GatewayRuntime{
+		AccountPool: pool,
+		AuditLog:    auditLog,
+		KamiWorker:  worker,
+		Config:      &config.Config{},
+	}
+
+	c, _ := newTestGinContext("")
+	res, err := rt.RunWithFailover(c, pool, rt.Config, FailoverOptions{
+		NeedsPaid:  true,
+		Capability: accounts.CapChat.Name,
+	}, func(acct *accounts.Account, _ *bogdanfinn.TlsClient) AttemptOutcome {
+		if acct.ID == "banned-1" {
+			return AttemptOutcome{
+				StatusCode: http.StatusUnauthorized,
+				Err:        chatgpt.NewUpstreamError("backend-api", http.StatusUnauthorized, `{"error":{"code":"account_deactivated","message":"Your OpenAI account has been deactivated."}}`),
+			}
+		}
+		return AttemptOutcome{StatusCode: http.StatusOK}
+	})
+	if err != nil {
+		t.Fatalf("expected failover to succeed on healthy account, got err=%v", err)
+	}
+	if res.Attempts != 2 || res.Account.ID != "good-1" {
+		t.Fatalf("expected 2 attempts landing on good-1, got attempts=%d acct=%v", res.Attempts, res.Account)
+	}
+	if banned.Status != accounts.StatusBanned {
+		t.Fatalf("expected banned-1 status=StatusBanned, got %v", banned.Status)
+	}
+	if worker.Stats().QueueLength != 0 {
+		t.Fatalf("expected banned account NOT enqueued to KamiWorker, got queue=%d", worker.Stats().QueueLength)
+	}
+}
+
+func TestRunWithFailover_Cloudflare403RecordsProxyBlockWithoutExpiringToken(t *testing.T) {
+	pool := accounts.NewPool(nil)
+	pxPool := proxy.NewPool([]string{"http://dirty:8080", "http://clean:8080"})
+
+	wafAcct := accounts.CreateAccount("eyJ.waf.tok", accounts.TypeFree, accounts.DefaultProfiles)
+	wafAcct.ID = "waf-1"
+	wafAcct.Email = "waf@example.com"
+	wafAcct.Proxy = "http://dirty:8080"
+	wafAcct.Status = accounts.StatusActive
+
+	cleanAcct := accounts.CreateAccount("eyJ.clean.tok", accounts.TypeFree, accounts.DefaultProfiles)
+	cleanAcct.ID = "clean-1"
+	cleanAcct.Email = "clean@example.com"
+	cleanAcct.Proxy = "http://clean:8080"
+	cleanAcct.Status = accounts.StatusActive
+
+	pool.AddAccount(wafAcct)
+	pool.AddAccount(cleanAcct)
+
+	auditLog := audit.NewRingBuffer(50, "", 0)
+	rt := &GatewayRuntime{
+		AccountPool: pool,
+		ProxyPool:   pxPool,
+		AuditLog:    auditLog,
+		Config:      &config.Config{},
+	}
+
+	c, _ := newTestGinContext("")
+	res, err := rt.RunWithFailover(c, pool, rt.Config, FailoverOptions{
+		NeedsPaid:  true,
+		Capability: accounts.CapChat.Name,
+	}, func(acct *accounts.Account, _ *bogdanfinn.TlsClient) AttemptOutcome {
+		if acct.ID == "waf-1" {
+			return AttemptOutcome{
+				StatusCode: http.StatusForbidden,
+				Err:        chatgpt.NewUpstreamError("backend-api", http.StatusForbidden, `<html><title>Just a moment...</title>cf-ray: 12345</html>`),
+			}
+		}
+		return AttemptOutcome{StatusCode: http.StatusOK}
+	})
+	if err != nil {
+		t.Fatalf("expected failover to succeed on clean account, got err=%v", err)
+	}
+	if res.Attempts != 2 || res.Account.ID != "clean-1" {
+		t.Fatalf("expected 2 attempts landing on clean-1, got attempts=%d acct=%v", res.Attempts, res.Account)
+	}
+	if wafAcct.Status != accounts.StatusRateLimited {
+		t.Fatalf("expected waf-1 placed in short rate_limited cooldown (not expired), got %v", wafAcct.Status)
+	}
+	if wafAcct.Token != "eyJ.waf.tok" {
+		t.Fatalf("expected token preserved after WAF 403, got %q", wafAcct.Token)
+	}
+	snaps := pxPool.Snapshots(pool.BoundProxyCounts())
+	dirtyErrs := 0
+	for _, s := range snaps {
+		if s.URL == "http://dirty:8080" {
+			dirtyErrs = s.ConsecutiveErrors
+		}
+	}
+	if dirtyErrs != 1 {
+		t.Fatalf("expected http://dirty:8080 consecutive_errors=1, got %d", dirtyErrs)
+	}
+}

@@ -164,10 +164,82 @@ func (p *Pool) MarkExpired(acct *Account, reason string) bool {
 	defer p.mu.Unlock()
 	acct.Status = StatusExpired
 	acct.FailedCalls++
+	acct.LastChecked = time.Now()
 	if reason != "" {
 		acct.LastError = reason
 	}
 	return true
+}
+
+// MarkBanned 将账号标记为永久封禁/停用并终止自动续期队列跟踪。
+func (p *Pool) MarkBanned(acct *Account, reason string) bool {
+	if acct == nil {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	acct.Status = StatusBanned
+	acct.FailedCalls++
+	acct.LastChecked = time.Now()
+	acct.CooldownUntil = time.Time{}
+	acct.ImageCooldownUntil = time.Time{}
+	acct.RenewState = ""
+	acct.RenewCooldownUntil = time.Time{}
+	if reason != "" {
+		acct.LastError = reason
+	}
+	return true
+}
+
+// RecordProxyBlock 记录代理风控/WAF/Cloudflare 403 拦截：保留令牌有效状态，仅施加短冷却并记录诊断错误。
+func (p *Pool) RecordProxyBlock(acct *Account, cooldown time.Duration, reason string) bool {
+	if acct == nil {
+		return false
+	}
+	if cooldown <= 0 {
+		cooldown = 2 * time.Minute
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	acct.FailedCalls++
+	acct.LastChecked = time.Now()
+	if acct.Status != StatusBanned && acct.Status != StatusDisabled && acct.Status != StatusExpired {
+		acct.Status = StatusRateLimited
+		acct.CooldownUntil = time.Now().Add(cooldown)
+	}
+	if reason != "" {
+		acct.LastError = reason
+	}
+	return true
+}
+
+// ResetRenewBackoff 清除账号卡密自动续期的退避冷却状态，便于管理员或自愈任务立即重试。
+func (p *Pool) ResetRenewBackoff(acct *Account) bool {
+	if acct == nil {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	acct.RenewState = ""
+	acct.RenewCooldownUntil = time.Time{}
+	acct.RenewFailures = 0
+	acct.LastRenewError = ""
+	return true
+}
+
+// RecoverProxyBlockedStatus 在账号完成代理迁移或代理恢复后，解除因代理风控/传输故障触发的短时限流状态。
+func (p *Pool) RecoverProxyBlockedStatus(acct *Account) bool {
+	if acct == nil {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if acct.Status == StatusRateLimited && (acct.Token != "" || acct.Type == TypeNoAuth) {
+		acct.Status = StatusActive
+		acct.CooldownUntil = time.Time{}
+		return true
+	}
+	return false
 }
 
 // ReportRateLimit 根据限流作用域置入全能力冷却（StatusRateLimited）或仅生图局部冷却。

@@ -603,6 +603,7 @@ export async function streamChatCompletion(params: {
   model: string;
   openuiMode: boolean;
   apiKey?: string;
+  signal?: AbortSignal;
   onDelta: (deltaText: string, fullText: string) => void;
 }): Promise<string> {
   const headers: Record<string, string> = {
@@ -618,6 +619,7 @@ export async function streamChatCompletion(params: {
   const res = await fetch("/v1/chat/completions", {
     method: "POST",
     headers,
+    signal: params.signal,
     body: JSON.stringify({
       model: params.model,
       stream: true,
@@ -653,16 +655,120 @@ export async function streamChatCompletion(params: {
       if (payload === "[DONE]") continue;
       try {
         const parsed = JSON.parse(payload);
+        if (parsed?.error?.message && accumulated.length === 0) {
+          throw new Error(parsed.error.message);
+        }
         const delta = parsed?.choices?.[0]?.delta?.content;
         if (typeof delta === "string" && delta.length > 0) {
           accumulated += delta;
           params.onDelta(delta, accumulated);
         }
-      } catch {
+      } catch (e) {
+        if (e instanceof Error && e.message && accumulated.length === 0 && payload.includes('"error"')) {
+          throw e;
+        }
         // ignore partial JSON chunks
       }
     }
   }
 
   return accumulated;
+}
+
+export interface DiagnosticRootCauseItem {
+  category: "banned" | "waf_proxy_block" | "token_expired" | "rate_limit" | "proxy_breaker" | "other" | string;
+  severity: "critical" | "warning" | "info" | string;
+  title: string;
+  count: number;
+  summary: string;
+  affected_ids?: string[];
+  account_emails?: string[];
+  proxies?: string[];
+  suggested_fixes?: string[];
+}
+
+export interface DiagnosticRepairOption {
+  action: string;
+  label: string;
+  description: string;
+  destructive: boolean;
+  recommended: boolean;
+  target_count: number;
+}
+
+export interface DiagnosticAccountBrief {
+  id: string;
+  email: string;
+  type: string;
+  status: string;
+  reason: string;
+  proxy: string;
+  last_error?: string;
+  renew_state?: string;
+  has_refresh: boolean;
+  has_session: boolean;
+  has_kami: boolean;
+}
+
+export interface DiagnosticsReport {
+  generated_at: string;
+  health_score: number;
+  overall_severity: "healthy" | "degraded" | "critical" | string;
+  headline: string;
+  pool_stats: PoolStats;
+  proxy_summary: ProxySummary;
+  kami_worker?: KamiWorkerStats;
+  audit_summary: AuditSummary;
+  root_causes: DiagnosticRootCauseItem[];
+  flagged_accounts: DiagnosticAccountBrief[];
+  tripped_proxies: ProxyNodeStatus[];
+  repair_options: DiagnosticRepairOption[];
+  markdown_report: string;
+}
+
+export interface DiagnosticRepairRequest {
+  action:
+    | "smart_heal"
+    | "rebind_proxies"
+    | "renew_expired"
+    | "probe_all"
+    | "topup_free_uuid"
+    | "disable_banned"
+    | "delete_banned"
+    | string;
+  provider?: string;
+  confirm?: boolean;
+  count?: number;
+}
+
+export interface DiagnosticRepairResponse {
+  ok: boolean;
+  action: string;
+  summary: string;
+  details: Record<string, number | string | boolean>;
+  diagnostics: DiagnosticsReport;
+}
+
+export async function fetchDiagnostics(): Promise<DiagnosticsReport> {
+  const res = await adminFetch("/admin/api/v1/diagnostics");
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error?.message || `HTTP ${res.status}`);
+  }
+  return data;
+}
+
+export async function executeDiagnosticRepair(
+  req: DiagnosticRepairRequest
+): Promise<DiagnosticRepairResponse> {
+  const res = await adminFetch("/admin/api/v1/diagnostics/repair", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error?.message || `HTTP ${res.status}`);
+  }
+  return data;
 }

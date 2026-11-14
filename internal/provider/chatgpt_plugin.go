@@ -58,6 +58,22 @@ func (p *ChatGPTProvider) SetAuditLog(a *audit.RingBuffer) {
 	p.auditLog = a
 }
 
+func (p *ChatGPTProvider) reportProbeProxyFailure(acct *accounts.Account, errMsg, auditPrefix string) {
+	if p.proxyPool == nil || acct == nil || acct.Proxy == "" {
+		return
+	}
+	failedProxy := acct.Proxy
+	if tripped := p.proxyPool.ReportFailure(failedProxy, errMsg); tripped {
+		migrated := p.pool.ReconcileProxies(
+			func(u string) bool { return !p.proxyPool.IsHealthy(u) },
+			func(excl map[string]bool) string { return p.proxyPool.AllocateHealthy(excl) },
+		)
+		if p.auditLog != nil {
+			p.auditLog.RecordEvent("/internal/proxy-breaker", acct.Email, failedProxy, fmt.Sprintf("%s%d", auditPrefix, migrated), errMsg)
+		}
+	}
+}
+
 func (p *ChatGPTProvider) Descriptor() ProviderDescriptor {
 	return ProviderDescriptor{
 		ID:          "chatgpt",
@@ -363,14 +379,41 @@ func (p *ChatGPTProvider) ExecuteAccountAction(id, action string) (map[string]in
 		models, httpStatus, err := chatgpt.ListModels(acct.Client, acct)
 		latency := time.Since(start).Milliseconds()
 		if err != nil {
-			acct.LastError = fmt.Sprintf("HTTP %d: %v", httpStatus, err)
-			if httpStatus == 401 || httpStatus == 403 {
-				p.pool.MarkExpired(acct, acct.LastError)
+			errMsg := fmt.Sprintf("HTTP %d: %v", httpStatus, err)
+			acct.LastError = errMsg
+			reason := chatgpt.ClassifyAccountErrorReason(httpStatus, errMsg)
+			switch reason {
+			case chatgpt.ErrCategoryBanned:
+				p.pool.MarkBanned(acct, errMsg)
+				if p.auditLog != nil {
+					p.auditLog.RecordEvent("/internal/account-banned", acct.Email, acct.Proxy, "probe_banned", errMsg)
+				}
+			case chatgpt.ErrCategoryWAFProxy:
+				p.pool.RecordProxyBlock(acct, 2*time.Minute, errMsg)
+				p.reportProbeProxyFailure(acct, errMsg, "probe_tripped_migrated_")
+			case chatgpt.ErrCategoryTokenExpired:
+				p.pool.MarkExpired(acct, errMsg)
 				if p.kamiWorker != nil {
 					p.kamiWorker.Enqueue(acct, "probe_unauthorized")
 				}
-			} else if httpStatus == 429 {
-				p.pool.ReportRateLimit(acct, false, 5*time.Minute, acct.LastError)
+			case chatgpt.ErrCategoryImageLimit, chatgpt.ErrCategoryRateLimit:
+				isImg := reason == chatgpt.ErrCategoryImageLimit
+				cd := 5 * time.Minute
+				if isImg {
+					cd = 15 * time.Minute
+				}
+				p.pool.ReportRateLimit(acct, isImg, cd, errMsg)
+			case chatgpt.ErrCategoryProxyTransport:
+				p.reportProbeProxyFailure(acct, errMsg, "probe_transport_migrated_")
+			default:
+				if httpStatus == 401 {
+					p.pool.MarkExpired(acct, errMsg)
+					if p.kamiWorker != nil {
+						p.kamiWorker.Enqueue(acct, "probe_unauthorized")
+					}
+				} else if httpStatus == 429 {
+					p.pool.ReportRateLimit(acct, false, 5*time.Minute, errMsg)
+				}
 			}
 			return map[string]interface{}{
 				"id":          acct.ID,

@@ -14,11 +14,13 @@
 - **账号冷却字段**（`internal/accounts/account.go`）：
   - `CooldownUntil`：全能力 429 冷却截至时间；当状态为 `StatusRateLimited` 且到期后，后台巡检自动恢复为 `StatusActive`。
   - `ImageCooldownUntil`：仅针对生图/编辑/变体配额触发限流时的局部冷却期（不阻塞该账号继续服务纯文本对话）。
-- **请求级自动切换（`internal/handler/`）**：
-  - 在 `/v1/chat/completions`、`/v1/images/generations`、`/v1/images/edits`、`/v1/images/variations`、`/v1/audio/*` **尚未向下游写出响应首包前**：
-    1. 遇到上游 `401 Unauthorized`：标记账号 `StatusExpired` 并入卡密自动续期队列（若具备卡密凭据），切换下一可用账号重试；
-    2. 遇到上游 `429` 或生图频次受限：调用 `ReportRateLimit` 进入全能力或生图局部冷却，切换下一可用账号重试；
-    3. 遇到代理传输错误（非业务 HTTP 错误）：上报代理故障并在断路器跳闸时重绑健康代理后重试。
+- **请求级自动切换（`internal/handler/`）与 5 类根因分类**：
+  - 在 `/v1/chat/completions`、`/v1/images/generations`、`/v1/images/edits`、`/v1/images/variations`、`/v1/audio/*` **尚未向下游写出响应首包前**，及管理端测活/卡密自动续期失败处理中，按 `chatgpt.ClassifyAccountErrorReason` 执行精确状态迁移：
+    1. **永久封禁/停用**（命中 `account_deactivated` / `account_suspended` / `permanently banned`，优先于 HTTP 401/403 判定）：调用 `MarkBanned` 将账号置为 `StatusBanned`、记录 `/internal/account-banned` 审计事件并**禁止入队** `KamiRenewWorker` 避免无效重登；
+    2. **上游 `403` / Cloudflare / Sentinel / Turnstile WAF 拦截**：调用 `RecordProxyBlock`（仅施加短冷却，**保留令牌有效状态不置 `StatusExpired`**）并上报 `ProxyPool.ReportFailure` 计入连续失败计数，熔断后自动迁移绑定代理并重试；
+    3. **上游 `401 Unauthorized`（非封禁）**：标记账号 `StatusExpired` 并入卡密自动续期队列（若具备卡密凭据），切换下一可用账号重试；
+    4. **上游 `429` 或生图频次受限**：调用 `ReportRateLimit` 进入全能力或生图局部冷却，切换下一可用账号重试；
+    5. **代理传输错误（非业务 HTTP 错误）**：上报代理故障并在断路器跳闸时重绑健康代理后重试。
   - 最多尝试 **3 个账号**（可避开临时外部 Token），完整 Failover 轨迹写入审计日志。
 
 ### 2.2 卡密账号后台串行自动续期 Worker
@@ -50,3 +52,12 @@
 - **管理端鉴权**（`ADMIN_TOKEN`）：
   - 若环境变量 `ADMIN_TOKEN` 非空，`/admin/api/v1/*`（`/admin/api/v1/auth/status` 除外）需携带 `Authorization: Bearer <ADMIN_TOKEN>` 或 `X-Admin-Token` 请求头。
   - 未配置 `ADMIN_TOKEN` 时保持本地零门槛直入体验。
+
+---
+
+### 2.6 全平台根因诊断与一键自愈 API
+- **诊断聚合接口**：`GET /admin/api/v1/diagnostics`
+  - 实时汇总账号池快照、代理健康矩阵、卡密串行续期队列及最近审计记录，输出健康评分（`0-100`）、总严重度（`healthy` / `degraded` / `critical`）、5 大根因分类（`banned` / `waf_proxy_block` / `token_expired` / `rate_limit` / `proxy_breaker`）、异常账号脱敏清单、熔断代理节点，以及可直接用于前端无大模型离线诊断展示的 `markdown_report`。
+- **修复与自愈执行接口**：`POST /admin/api/v1/diagnostics/repair`
+  - 支持安全自愈动作：`smart_heal`（恢复冷却 + 停用封禁 + 探测并迁移受损代理 + 刷新/重排队过期账号 + 当 `active == 0` 时应急注入 3 个匿名 UUID）、`rebind_proxies`、`renew_expired`、`probe_all`、`topup_free_uuid`、`disable_banned`。
+  - 支持破坏性清理动作：`delete_banned`（从号池移除封禁账号并回写持久化文件），必须显式携带 `confirm: true` 才允许执行（否则返回 `400 Bad Request`）。

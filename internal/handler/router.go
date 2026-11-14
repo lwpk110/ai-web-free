@@ -120,6 +120,8 @@ func RegisterRouterWithDeps(deps RouterDeps) *gin.Engine {
 	{
 		adminGroup.GET("/auth/status", adminHandler.AuthStatus)
 		adminGroup.GET("/overview", adminHandler.Overview)
+		adminGroup.GET("/diagnostics", adminHandler.Diagnostics)
+		adminGroup.POST("/diagnostics/repair", adminHandler.ExecuteDiagnosticRepair)
 		adminGroup.GET("/logs", adminHandler.ListLogs)
 		adminGroup.GET("/proxies", adminHandler.ListProxies)
 		adminGroup.POST("/proxies/probe", adminHandler.ProbeProxies)

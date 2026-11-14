@@ -68,9 +68,9 @@ export const NAV_ITEMS: NavItemConfig[] = [
   {
     id: "chat",
     group: "studio",
-    label: "对话 · OpenUI",
+    label: "AI Copilot · 诊断",
     hash: "#/chat",
-    description: "Thesys OpenUI 声明式流式界面生成与 IndexedDB 会话持久化",
+    description: "多轮对话、平台故障诊断自愈与 Thesys OpenUI 混合生成",
   },
   {
     id: "image",
