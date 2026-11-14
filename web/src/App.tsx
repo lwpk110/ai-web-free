@@ -85,9 +85,7 @@ export const App: React.FC = () => {
   const [themeMode, setThemeMode] = useState<"light" | "dark">(
     resolveInitialTheme
   );
-  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(
-    () => resolveRouteFromHash() === "image"
-  );
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   const [overview, setOverview] = useState<OverviewResponse | null>(null);
@@ -117,9 +115,6 @@ export const App: React.FC = () => {
     const onHash = () => {
       const next = resolveRouteFromHash();
       setRoute(next);
-      if (next === "image") {
-        setSidebarCollapsed(true);
-      }
       setMobileMenuOpen(false);
     };
     window.addEventListener("hashchange", onHash);
@@ -175,9 +170,6 @@ export const App: React.FC = () => {
   const navigate = (next: RouteKey) => {
     window.location.hash = `#/${next}`;
     setRoute(next);
-    if (next === "image") {
-      setSidebarCollapsed(true);
-    }
     setMobileMenuOpen(false);
   };
 
