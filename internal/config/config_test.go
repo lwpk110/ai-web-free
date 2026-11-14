@@ -16,8 +16,8 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.ServerHost != "0.0.0.0" {
 		t.Errorf("ServerHost = %q, want %q", cfg.ServerHost, "0.0.0.0")
 	}
-	if cfg.ServerPort != "8080" {
-		t.Errorf("ServerPort = %q, want %q", cfg.ServerPort, "8080")
+	if cfg.ServerPort != "18080" {
+		t.Errorf("ServerPort = %q, want %q", cfg.ServerPort, "18080")
 	}
 	if !cfg.StreamMode {
 		t.Error("StreamMode = false, want true")

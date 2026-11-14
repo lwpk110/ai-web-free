@@ -37,7 +37,7 @@ var cookieBootstrap CookieBootstrap
 //
 // 返回 true 表示 jar 已经有"基本可用"的 cookie,可以继续发请求。
 // 返回 false 表示拿不到(被 CF 拦了)。
-func bootstrapCookieJar(client httpclient.AuroraHttpClient, account *accounts.Account) bool {
+func bootstrapCookieJar(client httpclient.HttpClient, account *accounts.Account) bool {
 	cookieBootstrap.mu.Lock()
 	defer cookieBootstrap.mu.Unlock()
 
@@ -96,7 +96,7 @@ func hasUsableCookies(cookies []*http.Cookie) bool {
 
 // ensureBootstrapped 在请求前调用,jar 没初始化就主动引导一次。
 // 失败也不 fatal —— 调用方自己判断后续请求是否被 CF 拦截。
-func ensureBootstrapped(client httpclient.AuroraHttpClient, account *accounts.Account) {
+func ensureBootstrapped(client httpclient.HttpClient, account *accounts.Account) {
 	cookies := client.GetCookies("https://chatgpt.com")
 	if hasUsableCookies(cookies) {
 		return

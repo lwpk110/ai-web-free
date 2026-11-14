@@ -1,4 +1,4 @@
-const ADMIN_TOKEN_STORAGE_KEY = "aurora_admin_token";
+const ADMIN_TOKEN_STORAGE_KEY = "ai_web_free_admin_token";
 
 export class AdminUnauthorizedError extends Error {
   constructor(message = "管理端已启用 ADMIN_TOKEN 保护，请先解锁") {
@@ -445,7 +445,7 @@ export async function exportAccounts(params: {
     : raw;
   const filename =
     params.format === "sub2api_json"
-      ? "aurora_sub2api.json"
+      ? "ai_web_free_sub2api.json"
       : params.format === "access_tokens"
         ? "access_tokens.txt"
         : "kami_accounts.txt";

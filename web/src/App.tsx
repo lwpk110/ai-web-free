@@ -41,7 +41,7 @@ import { NetworkView } from "./views/NetworkView";
 import { OverviewView } from "./views/OverviewView";
 import { PoolConsole } from "./views/PoolConsole";
 
-const THEME_STORAGE_KEY = "aurora_theme_mode";
+const THEME_STORAGE_KEY = "ai_web_free_theme_mode";
 
 function resolveInitialTheme(): "light" | "dark" {
   try {

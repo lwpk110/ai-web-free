@@ -25,11 +25,11 @@ type modelsTestClient struct {
 	calls   int
 	method  httpclient.HttpMethod
 	url     string
-	headers httpclient.AuroraHeaders
+	headers httpclient.Headers
 	cookies []*http.Cookie
 }
 
-func (f *modelsTestClient) Request(method httpclient.HttpMethod, url string, headers httpclient.AuroraHeaders, cookies []*http.Cookie, body io.Reader) (*http.Response, error) {
+func (f *modelsTestClient) Request(method httpclient.HttpMethod, url string, headers httpclient.Headers, cookies []*http.Cookie, body io.Reader) (*http.Response, error) {
 	f.calls++
 	f.method, f.url, f.headers, f.cookies = method, url, headers, cookies
 	if f.err != nil {

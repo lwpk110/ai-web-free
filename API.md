@@ -1,6 +1,6 @@
-# Aurora 接口文档
+# AI Web Free 接口文档
 
-本文档整理 Aurora 当前支持的接口、鉴权方式和 curl 示例。默认服务地址示例为 `http://你的服务器ip:8080`。
+本文档整理 AI Web Free 当前支持的接口、鉴权方式和 curl 示例。默认服务地址示例为 `http://你的服务器ip:18080`。
 
 ## 鉴权
 
@@ -28,7 +28,7 @@ Authorization: Bearer <AccessToken 或 RefreshToken>,<ChatGPT-Account-ID> 如果
 ### refresh_token 换 access_token
 
 ```bash
-curl --location 'http://你的服务器ip:8080/auth/refresh' \
+curl --location 'http://你的服务器ip:18080/auth/refresh' \
 --header 'Content-Type: application/json' \
 --data '{
   "refresh_token": "你的 refresh_token"
@@ -38,7 +38,7 @@ curl --location 'http://你的服务器ip:8080/auth/refresh' \
 ### session_token 换 access_token
 
 ```bash
-curl --location 'http://你的服务器ip:8080/auth/session' \
+curl --location 'http://你的服务器ip:18080/auth/session' \
 --header 'Content-Type: application/json' \
 --data '{
   "session_token": "你的 __Secure-next-auth.session-token"
@@ -50,7 +50,7 @@ curl --location 'http://你的服务器ip:8080/auth/session' \
 ## Chat Completions
 
 ```bash
-curl --location 'http://你的服务器ip:8080/v1/chat/completions' \
+curl --location 'http://你的服务器ip:18080/v1/chat/completions' \
 --header 'Content-Type: application/json' \
 --header 'Authorization: Bearer access_token' \
 --data '{
@@ -64,12 +64,12 @@ curl --location 'http://你的服务器ip:8080/v1/chat/completions' \
 
 ## 工具调用 (Tool Calling)
 
-ChatGPT Web 不原生支持 OpenAI 的 function calling。Aurora 通过文本协议 `<tool_call>{...}</tool_call>` 模拟该能力：请求里声明 `tools` 字段时，Aurora 自动在 system prompt 中注入调用约定，解析模型输出中的 `<tool_call>` 块并转换为标准 OpenAI 格式的 `tool_calls`。
+ChatGPT Web 不原生支持 OpenAI 的 function calling。AI Web Free 通过文本协议 `<tool_call>{...}</tool_call>` 模拟该能力：请求里声明 `tools` 字段时，AI Web Free 自动在 system prompt 中注入调用约定，解析模型输出中的 `<tool_call>` 块并转换为标准 OpenAI 格式的 `tool_calls`。
 
 ### 声明工具并发起调用
 
 ```bash
-curl --location 'http://你的服务器ip:8080/v1/chat/completions' \
+curl --location 'http://你的服务器ip:18080/v1/chat/completions' \
 --header 'Content-Type: application/json' \
 --header 'Authorization: Bearer access_token' \
 --data '{
@@ -94,7 +94,7 @@ curl --location 'http://你的服务器ip:8080/v1/chat/completions' \
 }'
 ```
 
-当模型决定调用工具时,Aurora 返回的响应 `finish_reason` 为 `tool_calls`,并在 `choices[0].message.tool_calls` 中列出调用：
+当模型决定调用工具时,AI Web Free 返回的响应 `finish_reason` 为 `tool_calls`,并在 `choices[0].message.tool_calls` 中列出调用：
 
 ```json
 {
@@ -126,7 +126,7 @@ curl --location 'http://你的服务器ip:8080/v1/chat/completions' \
 由客户端(本服务**不**执行工具)执行 `bash` 命令,得到结果,再发起新一轮请求,把结果以 `role: tool` 消息回传:
 
 ```bash
-curl --location 'http://你的服务器ip:8080/v1/chat/completions' \
+curl --location 'http://你的服务器ip:18080/v1/chat/completions' \
 --header 'Content-Type: application/json' \
 --header 'Authorization: Bearer access_token' \
 --data '{
@@ -180,7 +180,7 @@ curl --location 'http://你的服务器ip:8080/v1/chat/completions' \
 ### 限制
 
 - **强制非流式**:工具调用模式会强制 `stream=false`(需要完整响应才能识别 sandbox 拒绝并重试)。客户端即使传 `stream: true` 也只会拿到单次 ChatCompletion。
-- **不在服务端执行工具**:Aurora 只做协议转换,工具的实际执行完全由客户端负责。
+- **不在服务端执行工具**:AI Web Free 只做协议转换,工具的实际执行完全由客户端负责。
 - **仅解析首个拒绝**:当前实现不会处理"工具执行失败 → 重试"循环;若需重试,由客户端再次发起完整对话。
 
 ## Responses API
@@ -188,13 +188,13 @@ curl --location 'http://你的服务器ip:8080/v1/chat/completions' \
 `/v1/responses` 支持与 Chat Completions 相同的工具调用模拟，并使用 Responses API 的扁平 `tools` 结构、`function_call` 输出项和 `function_call_output` 回传项。Codex CLI 可通过 `previous_response_id` 继续工具调用链。
 
 ```bash
-curl --location 'http://你的服务器ip:8080/v1/responses' \
+curl --location 'http://你的服务器ip:18080/v1/responses' \
 --header 'Content-Type: application/json' \
 --header 'Authorization: Bearer access_token' \
 --data '{
   "model": "auto",
   "instructions": "用简洁中文回答。",
-  "input": "总结一下 Aurora 支持哪些接口。",
+  "input": "总结一下 AI Web Free 支持哪些接口。",
   "stream": false
 }'
 ```
@@ -316,7 +316,7 @@ data: {"type":"response.completed","response":{...,"usage":{...}}}
 ```
 
 ```bash
-curl --location 'http://你的服务器ip:8080/v1/models' \
+curl --location 'http://你的服务器ip:18080/v1/models' \
 --header 'Authorization: Bearer access_token'
 ```
 
@@ -325,7 +325,7 @@ curl --location 'http://你的服务器ip:8080/v1/models' \
 上传文件：
 
 ```bash
-curl --location 'http://你的服务器ip:8080/v1/files' \
+curl --location 'http://你的服务器ip:18080/v1/files' \
 --header 'Authorization: Bearer access_token' \
 --form 'purpose="assistants"' \
 --form 'file=@"/path/to/test.pdf"'
@@ -334,7 +334,7 @@ curl --location 'http://你的服务器ip:8080/v1/files' \
 使用返回的 `id` 或 `file_id` 继续问答：
 
 ```bash
-curl --location 'http://你的服务器ip:8080/v1/chat/completions' \
+curl --location 'http://你的服务器ip:18080/v1/chat/completions' \
 --header 'Content-Type: application/json' \
 --header 'Authorization: Bearer access_token' \
 --data '{
@@ -353,7 +353,7 @@ curl --location 'http://你的服务器ip:8080/v1/chat/completions' \
 ## 图片生成
 
 ```bash
-curl --location 'http://你的服务器ip:8080/v1/images/generations' \
+curl --location 'http://你的服务器ip:18080/v1/images/generations' \
 --header 'Content-Type: application/json' \
 --header 'Authorization: Bearer access_token' \
 --data '{
@@ -407,7 +407,7 @@ data: [DONE]
 ### 改图示例
 
 ```bash
-curl --location 'http://你的服务器ip:8080/v1/images/edits' \
+curl --location 'http://你的服务器ip:18080/v1/images/edits' \
 --header 'Authorization: Bearer access_token' \
 --form 'prompt="把猫改成柴犬"' \
 --form 'model="gpt-image-2"' \
@@ -419,7 +419,7 @@ curl --location 'http://你的服务器ip:8080/v1/images/edits' \
 ### 图生图（变体）示例
 
 ```bash
-curl --location 'http://你的服务器ip:8080/v1/images/edits' \
+curl --location 'http://你的服务器ip:18080/v1/images/edits' \
 --header 'Authorization: Bearer access_token' \
 --form 'n=2' \
 --form 'response_format="b64_json"' \
@@ -429,7 +429,7 @@ curl --location 'http://你的服务器ip:8080/v1/images/edits' \
 ### Responses API 风格：多张参考图
 
 ```bash
-curl --location 'http://你的服务器ip:8080/v1/images/edits' \
+curl --location 'http://你的服务器ip:18080/v1/images/edits' \
 --header 'Content-Type: application/json' \
 --header 'Authorization: Bearer access_token' \
 --data '{
@@ -454,7 +454,7 @@ curl --location 'http://你的服务器ip:8080/v1/images/edits' \
 ## TTS 语音合成
 
 ```bash
-curl --location 'http://你的服务器ip:8080/v1/audio/speech' \
+curl --location 'http://你的服务器ip:18080/v1/audio/speech' \
 --header 'Content-Type: application/json' \
 --header 'Authorization: Bearer access_token' \
 --data '{
@@ -475,7 +475,7 @@ curl --location 'http://你的服务器ip:8080/v1/audio/speech' \
 ### 请求
 
 ```bash
-curl --location 'http://你的服务器ip:8080/v1/audio/transcriptions' \
+curl --location 'http://你的服务器ip:18080/v1/audio/transcriptions' \
 --header 'Authorization: Bearer access_token' \
 --form 'file=@"/path/to/audio.mp3"' \
 --form 'model="whisper-1"' \
@@ -525,7 +525,7 @@ plain text content
 将音频文件翻译为英文。与 OpenAI 官方 `/v1/audio/translations` 兼容。
 
 ```bash
-curl --location 'http://你的服务器ip:8080/v1/audio/translations' \
+curl --location 'http://你的服务器ip:18080/v1/audio/translations' \
 --header 'Authorization: Bearer access_token' \
 --form 'file=@"/path/to/audio.mp3"' \
 --form 'model="whisper-1"' \
@@ -537,7 +537,7 @@ curl --location 'http://你的服务器ip:8080/v1/audio/translations' \
 ## 原始 ChatGPT Conversation 透传
 
 ```bash
-curl --location 'http://你的服务器ip:8080/backend-api/conversation' \
+curl --location 'http://你的服务器ip:18080/backend-api/conversation' \
 --header 'Content-Type: application/json' \
 --header 'Authorization: Bearer access_token' \
 --data '{

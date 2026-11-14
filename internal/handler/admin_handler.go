@@ -628,7 +628,7 @@ func (h *AdminHandler) ExportAccounts(c *gin.Context) {
 	case "sub2api_json":
 		bundle := accounts.BuildSub2APIJSON(pool.AllPersistentAccounts(), includeSecrets)
 		if download {
-			c.Header("Content-Disposition", `attachment; filename="aurora_sub2api.json"`)
+			c.Header("Content-Disposition", `attachment; filename="ai_web_free_sub2api.json"`)
 		}
 		c.JSON(http.StatusOK, bundle)
 

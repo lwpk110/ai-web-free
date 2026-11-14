@@ -235,7 +235,7 @@ func (a *WSSActor) connect() error {
 // getWebsocketURL 调用 /celsius/ws/user 获取 WSS URL
 func (a *WSSActor) getWebsocketURL() (string, error) {
 	apiURL := a.buildWSSURL()
-	headers := httpclient.AuroraHeaders{
+	headers := httpclient.Headers{
 		"User-Agent": a.account.Fingerprint.UserAgent,
 		"Accept":     "*/*",
 		"Origin":     "https://chatgpt.com",

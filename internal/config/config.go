@@ -35,7 +35,7 @@ type Config struct {
 func Load() Config {
 	return Config{
 		ServerHost:          getEnv("SERVER_HOST", "0.0.0.0"),
-		ServerPort:          getEnvWithFallback("SERVER_PORT", "PORT", "8080"),
+		ServerPort:          getEnvWithFallback("SERVER_PORT", "PORT", "18080"),
 		TLSCert:             os.Getenv("TLS_CERT"),
 		TLSKey:              os.Getenv("TLS_KEY"),
 		Authorization:       os.Getenv("Authorization"),

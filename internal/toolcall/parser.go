@@ -6,7 +6,7 @@
 //   - RobustJSON 修复模型常见的 JSON 错误(Windows 路径反斜杠、未闭合括号)
 //   - RecoverFromText 是兜底:模型有时绕过 <tool_call> 直接输出 JSON
 //
-// 设计取舍:对齐  行为以保证 aurora 客户端能复用相同的 prompt 模板。
+// 设计取舍:对齐  行为以保证客户端能复用相同的 prompt 模板。
 package toolcall
 
 import (

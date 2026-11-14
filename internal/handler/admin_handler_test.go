@@ -339,7 +339,7 @@ func TestAdminLogsFilterAndAccountsExportRedaction(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200 on export with secrets, got %d", w.Code)
 	}
-	if !strings.Contains(w.Body.String(), "secret-pass") || !strings.Contains(w.Header().Get("Content-Disposition"), "aurora_sub2api.json") {
+	if !strings.Contains(w.Body.String(), "secret-pass") || !strings.Contains(w.Header().Get("Content-Disposition"), "ai_web_free_sub2api.json") {
 		t.Fatalf("expected secrets and attachment header, got body=%s disp=%s", w.Body.String(), w.Header().Get("Content-Disposition"))
 	}
 

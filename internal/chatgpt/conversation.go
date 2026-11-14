@@ -36,7 +36,7 @@ type conversationInitResponse struct {
 }
 
 // POSTConversationInit 调用 /conversation/init 建立会话上下文。
-func POSTConversationInit(client httpclient.AuroraHttpClient, account *accounts.Account, state *ChatClientState) (*conversationInitResponse, error) {
+func POSTConversationInit(client httpclient.HttpClient, account *accounts.Account, state *ChatClientState) (*conversationInitResponse, error) {
 	var apiUrl string
 	if account != nil && account.Type == accounts.TypeNoAuth {
 		apiUrl = strings.Replace(BaseURL, "backend-api", "backend-anon", 1) + "/conversation/init"
@@ -81,11 +81,11 @@ func POSTConversationInit(client httpclient.AuroraHttpClient, account *accounts.
 	return &result, nil
 }
 
-func getConduitToken(client httpclient.AuroraHttpClient, message chatgpt_types.ChatGPTRequest, account *accounts.Account, chatToken *TurnStile, turnTraceID string) (string, error) {
+func getConduitToken(client httpclient.HttpClient, message chatgpt_types.ChatGPTRequest, account *accounts.Account, chatToken *TurnStile, turnTraceID string) (string, error) {
 	return getConduitTokenWithState(client, message, account, chatToken, turnTraceID, nil, PrepareStateNone, "")
 }
 
-func getConduitTokenWithState(client httpclient.AuroraHttpClient, message chatgpt_types.ChatGPTRequest, account *accounts.Account, chatToken *TurnStile, turnTraceID string, state *ChatClientState, prepareState PrepareState, previousConduitToken string) (string, error) {
+func getConduitTokenWithState(client httpclient.HttpClient, message chatgpt_types.ChatGPTRequest, account *accounts.Account, chatToken *TurnStile, turnTraceID string, state *ChatClientState, prepareState PrepareState, previousConduitToken string) (string, error) {
 	message = requestWithClientState(message, state)
 	apiUrl, targetPath := conversationURL(account, "/f/conversation/prepare")
 	parentMessageID := message.ParentMessageID
@@ -145,12 +145,12 @@ func getConduitTokenWithState(client httpclient.AuroraHttpClient, message chatgp
 }
 
 // PrepareConversationConduit 执行单步 prepare（无 state）。
-func PrepareConversationConduit(client httpclient.AuroraHttpClient, message chatgpt_types.ChatGPTRequest, account *accounts.Account, proxy string, turnTraceID string) (string, error) {
+func PrepareConversationConduit(client httpclient.HttpClient, message chatgpt_types.ChatGPTRequest, account *accounts.Account, proxy string, turnTraceID string) (string, error) {
 	return PrepareConversationConduitWithState(client, message, account, proxy, turnTraceID, nil)
 }
 
 // PrepareConversationConduitWithState 执行单步 prepare（带 state）。
-func PrepareConversationConduitWithState(client httpclient.AuroraHttpClient, message chatgpt_types.ChatGPTRequest, account *accounts.Account, proxy string, turnTraceID string, state *ChatClientState) (string, error) {
+func PrepareConversationConduitWithState(client httpclient.HttpClient, message chatgpt_types.ChatGPTRequest, account *accounts.Account, proxy string, turnTraceID string, state *ChatClientState) (string, error) {
 	if proxy != "" {
 		client.SetProxy(proxy)
 	}
@@ -158,7 +158,7 @@ func PrepareConversationConduitWithState(client httpclient.AuroraHttpClient, mes
 }
 
 // PrepareConversationConduitFull 走完整的 none -> sent -> success 三态。
-func PrepareConversationConduitFull(client httpclient.AuroraHttpClient, message chatgpt_types.ChatGPTRequest, account *accounts.Account, proxy string, turnTraceID string, state *ChatClientState) (string, error) {
+func PrepareConversationConduitFull(client httpclient.HttpClient, message chatgpt_types.ChatGPTRequest, account *accounts.Account, proxy string, turnTraceID string, state *ChatClientState) (string, error) {
 	if proxy != "" {
 		client.SetProxy(proxy)
 	}
@@ -179,7 +179,7 @@ func PrepareConversationConduitFull(client httpclient.AuroraHttpClient, message 
 }
 
 // PrepareConversationConduitFullWithSentinel 走完整三态 + sentinel headers。
-func PrepareConversationConduitFullWithSentinel(client httpclient.AuroraHttpClient, message chatgpt_types.ChatGPTRequest, account *accounts.Account, proxy string, turnTraceID string, state *ChatClientState, turnStile *TurnStile) (string, error) {
+func PrepareConversationConduitFullWithSentinel(client httpclient.HttpClient, message chatgpt_types.ChatGPTRequest, account *accounts.Account, proxy string, turnTraceID string, state *ChatClientState, turnStile *TurnStile) (string, error) {
 	if proxy != "" {
 		client.SetProxy(proxy)
 	}
@@ -261,7 +261,7 @@ func normalizeThinkingEffort(effort string) string {
 }
 
 // POSTconversation 发送 /f/conversation（自动 prepare）。
-func POSTconversation(client httpclient.AuroraHttpClient, message chatgpt_types.ChatGPTRequest, account *accounts.Account, chat_token *TurnStile, proxy string) (*http.Response, error) {
+func POSTconversation(client httpclient.HttpClient, message chatgpt_types.ChatGPTRequest, account *accounts.Account, chat_token *TurnStile, proxy string) (*http.Response, error) {
 	if proxy != "" {
 		client.SetProxy(proxy)
 	}
@@ -274,12 +274,12 @@ func POSTconversation(client httpclient.AuroraHttpClient, message chatgpt_types.
 }
 
 // POSTconversationPrepared 发送准备好的 /f/conversation（无 state）。
-func POSTconversationPrepared(client httpclient.AuroraHttpClient, message chatgpt_types.ChatGPTRequest, account *accounts.Account, chat_token *TurnStile, proxy string, conduitToken string, turnTraceID string) (*http.Response, error) {
+func POSTconversationPrepared(client httpclient.HttpClient, message chatgpt_types.ChatGPTRequest, account *accounts.Account, chat_token *TurnStile, proxy string, conduitToken string, turnTraceID string) (*http.Response, error) {
 	return POSTconversationPreparedWithState(client, message, account, chat_token, proxy, conduitToken, turnTraceID, nil)
 }
 
 // POSTconversationPreparedWithState 发送准备好的 /f/conversation（带 state）。
-func POSTconversationPreparedWithState(client httpclient.AuroraHttpClient, message chatgpt_types.ChatGPTRequest, account *accounts.Account, chat_token *TurnStile, proxy string, conduitToken string, turnTraceID string, state *ChatClientState) (*http.Response, error) {
+func POSTconversationPreparedWithState(client httpclient.HttpClient, message chatgpt_types.ChatGPTRequest, account *accounts.Account, chat_token *TurnStile, proxy string, conduitToken string, turnTraceID string, state *ChatClientState) (*http.Response, error) {
 	if proxy != "" {
 		client.SetProxy(proxy)
 	}

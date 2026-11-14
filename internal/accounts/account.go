@@ -83,7 +83,7 @@ type Account struct {
 	PlanType         string // 来自 JWT: chatgpt_plan_type (如 free / plus / team)
 
 	// 隔离单元（每个账号独立）
-	Client      httpclient.AuroraHttpClient // 专属 TLS Client
+	Client      httpclient.HttpClient // 专属 TLS Client
 	Proxy       string                      // 专属代理 IP
 	Fingerprint BrowserFingerprint          // 专属指纹
 

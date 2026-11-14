@@ -10,18 +10,18 @@ import (
 
 // Builder HTTP header 构造器，封装鉴权、cookie、team account 等公共逻辑。
 type Builder struct {
-	header httpclient.AuroraHeaders
+	header httpclient.Headers
 }
 
 // New 创建一个新的 header builder。
 func New() *Builder {
 	return &Builder{
-		header: make(httpclient.AuroraHeaders),
+		header: make(httpclient.Headers),
 	}
 }
 
 // Build 返回构造好的 header。
-func (b *Builder) Build() httpclient.AuroraHeaders {
+func (b *Builder) Build() httpclient.Headers {
 	return b.header
 }
 
@@ -210,12 +210,12 @@ func (b *Builder) WithConversationHeaders(targetPath string) *Builder {
 // ── 便捷构造函数 ──
 
 // NewBaseHeader 创建基础 header（无 state）。
-func NewBaseHeader() httpclient.AuroraHeaders {
+func NewBaseHeader() httpclient.Headers {
 	return New().WithBaseHeaders("").Build()
 }
 
 // NewBaseHeaderWithState 创建带 state 的基础 header。
-func NewBaseHeaderWithState(conversationID, deviceID, sessionID, userAgent string) httpclient.AuroraHeaders {
+func NewBaseHeaderWithState(conversationID, deviceID, sessionID, userAgent string) httpclient.Headers {
 	b := New().WithBaseHeaders(conversationID)
 	if deviceID != "" {
 		b.WithDeviceID(deviceID)

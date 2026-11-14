@@ -17,7 +17,7 @@ type Model struct {
 }
 
 // ListModels 获取当前登录账号可见的网页模型，不添加静态别名。
-func ListModels(client httpclient.AuroraHttpClient, account *accounts.Account) ([]Model, int, error) {
+func ListModels(client httpclient.HttpClient, account *accounts.Account) ([]Model, int, error) {
 	if account == nil || account.Type == accounts.TypeNoAuth || account.Token == "" {
 		return nil, http.StatusForbidden, errors.New("model listing requires a logged-in ChatGPT account")
 	}

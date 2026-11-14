@@ -37,7 +37,7 @@ jobs:
         run: go test ./...
 
       - name: Build Go binary
-        run: go build -o aurora .
+        run: go build -o ai-web-free .
 
       - name: Run Python script unit tests
         run: python3 -m unittest discover -s scripts -p "test_*.py" -v

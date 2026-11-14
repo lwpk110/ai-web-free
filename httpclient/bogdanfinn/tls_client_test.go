@@ -31,7 +31,7 @@ func TestTlsClient_Request(t *testing.T) {
 
 	apiUrl := BaseURL + "/sentinel/chat-requirements"
 	payload := strings.NewReader(`{"conversation_mode_kind":"primary_assistant"}`)
-	header := make(httpclient.AuroraHeaders)
+	header := make(httpclient.Headers)
 	header.Set("Content-Type", "application/json")
 	header.Set("User-Agent", userAgent)
 	header.Set("Accept", "*/*")
@@ -60,7 +60,7 @@ func TestChatGPTModel(t *testing.T) {
 	userAgent := "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36"
 	apiUrl := "https://chatgpt.com/backend-api/models"
 
-	header := make(httpclient.AuroraHeaders)
+	header := make(httpclient.Headers)
 	header.Set("Content-Type", "application/json")
 	header.Set("User-Agent", userAgent)
 	header.Set("Accept", "*/*")

@@ -55,11 +55,11 @@ jobs:
           RELEASE_NAME: ${{ steps.version.outputs.version }}
         shell: bash
         run: |
-          artifact="aurora-${RELEASE_NAME}-${GOOS}-${GOARCH}"
+          artifact="ai-web-free-${RELEASE_NAME}-${GOOS}-${GOARCH}"
           mkdir -p "${artifact}"
-          output="aurora"
+          output="ai-web-free"
           if [ "${GOOS}" = "windows" ]; then
-            output="aurora.exe"
+            output="ai-web-free.exe"
           fi
           go build -trimpath -ldflags="-s -w" -o "${artifact}/${output}" .
           tar -czf "${artifact}.tar.gz" "${artifact}"
@@ -67,8 +67,8 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: aurora-${{ steps.version.outputs.version }}-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: aurora-${{ steps.version.outputs.version }}-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz
+          name: ai-web-free-${{ steps.version.outputs.version }}-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: ai-web-free-${{ steps.version.outputs.version }}-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz
           if-no-files-found: error
 
   release:

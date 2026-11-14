@@ -61,7 +61,7 @@ func LookupUploadedFile(fileID string) (UploadedFile, bool) {
 }
 
 // UploadFile 执行完整三步上传,对齐 chatgpttoapi/files.go UploadFile。
-func UploadFile(client httpclient.AuroraHttpClient, account *accounts.Account, proxy, filename, mimeHint string, data []byte) (UploadedFile, int, error) {
+func UploadFile(client httpclient.HttpClient, account *accounts.Account, proxy, filename, mimeHint string, data []byte) (UploadedFile, int, error) {
 	if proxy != "" {
 		client.SetProxy(proxy)
 	}
@@ -134,7 +134,7 @@ func UploadFile(client httpclient.AuroraHttpClient, account *accounts.Account, p
 	return result, http.StatusOK, nil
 }
 
-func createUpload(client httpclient.AuroraHttpClient, account *accounts.Account, payload map[string]interface{}) (uploadMetaResponse, int, error) {
+func createUpload(client httpclient.HttpClient, account *accounts.Account, payload map[string]interface{}) (uploadMetaResponse, int, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return uploadMetaResponse{}, http.StatusInternalServerError, err
@@ -168,8 +168,8 @@ func createUpload(client httpclient.AuroraHttpClient, account *accounts.Account,
 	return meta, response.StatusCode, nil
 }
 
-func putUpload(client httpclient.AuroraHttpClient, uploadURL, contentType string, data []byte) (int, error) {
-	header := make(httpclient.AuroraHeaders)
+func putUpload(client httpclient.HttpClient, uploadURL, contentType string, data []byte) (int, error) {
+	header := make(httpclient.Headers)
 	header.Set("Content-Type", contentType)
 	header.Set("X-Ms-Blob-Type", "BlockBlob")
 	header.Set("X-Ms-Version", "2020-04-08")
@@ -190,7 +190,7 @@ func putUpload(client httpclient.AuroraHttpClient, uploadURL, contentType string
 	return response.StatusCode, nil
 }
 
-func confirmUpload(client httpclient.AuroraHttpClient, account *accounts.Account, fileID string) (int, error) {
+func confirmUpload(client httpclient.HttpClient, account *accounts.Account, fileID string) (int, error) {
 	header := baseHeaderFromAccount(account)
 	header.Set("Accept", "application/json")
 	header.Set("Content-Type", "application/json")

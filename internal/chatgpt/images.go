@@ -42,9 +42,9 @@ type fileInfo struct {
 }
 
 // GetImageSource 并发获取图片的 Markdown 链接。
-func GetImageSource(client httpclient.AuroraHttpClient, wg *sync.WaitGroup, url string, prompt string, account *accounts.Account, idx int, imgSource []string) {
+func GetImageSource(client httpclient.HttpClient, wg *sync.WaitGroup, url string, prompt string, account *accounts.Account, idx int, imgSource []string) {
 	defer wg.Done()
-	header := make(httpclient.AuroraHeaders)
+	header := make(httpclient.Headers)
 	if account != nil && account.PUID != "" {
 		header.Set("Cookie", "_puid="+account.PUID+";")
 	}
@@ -68,8 +68,8 @@ func GetImageSource(client httpclient.AuroraHttpClient, wg *sync.WaitGroup, url 
 }
 
 // GetImageDownloadURL 获取图片的下载 URL。
-func GetImageDownloadURL(client httpclient.AuroraHttpClient, url string, account *accounts.Account) (string, error) {
-	header := make(httpclient.AuroraHeaders)
+func GetImageDownloadURL(client httpclient.HttpClient, url string, account *accounts.Account) (string, error) {
+	header := make(httpclient.Headers)
 	if account != nil && account.PUID != "" {
 		header.Set("Cookie", "_puid="+account.PUID+";")
 	}
@@ -101,8 +101,8 @@ func GetImageDownloadURL(client httpclient.AuroraHttpClient, url string, account
 }
 
 // DownloadImageBytes 从 URL 下载图片的字节数据。
-func DownloadImageBytes(client httpclient.AuroraHttpClient, url string, account *accounts.Account) ([]byte, error) {
-	header := make(httpclient.AuroraHeaders)
+func DownloadImageBytes(client httpclient.HttpClient, url string, account *accounts.Account) ([]byte, error) {
+	header := make(httpclient.Headers)
 	if account != nil && account.PUID != "" {
 		header.Set("Cookie", "_puid="+account.PUID+";")
 	}
@@ -158,7 +158,7 @@ func fileDownloadBaseURL() string {
 	return strings.TrimRight(apiURL, "/") + "/"
 }
 
-func appendAssetPointerResult(client httpclient.AuroraHttpClient, account *accounts.Account, results *[]ImageGenerationResult, seen map[string]bool, assetPointer string) {
+func appendAssetPointerResult(client httpclient.HttpClient, account *accounts.Account, results *[]ImageGenerationResult, seen map[string]bool, assetPointer string) {
 	if assetPointer == "" {
 		return
 	}
@@ -173,7 +173,7 @@ func appendAssetPointerResult(client httpclient.AuroraHttpClient, account *accou
 	addImageResult(results, seen, ImageGenerationResult{URL: downloadURL})
 }
 
-func appendFileIDResult(client httpclient.AuroraHttpClient, account *accounts.Account, results *[]ImageGenerationResult, seen map[string]bool, fileID string) {
+func appendFileIDResult(client httpclient.HttpClient, account *accounts.Account, results *[]ImageGenerationResult, seen map[string]bool, fileID string) {
 	if fileID == "" {
 		return
 	}
@@ -184,7 +184,7 @@ func appendFileIDResult(client httpclient.AuroraHttpClient, account *accounts.Ac
 	addImageResult(results, seen, ImageGenerationResult{URL: downloadURL})
 }
 
-func collectImageResultsFromValue(client httpclient.AuroraHttpClient, account *accounts.Account, value interface{}, results *[]ImageGenerationResult, seen map[string]bool) {
+func collectImageResultsFromValue(client httpclient.HttpClient, account *accounts.Account, value interface{}, results *[]ImageGenerationResult, seen map[string]bool) {
 	switch item := value.(type) {
 	case map[string]interface{}:
 		if result, ok := item["result"].(string); ok && result != "" {
@@ -222,7 +222,7 @@ func collectImageResultsFromValue(client httpclient.AuroraHttpClient, account *a
 }
 
 // CollectImageResults 从 SSE 响应中收集图片生成结果。
-func CollectImageResults(response *http.Response, client httpclient.AuroraHttpClient, account *accounts.Account) ([]ImageGenerationResult, string, string, error) {
+func CollectImageResults(response *http.Response, client httpclient.HttpClient, account *accounts.Account) ([]ImageGenerationResult, string, string, error) {
 	reader := bufio.NewReader(response.Body)
 	var originalResponse chatgpt_types.ChatGPTResponse
 	var convID string
@@ -291,7 +291,7 @@ func CollectImageResults(response *http.Response, client httpclient.AuroraHttpCl
 	return results, convID, strings.Join(textParts, ""), nil
 }
 
-func getConversation(client httpclient.AuroraHttpClient, account *accounts.Account, conversationID string) (map[string]interface{}, error) {
+func getConversation(client httpclient.HttpClient, account *accounts.Account, conversationID string) (map[string]interface{}, error) {
 	if conversationID == "" {
 		return nil, fmt.Errorf("missing conversation id")
 	}
@@ -315,7 +315,7 @@ func getConversation(client httpclient.AuroraHttpClient, account *accounts.Accou
 	return result, nil
 }
 
-func collectImageResultsFromConversation(client httpclient.AuroraHttpClient, account *accounts.Account, conversation map[string]interface{}) []ImageGenerationResult {
+func collectImageResultsFromConversation(client httpclient.HttpClient, account *accounts.Account, conversation map[string]interface{}) []ImageGenerationResult {
 	var results []ImageGenerationResult
 	seen := make(map[string]bool)
 	collectImageResultsFromValue(client, account, conversation, &results, seen)
@@ -356,7 +356,7 @@ func findImageGenerationError(value interface{}) string {
 }
 
 // PollImageResults 轮询对话直到图片生成完成。
-func PollImageResults(client httpclient.AuroraHttpClient, account *accounts.Account, conversationID string, initial []ImageGenerationResult) ([]ImageGenerationResult, error) {
+func PollImageResults(client httpclient.HttpClient, account *accounts.Account, conversationID string, initial []ImageGenerationResult) ([]ImageGenerationResult, error) {
 	if len(initial) > 0 || conversationID == "" {
 		return initial, nil
 	}
@@ -439,7 +439,7 @@ func imageSystemHints() []string {
 	return []string{"picture_v2"}
 }
 
-func prepareImageConversation(client httpclient.AuroraHttpClient, account *accounts.Account, turnStile *TurnStile, prompt, model string, state *ChatClientState) (string, error) {
+func prepareImageConversation(client httpclient.HttpClient, account *accounts.Account, turnStile *TurnStile, prompt, model string, state *ChatClientState) (string, error) {
 	parentMessageID := "client-created-root"
 	if state != nil && state.ParentMessageID != "" {
 		parentMessageID = state.ParentMessageID
@@ -495,7 +495,7 @@ func prepareImageConversation(client httpclient.AuroraHttpClient, account *accou
 }
 
 // GeneratePictureConversationImages 通过图片对话 API 生成图片。
-func GeneratePictureConversationImages(client httpclient.AuroraHttpClient, account *accounts.Account, turnStile *TurnStile, prompt, model, proxy string) ([]ImageGenerationResult, string, error) {
+func GeneratePictureConversationImages(client httpclient.HttpClient, account *accounts.Account, turnStile *TurnStile, prompt, model, proxy string) ([]ImageGenerationResult, string, error) {
 	if proxy != "" {
 		client.SetProxy(proxy)
 	}
@@ -562,7 +562,7 @@ func GeneratePictureConversationImages(client httpclient.AuroraHttpClient, accou
 }
 
 // GeneratePictureConversationImagesWithReferences 携带源图引用生成图片（用于 edits/variations）。
-func GeneratePictureConversationImagesWithReferences(client httpclient.AuroraHttpClient, account *accounts.Account, turnStile *TurnStile, prompt, model, proxy string, references []ImageEditReference) ([]ImageGenerationResult, string, error) {
+func GeneratePictureConversationImagesWithReferences(client httpclient.HttpClient, account *accounts.Account, turnStile *TurnStile, prompt, model, proxy string, references []ImageEditReference) ([]ImageGenerationResult, string, error) {
 	if proxy != "" {
 		client.SetProxy(proxy)
 	}

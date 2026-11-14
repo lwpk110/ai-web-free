@@ -38,7 +38,7 @@ type ImageResult struct {
 }
 
 // Generate 执行图片生成流程：上传源图 → 调用上游 → 转换结果。
-func Generate(client httpclient.AuroraHttpClient, account *accounts.Account, turnStile *chatgpt.TurnStile, proxyURL string, req NormalizedImageRequest) ([]ImageResult, string, error) {
+func Generate(client httpclient.HttpClient, account *accounts.Account, turnStile *chatgpt.TurnStile, proxyURL string, req NormalizedImageRequest) ([]ImageResult, string, error) {
 	// 上传源图（如果有）
 	var references []chatgpt.ImageEditReference
 	for _, src := range req.Sources {
@@ -94,7 +94,7 @@ func Generate(client httpclient.AuroraHttpClient, account *accounts.Account, tur
 	return allResults, upstreamText, nil
 }
 
-func convertImageResult(client httpclient.AuroraHttpClient, account *accounts.Account, ir chatgpt.ImageGenerationResult, responseFormat string) (ImageResult, error) {
+func convertImageResult(client httpclient.HttpClient, account *accounts.Account, ir chatgpt.ImageGenerationResult, responseFormat string) (ImageResult, error) {
 	if responseFormat == "b64_json" {
 		if ir.B64JSON != "" {
 			return ImageResult{B64JSON: ir.B64JSON}, nil
@@ -111,7 +111,7 @@ func convertImageResult(client httpclient.AuroraHttpClient, account *accounts.Ac
 }
 
 // NormalizeImageURL 解析单个 image_url 字符串为 ImageSource。
-func NormalizeImageURL(client httpclient.AuroraHttpClient, raw string) (ImageSource, bool, error) {
+func NormalizeImageURL(client httpclient.HttpClient, raw string) (ImageSource, bool, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return ImageSource{}, false, nil
@@ -161,11 +161,11 @@ func decodeDataURL(url string) (ImageSource, bool, error) {
 	return ImageSource{Data: raw, Filename: "image_url." + ext, ContentType: contentType}, true, nil
 }
 
-func downloadHTTPURL(client httpclient.AuroraHttpClient, url string) (ImageSource, bool, error) {
+func downloadHTTPURL(client httpclient.HttpClient, url string) (ImageSource, bool, error) {
 	if client == nil {
 		client = bogdanfinn.NewStdClient()
 	}
-	headers := httpclient.AuroraHeaders{
+	headers := httpclient.Headers{
 		"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
 		"Accept":     "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
 	}
@@ -237,7 +237,7 @@ func NormalizeMultipartImages(rawImages []interface{}) []ImageSource {
 }
 
 // ResolveJSONImageSources 把 JSON body 中的 images/image/image_url 字段解析为 ImageSource。
-func ResolveJSONImageSources(body map[string]interface{}, client httpclient.AuroraHttpClient) ([]ImageSource, error) {
+func ResolveJSONImageSources(body map[string]interface{}, client httpclient.HttpClient) ([]ImageSource, error) {
 	out := make([]ImageSource, 0, 2)
 	appendValue := func(v interface{}) error {
 		switch t := v.(type) {

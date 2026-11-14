@@ -603,11 +603,11 @@ func imageEditDecodeDataURL(url string) (editImageInput, error) {
 	return imageEditReadJSONImage(raw, "image_url."+ext, contentType)
 }
 
-func imageEditDownloadHTTPURL(client httpclient.AuroraHttpClient, url string) (editImageInput, error) {
+func imageEditDownloadHTTPURL(client httpclient.HttpClient, url string) (editImageInput, error) {
 	if client == nil {
 		client = bogdanfinn.NewStdClient()
 	}
-	headers := httpclient.AuroraHeaders{
+	headers := httpclient.Headers{
 		"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
 		"Accept":     "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
 	}
@@ -640,7 +640,7 @@ func imageEditDownloadHTTPURL(client httpclient.AuroraHttpClient, url string) (e
 	return imageEditReadJSONImage(data, filename, contentType)
 }
 
-func imageEditConvertURL(client httpclient.AuroraHttpClient, raw string) (editImageInput, bool, error) {
+func imageEditConvertURL(client httpclient.HttpClient, raw string) (editImageInput, bool, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return editImageInput{}, false, nil
@@ -658,7 +658,7 @@ func imageEditConvertURL(client httpclient.AuroraHttpClient, raw string) (editIm
 	return item, true, err
 }
 
-func resolveEditImageSources(c *gin.Context, body map[string]interface{}, client httpclient.AuroraHttpClient) ([]editImageInput, error) {
+func resolveEditImageSources(c *gin.Context, body map[string]interface{}, client httpclient.HttpClient) ([]editImageInput, error) {
 	out := make([]editImageInput, 0, 2)
 	appendValue := func(v interface{}) error {
 		switch t := v.(type) {

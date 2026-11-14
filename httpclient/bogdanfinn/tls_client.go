@@ -47,7 +47,7 @@ func convertResponse(resp *fhttp.Response) *http.Response {
 	return response
 }
 
-func (t *TlsClient) handleHeaders(req *fhttp.Request, headers httpclient.AuroraHeaders) {
+func (t *TlsClient) handleHeaders(req *fhttp.Request, headers httpclient.Headers) {
 	if headers == nil {
 		return
 	}
@@ -78,7 +78,7 @@ func (t *TlsClient) handleCookies(req *fhttp.Request, cookies []*http.Cookie) {
 	}
 }
 
-func (t *TlsClient) Request(method httpclient.HttpMethod, url string, headers httpclient.AuroraHeaders, cookies []*http.Cookie, body io.Reader) (*http.Response, error) {
+func (t *TlsClient) Request(method httpclient.HttpMethod, url string, headers httpclient.Headers, cookies []*http.Cookie, body io.Reader) (*http.Response, error) {
 	req, err := fhttp.NewRequest(string(method), url, body)
 	if err != nil {
 		return nil, err

@@ -21,13 +21,13 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-type fakeAuroraClient struct {
+type fakeHTTPClient struct {
 	response *http.Response
-	headers  httpclient.AuroraHeaders
+	headers  httpclient.Headers
 	body     string
 }
 
-func (f *fakeAuroraClient) Request(method httpclient.HttpMethod, url string, headers httpclient.AuroraHeaders, cookies []*http.Cookie, body io.Reader) (*http.Response, error) {
+func (f *fakeHTTPClient) Request(method httpclient.HttpMethod, url string, headers httpclient.Headers, cookies []*http.Cookie, body io.Reader) (*http.Response, error) {
 	f.headers = headers
 	if body != nil {
 		data, _ := io.ReadAll(body)
@@ -36,14 +36,14 @@ func (f *fakeAuroraClient) Request(method httpclient.HttpMethod, url string, hea
 	return f.response, nil
 }
 
-func (f *fakeAuroraClient) SetProxy(url string) error {
+func (f *fakeHTTPClient) SetProxy(url string) error {
 	return nil
 }
 
-func (f *fakeAuroraClient) SetCookies(rawUrl string, cookies []*http.Cookie) {
+func (f *fakeHTTPClient) SetCookies(rawUrl string, cookies []*http.Cookie) {
 }
 
-func (f *fakeAuroraClient) GetCookies(rawUrl string) []*http.Cookie {
+func (f *fakeHTTPClient) GetCookies(rawUrl string) []*http.Cookie {
 	return nil
 }
 
@@ -463,7 +463,7 @@ func TestHandlerDetailedDoesNotMarkStopWhenUpstreamOnlySendsDone(t *testing.T) {
 }
 
 func TestGetConduitTokenAllowsNullToken(t *testing.T) {
-	client := &fakeAuroraClient{
+	client := &fakeHTTPClient{
 		response: &http.Response{
 			StatusCode: http.StatusOK,
 			Body:       io.NopCloser(strings.NewReader(`{"status":"ok","conduit_token":null}`)),
@@ -484,7 +484,7 @@ func TestGetConduitTokenAllowsNullToken(t *testing.T) {
 }
 
 func TestPrepareConversationConduitDoesNotUseSentinelHeaders(t *testing.T) {
-	client := &fakeAuroraClient{
+	client := &fakeHTTPClient{
 		response: &http.Response{
 			StatusCode: http.StatusOK,
 			Body:       io.NopCloser(strings.NewReader(`{"status":"ok","conduit_token":"abc"}`)),
@@ -507,7 +507,7 @@ func TestPrepareConversationConduitDoesNotUseSentinelHeaders(t *testing.T) {
 }
 
 func TestPrepareConversationConduitPropagatesReasonSystemHint(t *testing.T) {
-	client := &fakeAuroraClient{
+	client := &fakeHTTPClient{
 		response: &http.Response{
 			StatusCode: http.StatusOK,
 			Body:       io.NopCloser(strings.NewReader(`{"conduit_token":"abc"}`)),
@@ -544,9 +544,9 @@ func TestPrepareConversationConduitPropagatesReasonSystemHint(t *testing.T) {
 	}
 }
 
-// sequentialAuroraClient 是一个按调用顺序返回不同响应的 fake client,
+// sequentialHTTPClient 是一个按调用顺序返回不同响应的 fake client,
 // 用于验证 PrepareConversationConduitFull 的三态时序和 token 链路。
-type sequentialAuroraClient struct {
+type sequentialHTTPClient struct {
 	mu        sync.Mutex
 	responses []*http.Response
 	requests  []capturedRequest
@@ -554,11 +554,11 @@ type sequentialAuroraClient struct {
 
 type capturedRequest struct {
 	url     string
-	headers httpclient.AuroraHeaders
+	headers httpclient.Headers
 	body    string
 }
 
-func (s *sequentialAuroraClient) Request(method httpclient.HttpMethod, url string, headers httpclient.AuroraHeaders, cookies []*http.Cookie, body io.Reader) (*http.Response, error) {
+func (s *sequentialHTTPClient) Request(method httpclient.HttpMethod, url string, headers httpclient.Headers, cookies []*http.Cookie, body io.Reader) (*http.Response, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	idx := len(s.requests)
@@ -574,14 +574,14 @@ func (s *sequentialAuroraClient) Request(method httpclient.HttpMethod, url strin
 	return s.responses[idx], nil
 }
 
-func (s *sequentialAuroraClient) SetProxy(url string) error                        { return nil }
-func (s *sequentialAuroraClient) SetCookies(rawUrl string, cookies []*http.Cookie) {}
-func (s *sequentialAuroraClient) GetCookies(rawUrl string) []*http.Cookie {
+func (s *sequentialHTTPClient) SetProxy(url string) error                        { return nil }
+func (s *sequentialHTTPClient) SetCookies(rawUrl string, cookies []*http.Cookie) {}
+func (s *sequentialHTTPClient) GetCookies(rawUrl string) []*http.Cookie {
 	// 返回一个 cf_clearance,让 ensureBootstrapped 直接走 fast-path
 	return []*http.Cookie{{Name: "cf_clearance", Value: "test-cf"}}
 }
 
-func (s *sequentialAuroraClient) requestBodies() []string {
+func (s *sequentialHTTPClient) requestBodies() []string {
 	out := make([]string, len(s.requests))
 	for i, r := range s.requests {
 		out[i] = r.body
@@ -589,8 +589,8 @@ func (s *sequentialAuroraClient) requestBodies() []string {
 	return out
 }
 
-func (s *sequentialAuroraClient) requestHeaders() []httpclient.AuroraHeaders {
-	out := make([]httpclient.AuroraHeaders, len(s.requests))
+func (s *sequentialHTTPClient) requestHeaders() []httpclient.Headers {
+	out := make([]httpclient.Headers, len(s.requests))
 	for i, r := range s.requests {
 		out[i] = r.headers
 	}
@@ -604,7 +604,7 @@ func (s *sequentialAuroraClient) requestHeaders() []httpclient.AuroraHeaders {
 // 4) partial_query 仅在 sent / success 出现,none 阶段不带
 // 5) 返回值是第三次响应的 conduit_token
 func TestPrepareConversationConduitFullChainsThreeStates(t *testing.T) {
-	client := &sequentialAuroraClient{
+	client := &sequentialHTTPClient{
 		responses: []*http.Response{
 			{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"conduit_token":"token-step-1"}`))},
 			{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"conduit_token":"token-step-2"}`))},
@@ -672,7 +672,7 @@ func TestPrepareConversationConduitFullChainsThreeStates(t *testing.T) {
 // TestPrepareConversationConduitFullFailsFastOnStep1 验证第一步失败时
 // 直接返回带 "prepare(none) failed:" 前缀的错误,不会发起后续请求。
 func TestPrepareConversationConduitFullFailsFastOnStep1(t *testing.T) {
-	client := &sequentialAuroraClient{
+	client := &sequentialHTTPClient{
 		responses: []*http.Response{
 			{StatusCode: http.StatusInternalServerError, Body: io.NopCloser(strings.NewReader(`{"error":"upstream"}`))},
 		},
@@ -693,7 +693,7 @@ func TestPrepareConversationConduitFullFailsFastOnStep1(t *testing.T) {
 // TestPrepareConversationConduitFullFailsFastOnStep2 验证第二步失败时报
 // "prepare(sent) failed",且只发起了 2 次请求。
 func TestPrepareConversationConduitFullFailsFastOnStep2(t *testing.T) {
-	client := &sequentialAuroraClient{
+	client := &sequentialHTTPClient{
 		responses: []*http.Response{
 			{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"conduit_token":"token-step-1"}`))},
 			{StatusCode: http.StatusForbidden, Body: io.NopCloser(strings.NewReader(`{"error":"forbidden"}`))},
@@ -715,7 +715,7 @@ func TestPrepareConversationConduitFullFailsFastOnStep2(t *testing.T) {
 // TestPrepareConversationConduitFullFailsFastOnStep3 验证第三步失败时报
 // "prepare(success) failed",且发起了 3 次请求。
 func TestPrepareConversationConduitFullFailsFastOnStep3(t *testing.T) {
-	client := &sequentialAuroraClient{
+	client := &sequentialHTTPClient{
 		responses: []*http.Response{
 			{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"conduit_token":"t1"}`))},
 			{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"conduit_token":"t2"}`))},
@@ -738,7 +738,7 @@ func TestPrepareConversationConduitFullFailsFastOnStep3(t *testing.T) {
 // TestPrepareConversationConduitFullPropagatesState 验证 state.DeviceID /
 // SessionID 在三次请求中保持一致(整段对话使用同一对 fingerprint ID)。
 func TestPrepareConversationConduitFullPropagatesState(t *testing.T) {
-	client := &sequentialAuroraClient{
+	client := &sequentialHTTPClient{
 		responses: []*http.Response{
 			{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"conduit_token":"t1"}`))},
 			{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"conduit_token":"t2"}`))},
@@ -778,7 +778,7 @@ func TestConversationHeadersKeepEmptyConduitHeaderForConversation(t *testing.T) 
 }
 
 func TestImagePrepareUsesPictureV2AndComposerStateFields(t *testing.T) {
-	client := &fakeAuroraClient{
+	client := &fakeHTTPClient{
 		response: &http.Response{
 			StatusCode: http.StatusOK,
 			Body:       io.NopCloser(strings.NewReader(`{"conduit_token":"image-token"}`)),
@@ -906,7 +906,7 @@ func TestCreateBaseHeaderMatchesWebClientShape(t *testing.T) {
 }
 
 func TestPrepareConversationConduitUsesClientState(t *testing.T) {
-	client := &fakeAuroraClient{
+	client := &fakeHTTPClient{
 		response: &http.Response{
 			StatusCode: http.StatusOK,
 			Body:       io.NopCloser(strings.NewReader(`{"status":"ok","conduit_token":"abc"}`)),
@@ -956,7 +956,7 @@ func TestPrepareConversationConduitUsesClientState(t *testing.T) {
 }
 
 func TestConversationCompletionOmitsRiskyCapabilityFields(t *testing.T) {
-	client := &fakeAuroraClient{
+	client := &fakeHTTPClient{
 		response: &http.Response{
 			StatusCode: http.StatusOK,
 			Body:       io.NopCloser(strings.NewReader("")),
@@ -1005,7 +1005,7 @@ func TestConversationCompletionNormalizesThinkingEffort(t *testing.T) {
 		{input: "turbo", want: "standard"},
 	} {
 		t.Run(tt.input, func(t *testing.T) {
-			client := &fakeAuroraClient{
+			client := &fakeHTTPClient{
 				response: &http.Response{
 					StatusCode: http.StatusOK,
 					Body:       io.NopCloser(strings.NewReader("")),

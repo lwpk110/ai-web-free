@@ -42,11 +42,11 @@ func RequiresConversationWebsocket(stream bool, thinkingEffort string) bool {
 	}
 }
 
-func getChatWebsocketURL(client httpclient.AuroraHttpClient, account *accounts.Account) (string, error) {
+func getChatWebsocketURL(client httpclient.HttpClient, account *accounts.Account) (string, error) {
 	return getChatWebsocketURLWithState(client, account, nil)
 }
 
-func getChatWebsocketURLWithState(client httpclient.AuroraHttpClient, account *accounts.Account, state *ChatClientState) (string, error) {
+func getChatWebsocketURLWithState(client httpclient.HttpClient, account *accounts.Account, state *ChatClientState) (string, error) {
 	apiURL, targetPath := conversationURL(account, "/celsius/ws/user")
 	header := conversationHeadersWithState(account, nil, "*/*", targetPath, "", "", state)
 	response, err := client.Request(http.MethodGet, apiURL, header, nil, nil)
@@ -72,17 +72,17 @@ func getChatWebsocketURLWithState(client httpclient.AuroraHttpClient, account *a
 }
 
 // DialChatWebsocket 拨号到 ChatGPT WebSocket。
-func DialChatWebsocket(client httpclient.AuroraHttpClient, account *accounts.Account) (*websocket.Conn, error) {
+func DialChatWebsocket(client httpclient.HttpClient, account *accounts.Account) (*websocket.Conn, error) {
 	return DialChatWebsocketWithState(client, account, nil)
 }
 
 // DialChatWebsocketWithState 拨号到 ChatGPT WebSocket（带 state）。
-func DialChatWebsocketWithState(client httpclient.AuroraHttpClient, account *accounts.Account, state *ChatClientState) (*websocket.Conn, error) {
+func DialChatWebsocketWithState(client httpclient.HttpClient, account *accounts.Account, state *ChatClientState) (*websocket.Conn, error) {
 	return DialChatWebsocketWithStateAndProxy(client, account, state, "")
 }
 
 // DialChatWebsocketWithStateAndProxy 拨号到 ChatGPT WebSocket（带 state 和代理）。
-func DialChatWebsocketWithStateAndProxy(client httpclient.AuroraHttpClient, account *accounts.Account, state *ChatClientState, proxy string) (*websocket.Conn, error) {
+func DialChatWebsocketWithStateAndProxy(client httpclient.HttpClient, account *accounts.Account, state *ChatClientState, proxy string) (*websocket.Conn, error) {
 	wsURL, err := getChatWebsocketURLWithState(client, account, state)
 	if err != nil {
 		return nil, err

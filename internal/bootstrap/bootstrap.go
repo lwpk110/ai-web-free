@@ -292,7 +292,7 @@ func exchangeSessionToken(acct *accounts.Account) bool {
 	if acct.SessionToken == "" {
 		return false
 	}
-	fetch := func(client httpclient.AuroraHttpClient) (string, string) {
+	fetch := func(client httpclient.HttpClient) (string, string) {
 		result, _, err := chatgpt.GETTokenForSessionToken(client, acct.SessionToken, acct.Proxy)
 		if err != nil {
 			return "", ""

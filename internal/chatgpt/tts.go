@@ -100,7 +100,7 @@ func HandlerTTS(response *http.Response, input string) (string, string) {
 	return "", ""
 }
 
-func getTTSBlobFromURL(client httpclient.AuroraHttpClient, account *accounts.Account, reqURL string) ([]byte, int, error) {
+func getTTSBlobFromURL(client httpclient.HttpClient, account *accounts.Account, reqURL string) ([]byte, int, error) {
 	header := baseHeaderFromAccount(account)
 	header.Set("Accept", "audio/*,*/*")
 	if !(account.Type == accounts.TypeNoAuth) && account.Token != "" {
@@ -140,7 +140,7 @@ func parseTTSDownloadURL(blob []byte) string {
 }
 
 // GetTTS 获取 TTS 音频数据。
-func GetTTS(client httpclient.AuroraHttpClient, account *accounts.Account, msgId, convId, voice, format, proxy string) ([]byte, int, error) {
+func GetTTS(client httpclient.HttpClient, account *accounts.Account, msgId, convId, voice, format, proxy string) ([]byte, int, error) {
 	if proxy != "" {
 		client.SetProxy(proxy)
 	}
@@ -174,7 +174,7 @@ func GetTTS(client httpclient.AuroraHttpClient, account *accounts.Account, msgId
 }
 
 // RemoveConversation 隐藏（删除）对话。
-func RemoveConversation(client httpclient.AuroraHttpClient, account *accounts.Account, id string, proxy string) {
+func RemoveConversation(client httpclient.HttpClient, account *accounts.Account, id string, proxy string) {
 	if proxy != "" {
 		client.SetProxy(proxy)
 	}

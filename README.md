@@ -1,8 +1,8 @@
-# AURORA
+# AI Web Free
 
-[English README](https://github.com/aurora-develop/aurora/blob/main/README_EN.md)
+[English README](README_EN.md)
 
-Aurora 将 ChatGPT Web 后端能力转换为类 OpenAI API，支持聊天、Responses、文件问答、图片生成、图片变体、语音转文字、文字转语音、模型列表，以及通过 `refresh_token` / `session_token` 获取可用的 ChatGPT `access_token`。
+AI Web Free 将 ChatGPT Web 后端能力转换为类 OpenAI API，支持聊天、Responses、文件问答、图片生成、图片变体、语音转文字、文字转语音、模型列表，以及通过 `refresh_token` / `session_token` 获取可用的 ChatGPT `access_token`。
 
 ## 接口文档
 
@@ -11,7 +11,7 @@ Aurora 将 ChatGPT Web 后端能力转换为类 OpenAI API，支持聊天、Resp
 ## 功能
 
 - OpenAI 风格的 `/v1/chat/completions`，支持流式和非流式返回，支持 `temperature`/`top_p`/`max_tokens`/`stop`/`reasoning_effort`/`response_format`/`stream_options.include_usage` 等参数。
-- 工具调用 (Tool Calling) 模拟 — ChatGPT Web 不原生支持 function calling，Aurora 通过 `<tool_call>` 文本协议模拟该能力，支持 `tools`/`tool_choice` 字段，自动注入 system prompt 并解析模型输出中的 `<tool_call>` 块为标准 OpenAI 格式的 `tool_calls`。
+- 工具调用 (Tool Calling) 模拟 — ChatGPT Web 不原生支持 function calling，AI Web Free 通过 `<tool_call>` 文本协议模拟该能力，支持 `tools`/`tool_choice` 字段，自动注入 system prompt 并解析模型输出中的 `<tool_call>` 块为标准 OpenAI 格式的 `tool_calls`。
 - OpenAI 风格的 `/v1/responses`，支持字符串输入、消息数组、`instructions`、流式事件、`previous_response_id` 多轮续接和 Responses 格式 Tool Calling，以及 `reasoning.effort`/`text.query.format`/`temperature` 等参数。
 - `/v1/files` 文件上传，上传后可在聊天或 Responses 请求中携带 `file_id` 做文件问答。
 - `/v1/images/generations` 图片生成，模型列表包含 `gpt-image-2`，支持 SSE 流式返回，支持 URL 或 `b64_json`。
@@ -30,26 +30,86 @@ Aurora 将 ChatGPT Web 后端能力转换为类 OpenAI API，支持聊天、Resp
 - **Capability 能力控制**：10 种按账号类型控制的能力（Chat / Responses / ToolCalling / ImageGenerate / ImageEdit / ImageVariation / TTS / Transcribe / FileUpload / WebSocket），noauth 仅可访问 chat/responses，其余需登录。
 - **后台健康检查**：每 10 分钟自动续期已过期的 `session_token` / `refresh_token` 账号。
 - **外部 access_token 支持**：`ENABLE_EXTERNAL_TOKEN=true` 时接受外部传入的 ChatGPT access_token，自动创建隔离的临时账号（含独立 TLS Client + UA + 代理 + 浏览器指纹），10 分钟无请求自动释放。
-## 部署
+## 部署与本地启动
 
-### 编译部署
+### 本地启动（源码编译）
 
-```bash
-git clone https://github.com/aurora-develop/aurora
-cd aurora
-go build -o aurora
-chmod +x ./aurora
-./aurora
-```
+**环境要求**：Go `1.26+`；如需修改或重新打包前端管理台，需 Node.js 与 `npm`。
+
+1. **构建前端静态资源（内嵌进 Go 二进制）**
+
+   后端通过 `go:embed` 将 `web/dist` 与 `web/system-prompt.txt` 编译进单一可执行文件；若仓库中尚未生成或修改过 `web/src/`，需先构建前端：
+
+   ```bash
+   cd web
+   npm ci
+   npx tsc --noEmit
+   npm run build
+   cd ..
+   ```
+
+2. **编译纯静态二进制并启动**
+
+   ```bash
+   # 可选：复制环境变量模板并按需修改
+   cp env.template .env
+
+   # 零 CGO 纯静态编译
+   CGO_ENABLED=0 go build -o ai-web-free .
+
+   # 启动服务（默认监听 0.0.0.0:18080）
+   ./ai-web-free
+   ```
+
+   > 若本机 `18080` 端口已被占用，可通过环境变量指定其他端口启动：
+   > ```bash
+   > SERVER_PORT=19080 ./ai-web-free
+   > ```
+
+3. **访问验证**
+
+   - **Web 管理台与对话操场**：`http://localhost:18080/`
+   - **OpenAI API 端点**：`http://localhost:18080/v1/models`、`http://localhost:18080/v1/chat/completions`
+
+4. **前端热更新开发模式（可选）**
+
+   需要调试前端界面时，可先启动后端，再启动 Vite 开发服务器（默认监听 `5173`，并将 `/admin`、`/v1`、`/auth`、`/backend-api` 代理至 `http://localhost:18080`，可在 `web/vite.config.ts` 中调整）：
+
+   ```bash
+   cd web && npm run dev
+   ```
+
+5. **使用 Makefile 快捷指令（推荐）**
+
+   项目根目录提供了 [Makefile](Makefile)，可直接执行常用开发与构建操作：
+
+   ```bash
+   make help                    # 查看全部可用指令
+   make dev                     # 本地联调：同时启动 Go 后端(18080)与 Vite 前端热更新(5173)
+   make dev-backend             # 仅启动 Go 后端开发服务
+   make dev-frontend            # 仅启动 Vite 前端热更新（代理至 18080）
+   make build                   # 构建前端静态资源 + 编译零 CGO 纯静态二进制
+   make run                     # 编译并启动单二进制服务
+   make stop                    # 停止本项目所有本地运行进程
+   make test                    # 运行 Go 与 Python 全部测试
+   ```
+
+6. **运行测试（可选）**
+
+   ```bash
+   go test ./...
+   python3 -m unittest discover -s scripts -p "test_*.py" -v
+   ```
 
 ### Docker 部署
 
 ```bash
+docker build -t ai-web-free:latest .
 docker run -d \
-  --name aurora \
-  -p 8080:8080 \
+  --name ai-web-free \
+  -p 18080:18080 \
   -v $(pwd)/access_tokens.txt:/access_tokens.txt:ro \
-  ghcr.io/aurora-develop/aurora:latest
+  ai-web-free:latest
 ```
 
 > 准备 `access_tokens.txt` 到当前目录（一行一个 access_token），通过 `-v` 挂载进容器。其他文件同理：`-v $(pwd)/free_tokens.txt:/free_tokens.txt:ro`、`-v $(pwd)/proxies.txt:/proxies.txt:ro`。
@@ -57,12 +117,9 @@ docker run -d \
 ### Docker Compose 部署
 
 ```bash
-mkdir aurora
-cd aurora
 # 1. 准备好 access_tokens.txt（每行一个 token）
-# 2. 将仓库中的 docker-compose.yml 放到当前目录
-# 3. docker-compose.yml 已包含 ./access_tokens.txt 的挂载，按需取消注释 free_tokens.txt 或 proxies.txt
-docker-compose up -d
+# 2. docker-compose.yml 已包含 ./access_tokens.txt 的挂载，按需取消注释 free_tokens.txt 或 proxies.txt
+docker-compose up -d --build
 ```
 
 ## 配置
@@ -72,8 +129,8 @@ docker-compose up -d
 ```env
 # 服务监听
 SERVER_HOST=0.0.0.0
-SERVER_PORT=8080
-PORT=8080
+SERVER_PORT=18080
+PORT=18080
 
 # 鉴权
 Authorization=your_authorization
@@ -136,36 +193,12 @@ ENABLE_EXTERNAL_TOKEN=true
 - `refresh_tokens.txt`：每行一个 OpenAI `refresh_token`（支持 `token:team_id` 格式），启动时自动交换为 `access_token`，过期后自动续期。
 - `session_tokens.txt`：每行一个 ChatGPT `session_token`（支持 `token:team_id` 格式），启动时自动交换为 `access_token`，过期后自动续期。
 - `proxies.txt`：每行一个代理 URL（需要包含端口），与 `PROXY_URL` 一起组成代理池。
-## 项目趋势
-
-<div align="center">
-
-<a href="https://trendshift.io/repositories/9094?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-9094" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/9094" alt="aurora-develop%2Faurora | Trendshift" width="250" height="55"/></a>
-
-</div>
-
----
 ## 注意事项
 
 - 图片、TTS、文件能力依赖登录态 access token，免费 UUID 账号不可用。
 - `STREAM_MODE=false` 时会强制关闭 Chat Completions 流式返回。
 - 本项目是 ChatGPT Web 能力转换服务，接口形状尽量兼容 OpenAI API，但并非 OpenAI 官方服务。
 
-## 鸣谢
-
-感谢各位大佬的 PR 支持。
-
-## 参考项目
-
-- [ChatGPT-to-API](https://github.com/xqdoo00o/ChatGPT-to-API)
-- [chat2api](https://github.com/aurorax-neo/chat2api)
-
 ## License
 
 MIT License
-
-## 友链
-
-- [linux.do](https://linux.do/)
-- [xiaozhou26](https://github.com/xiaozhou26)
-- [aurorax-neo](https://github.com/aurorax-neo)

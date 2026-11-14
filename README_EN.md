@@ -1,6 +1,6 @@
-# AURORA
+# AI Web Free
 
-Aurora converts the ChatGPT Web backend into an OpenAI-style API, supporting chat, Responses, file-based Q&A, image generation, image variations, speech-to-text, text-to-speech, model listings, and obtaining a valid ChatGPT `access_token` via `refresh_token` / `session_token`.
+AI Web Free converts the ChatGPT Web backend into an OpenAI-style API, supporting chat, Responses, file-based Q&A, image generation, image variations, speech-to-text, text-to-speech, model listings, and obtaining a valid ChatGPT `access_token` via `refresh_token` / `session_token`.
 
 ## API Documentation
 
@@ -9,7 +9,7 @@ For full endpoints, authentication, token exchange, and curl examples, see: [API
 ## Features
 
 - OpenAI-style `/v1/chat/completions` with streaming and non-streaming support, including parameters such as `temperature`/`top_p`/`max_tokens`/`stop`/`reasoning_effort`/`response_format`/`stream_options.include_usage`.
-- Tool Calling emulation — ChatGPT Web does not natively support function calling. Aurora emulates it via a `<tool_call>` text protocol, supporting `tools`/`tool_choice` fields, automatically injecting the calling convention into the system prompt and parsing `<tool_call>` blocks in model output into standard OpenAI-format `tool_calls`.
+- Tool Calling emulation — ChatGPT Web does not natively support function calling. AI Web Free emulates it via a `<tool_call>` text protocol, supporting `tools`/`tool_choice` fields, automatically injecting the calling convention into the system prompt and parsing `<tool_call>` blocks in model output into standard OpenAI-format `tool_calls`.
 - OpenAI-style `/v1/responses` with string input, message arrays, `instructions`, streaming events, `previous_response_id` continuation, and Responses-format tool calling, plus parameters such as `reasoning.effort`/`text.query.format`/`temperature`.
 - `/v1/files` for file uploads; after uploading, you can include `file_id` in chat or Responses requests for file-based Q&A.
 - `/v1/images/generations` for image generation; the model list includes `gpt-image-2`, supports SSE streaming, and can return either URLs or `b64_json`.
@@ -28,26 +28,34 @@ For full endpoints, authentication, token exchange, and curl examples, see: [API
 - **Capability system**: 10 capabilities (Chat / Responses / ToolCalling / ImageGenerate / ImageEdit / ImageVariation / TTS / Transcribe / FileUpload / WebSocket). Only chat/responses are accessible to noauth accounts; others require login.
 - **Health check**: Automatically renews expired `session_token` / `refresh_token` accounts every 10 minutes.
 - **External access_token support**: When `ENABLE_EXTERNAL_TOKEN=true`, accept externally provided ChatGPT access_tokens. Temporary isolated accounts (TLS Client + UA + proxy + fingerprint) are created and released after 10 minutes of inactivity.
-## Deployment
+## Deployment & Local Startup
 
-### Build from source
+### Build from source (Local)
 
 ```bash
-git clone https://github.com/aurora-develop/aurora
-cd aurora
-go build -o aurora
-chmod +x ./aurora
-./aurora
+# 1. Build frontend assets (embedded into the Go binary via go:embed)
+cd web
+npm ci
+npx tsc --noEmit
+npm run build
+cd ..
+
+# 2. Build static Go binary and run
+CGO_ENABLED=0 go build -o ai-web-free .
+./ai-web-free
+# Or specify another port if 18080 is in use:
+# SERVER_PORT=19080 ./ai-web-free
 ```
 
 ### Docker
 
 ```bash
+docker build -t ai-web-free:latest .
 docker run -d \
-  --name aurora \
-  -p 8080:8080 \
+  --name ai-web-free \
+  -p 18080:18080 \
   -v $(pwd)/access_tokens.txt:/access_tokens.txt:ro \
-  ghcr.io/aurora-develop/aurora:latest
+  ai-web-free:latest
 ```
 
 > Prepare `access_tokens.txt` in the current directory (one access_token per line) and mount it into the container via `-v`. The same applies to other files: `-v $(pwd)/free_tokens.txt:/free_tokens.txt:ro`, `-v $(pwd)/proxies.txt:/proxies.txt:ro`.
@@ -55,12 +63,9 @@ docker run -d \
 ### Docker Compose
 
 ```bash
-mkdir aurora
-cd aurora
 # 1. Prepare access_tokens.txt (one token per line)
-# 2. Place the docker-compose.yml from the repository into the current directory
-# 3. docker-compose.yml already includes a ./access_tokens.txt mount; uncomment free_tokens.txt or proxies.txt as needed
-docker-compose up -d
+# 2. docker-compose.yml already includes a ./access_tokens.txt mount; uncomment free_tokens.txt or proxies.txt as needed
+docker-compose up -d --build
 ```
 
 ## Configuration
@@ -70,8 +75,8 @@ No additional configuration is required by default. You can configure via `.env`
 ```env
 # Server listen
 SERVER_HOST=0.0.0.0
-SERVER_PORT=8080
-PORT=8080
+SERVER_PORT=18080
+PORT=18080
 
 # Authentication
 Authorization=your_authorization
@@ -134,21 +139,6 @@ Local account files:
 - `refresh_tokens.txt`: One OpenAI `refresh_token` per line (supports `token:team_id` format). Automatically exchanged for an `access_token` on startup; auto-renewed on expiry.
 - `session_tokens.txt`: One ChatGPT `session_token` per line (supports `token:team_id` format). Automatically exchanged for an `access_token` on startup; auto-renewed on expiry.
 - `proxies.txt`: One proxy URL per line (port required). Forms a proxy pool with `PROXY_URL`.
-## Acknowledgments
-
-Thanks to all the contributors for their PR support.
-
-## Reference Projects
-
-- [ChatGPT-to-API](https://github.com/xqdoo00o/ChatGPT-to-API)
-- [chat2api](https://github.com/aurorax-neo/chat2api)
-
 ## License
 
 MIT License
-
-## Friendly Links
-
-- [linux.do](https://linux.do/)
-- [xiaozhou26](https://github.com/xiaozhou26)
-- [aurorax-neo](https://github.com/aurorax-neo)

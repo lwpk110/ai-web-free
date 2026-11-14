@@ -57,7 +57,7 @@ func init() {
 
 // GetDpl 从 ChatGPT 首页解析 script 标签和 dpl 参数。
 // 缓存结果,避免重复请求。
-func GetDpl(client httpclient.AuroraHttpClient, proxy string) {
+func GetDpl(client httpclient.HttpClient, proxy string) {
 	requestURL := strings.Replace(BaseURL, "/backend-api", "", 1)
 
 	if len(cachedScripts) > 0 {
@@ -108,12 +108,12 @@ func defaultUserAgent() string {
 }
 
 // createBaseHeader 创建基础 header（无 state）。
-func createBaseHeader() httpclient.AuroraHeaders {
+func createBaseHeader() httpclient.Headers {
 	return createBaseHeaderForState(nil)
 }
 
 // createBaseHeaderForState 创建带 state 的基础 header。
-func createBaseHeaderForState(state *ChatClientState) httpclient.AuroraHeaders {
+func createBaseHeaderForState(state *ChatClientState) httpclient.Headers {
 	conversationID := ""
 	deviceID := oaiDeviceID
 	sessionID := oaiSessionID
@@ -136,7 +136,7 @@ func createBaseHeaderForState(state *ChatClientState) httpclient.AuroraHeaders {
 }
 
 // baseHeaderFromAccount 返回带 account.Fingerprint 设备标识的基础 headers。
-func baseHeaderFromAccount(account *accounts.Account) httpclient.AuroraHeaders {
+func baseHeaderFromAccount(account *accounts.Account) httpclient.Headers {
 	h := createBaseHeader()
 	if account != nil {
 		if account.Fingerprint.OaiDeviceID != "" {
@@ -174,14 +174,14 @@ type urlAttr struct {
 }
 
 // setTeamAccountHeader 设置 ChatGPT-Account-Id header（如果有 team account）。
-func setTeamAccountHeader(header httpclient.AuroraHeaders, account *accounts.Account) {
+func setTeamAccountHeader(header httpclient.Headers, account *accounts.Account) {
 	if account != nil && strings.TrimSpace(account.TeamUserID) != "" {
 		header.Set("Chatgpt-Account-Id", strings.TrimSpace(account.TeamUserID))
 	}
 }
 
 // getURLAttribution 获取 URL 的 attribution。
-func getURLAttribution(client httpclient.AuroraHttpClient, account *accounts.Account, url string) string {
+func getURLAttribution(client httpclient.HttpClient, account *accounts.Account, url string) string {
 	requestURL := BaseURL + "/attributions"
 	payload := bytes.NewBuffer([]byte(`{"urls":["` + url + `"]}`))
 	header := baseHeaderFromAccount(account)

@@ -134,18 +134,18 @@ func parseConversationEvent(line string, state *sseparser.PatchState, model stri
 }
 
 // Handler 处理对话响应（简化版）。
-func Handler(c *gin.Context, response *http.Response, client httpclient.AuroraHttpClient, account *accounts.Account, uuid string, translated_request chatgpt_types.ChatGPTRequest, stream bool, model string) (string, *ContinueInfo) {
+func Handler(c *gin.Context, response *http.Response, client httpclient.HttpClient, account *accounts.Account, uuid string, translated_request chatgpt_types.ChatGPTRequest, stream bool, model string) (string, *ContinueInfo) {
 	result := HandlerDetailed(c, response, client, account, uuid, translated_request, stream, model)
 	return result.Text, result.Continue
 }
 
 // HandlerDetailed 处理对话响应（详细版）。
-func HandlerDetailed(c *gin.Context, response *http.Response, client httpclient.AuroraHttpClient, account *accounts.Account, uuid string, translated_request chatgpt_types.ChatGPTRequest, stream bool, model string) HandlerResult {
+func HandlerDetailed(c *gin.Context, response *http.Response, client httpclient.HttpClient, account *accounts.Account, uuid string, translated_request chatgpt_types.ChatGPTRequest, stream bool, model string) HandlerResult {
 	return HandlerDetailedWithWebsocket(c, response, client, account, uuid, translated_request, stream, model, nil)
 }
 
 // HandlerDetailedWithWebsocket 处理对话响应（带 WebSocket）。
-func HandlerDetailedWithWebsocket(c *gin.Context, response *http.Response, client httpclient.AuroraHttpClient, account *accounts.Account, uuid string, translated_request chatgpt_types.ChatGPTRequest, stream bool, model string, wsConn *websocket.Conn) HandlerResult {
+func HandlerDetailedWithWebsocket(c *gin.Context, response *http.Response, client httpclient.HttpClient, account *accounts.Account, uuid string, translated_request chatgpt_types.ChatGPTRequest, stream bool, model string, wsConn *websocket.Conn) HandlerResult {
 	return HandlerDetailedWithOptions(c, response, client, account, uuid, translated_request, stream, model, HandlerDetailedOptions{Websocket: wsConn})
 }
 
@@ -160,7 +160,7 @@ type HandlerDetailedOptions struct {
 }
 
 // HandlerDetailedWithOptions 处理对话响应流（最完整版）。
-func HandlerDetailedWithOptions(c *gin.Context, response *http.Response, client httpclient.AuroraHttpClient, account *accounts.Account, uuid string, translated_request chatgpt_types.ChatGPTRequest, stream bool, model string, options HandlerDetailedOptions) HandlerResult {
+func HandlerDetailedWithOptions(c *gin.Context, response *http.Response, client httpclient.HttpClient, account *accounts.Account, uuid string, translated_request chatgpt_types.ChatGPTRequest, stream bool, model string, options HandlerDetailedOptions) HandlerResult {
 	if model == "" {
 		model = translated_request.Model
 	}

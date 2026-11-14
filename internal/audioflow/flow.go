@@ -72,7 +72,7 @@ type TranscribeResult struct {
 }
 
 // Transcribe 执行音频转写。
-func Transcribe(client httpclient.AuroraHttpClient, account *accounts.Account, proxyURL string, audioData []byte, filename, mimeType, language string) (*TranscribeResult, int, error) {
+func Transcribe(client httpclient.HttpClient, account *accounts.Account, proxyURL string, audioData []byte, filename, mimeType, language string) (*TranscribeResult, int, error) {
 	if account == nil || account.Token == "" || account.Type == accounts.TypeNoAuth {
 		return nil, http.StatusBadRequest, fmt.Errorf("audio transcription requires a logged-in ChatGPT access token")
 	}

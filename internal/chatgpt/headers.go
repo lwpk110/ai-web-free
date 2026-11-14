@@ -27,12 +27,12 @@ func sentinelURL(account *accounts.Account, path string) (string, string) {
 }
 
 // conversationHeaders 创建对话请求的 header（无 state）。
-func conversationHeaders(account *accounts.Account, chatToken *TurnStile, accept, targetPath, conduitToken, turnTraceID string) httpclient.AuroraHeaders {
+func conversationHeaders(account *accounts.Account, chatToken *TurnStile, accept, targetPath, conduitToken, turnTraceID string) httpclient.Headers {
 	return conversationHeadersWithState(account, chatToken, accept, targetPath, conduitToken, turnTraceID, nil)
 }
 
 // conversationHeadersWithState 创建对话请求的 header（带 state）。
-func conversationHeadersWithState(account *accounts.Account, chatToken *TurnStile, accept, targetPath, conduitToken, turnTraceID string, state *ChatClientState) httpclient.AuroraHeaders {
+func conversationHeadersWithState(account *accounts.Account, chatToken *TurnStile, accept, targetPath, conduitToken, turnTraceID string, state *ChatClientState) httpclient.Headers {
 	conversationID := ""
 	deviceID := account.Fingerprint.OaiDeviceID
 	if deviceID == "" {
@@ -88,12 +88,12 @@ func conversationHeadersWithState(account *accounts.Account, chatToken *TurnStil
 }
 
 // sentinelHeader 创建 sentinel 请求的 header（无 state）。
-func sentinelHeader(account *accounts.Account, targetPath string) httpclient.AuroraHeaders {
+func sentinelHeader(account *accounts.Account, targetPath string) httpclient.Headers {
 	return sentinelHeaderWithState(account, targetPath, nil)
 }
 
 // sentinelHeaderWithState 创建 sentinel 请求的 header（带 state）。
-func sentinelHeaderWithState(account *accounts.Account, targetPath string, state *ChatClientState) httpclient.AuroraHeaders {
+func sentinelHeaderWithState(account *accounts.Account, targetPath string, state *ChatClientState) httpclient.Headers {
 	conversationID := ""
 	deviceID := account.Fingerprint.OaiDeviceID
 	if deviceID == "" {
@@ -131,12 +131,12 @@ func sentinelHeaderWithState(account *accounts.Account, targetPath string, state
 }
 
 // imageConversationHeaders 创建图片对话请求的 header（无 state）。
-func imageConversationHeaders(account *accounts.Account, turnStile *TurnStile, conduitToken, accept string) httpclient.AuroraHeaders {
+func imageConversationHeaders(account *accounts.Account, turnStile *TurnStile, conduitToken, accept string) httpclient.Headers {
 	return imageConversationHeadersWithState(account, turnStile, conduitToken, accept, nil)
 }
 
 // imageConversationHeadersWithState 创建图片对话请求的 header（带 state）。
-func imageConversationHeadersWithState(account *accounts.Account, turnStile *TurnStile, conduitToken, accept string, state *ChatClientState) httpclient.AuroraHeaders {
+func imageConversationHeadersWithState(account *accounts.Account, turnStile *TurnStile, conduitToken, accept string, state *ChatClientState) httpclient.Headers {
 	conversationID := ""
 	deviceID := account.Fingerprint.OaiDeviceID
 	if deviceID == "" {
@@ -187,7 +187,7 @@ func imageConversationHeadersWithState(account *accounts.Account, turnStile *Tur
 }
 
 // conversationFetchHeaders 创建查询对话的 header。
-func conversationFetchHeaders(account *accounts.Account) httpclient.AuroraHeaders {
+func conversationFetchHeaders(account *accounts.Account) httpclient.Headers {
 	header := baseHeaderFromAccount(account)
 	header.Set("Accept", "application/json")
 	header.Set("Content-Type", "application/json")

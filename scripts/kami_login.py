@@ -427,7 +427,7 @@ def main():
     parser.add_argument("--headless", action="store_true", help="无头模式运行")
     parser.add_argument("--account", default=None, help="仅处理指定邮箱账号")
     parser.add_argument("--force", action="store_true", help="强制重新登录刷新")
-    parser.add_argument("--push-url", default=None, help="提取完成后直接推送到 ai-web-free 服务地址 (如 http://127.0.0.1:8080)")
+    parser.add_argument("--push-url", default=None, help="提取完成后直接推送到 ai-web-free 服务地址 (如 http://127.0.0.1:18080)")
     parser.add_argument("--stdin-json", action="store_true", help="从 stdin 读取 JSON 账号列表（供后端调用）")
     parser.add_argument("--json-output", action="store_true", help="以 JSON 格式输出结果到 stdout（供后端调用）")
 

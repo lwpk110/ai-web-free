@@ -30,7 +30,7 @@ type AuthSession struct {
 }
 
 // GETTokenForRefreshToken 用 refresh_token 交换 access_token。
-func GETTokenForRefreshToken(client httpclient.AuroraHttpClient, refresh_token string, proxy string) (interface{}, int, error) {
+func GETTokenForRefreshToken(client httpclient.HttpClient, refresh_token string, proxy string) (interface{}, int, error) {
 	if proxy != "" {
 		client.SetProxy(proxy)
 	}
@@ -48,7 +48,7 @@ func GETTokenForRefreshToken(client httpclient.AuroraHttpClient, refresh_token s
 		return nil, 0, err
 	}
 
-	header := make(httpclient.AuroraHeaders)
+	header := make(httpclient.Headers)
 	header.Set("Authority", "auth.openai.com")
 	header.Set("Accept-Language", "en-US,en;q=0.9")
 	header.Set("Content-Type", "application/json")
@@ -68,12 +68,12 @@ func GETTokenForRefreshToken(client httpclient.AuroraHttpClient, refresh_token s
 }
 
 // GETTokenForSessionToken 用 session_token 交换新的 access_token 和 session_token。
-func GETTokenForSessionToken(client httpclient.AuroraHttpClient, session_token string, proxy string) (interface{}, int, error) {
+func GETTokenForSessionToken(client httpclient.HttpClient, session_token string, proxy string) (interface{}, int, error) {
 	if proxy != "" {
 		client.SetProxy(proxy)
 	}
 	url := "https://chatgpt.com/api/auth/session"
-	header := make(httpclient.AuroraHeaders)
+	header := make(httpclient.Headers)
 	header.Set("Authority", "chat.openai.com")
 	header.Set("Accept-Language", "en-US,en;q=0.9")
 	header.Set("User-Agent", defaultUserAgent())

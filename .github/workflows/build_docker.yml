@@ -10,7 +10,7 @@ permissions:
   packages: write
 
 env:
-  GHCR_REPO: ghcr.io/aurora-develop/aurora
+  GHCR_REPO: ghcr.io/${{ github.repository }}
 
 jobs:
   docker:

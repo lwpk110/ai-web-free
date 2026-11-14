@@ -155,17 +155,17 @@ func CalcProofToken(require *ChatRequire, config *prooftoken.Config) string {
 }
 
 // InitTurnStileWithState 初始化 TurnStile（等同于 InitSentinelWithState 但 retry=0）。
-func InitTurnStileWithState(client httpclient.AuroraHttpClient, account *accounts.Account, proxy string, state *ChatClientState) (*TurnStile, int, error) {
+func InitTurnStileWithState(client httpclient.HttpClient, account *accounts.Account, proxy string, state *ChatClientState) (*TurnStile, int, error) {
 	return InitSentinelWithState(client, account, proxy, 0, state)
 }
 
 // InitSentinel 初始化 sentinel 风控流程。
-func InitSentinel(client httpclient.AuroraHttpClient, account *accounts.Account, proxy string, retry int) (*TurnStile, int, error) {
+func InitSentinel(client httpclient.HttpClient, account *accounts.Account, proxy string, retry int) (*TurnStile, int, error) {
 	return InitSentinelWithState(client, account, proxy, retry, nil)
 }
 
 // InitSentinelWithState 初始化 sentinel 风控流程（带 state）。
-func InitSentinelWithState(client httpclient.AuroraHttpClient, account *accounts.Account, proxy string, retry int, state *ChatClientState) (*TurnStile, int, error) {
+func InitSentinelWithState(client httpclient.HttpClient, account *accounts.Account, proxy string, retry int, state *ChatClientState) (*TurnStile, int, error) {
 	if proxy != "" {
 		client.SetProxy(proxy)
 	}
@@ -346,12 +346,12 @@ func boolToStr(b bool) string {
 }
 
 // POSTSentinelPing 调用 /sentinel/ping，默认 ping_source="session_observer_background_submit", seq=0。
-func POSTSentinelPing(client httpclient.AuroraHttpClient, account *accounts.Account, ts *TurnStile, conversationID, lastMessageID string, state *ChatClientState) error {
+func POSTSentinelPing(client httpclient.HttpClient, account *accounts.Account, ts *TurnStile, conversationID, lastMessageID string, state *ChatClientState) error {
 	return POSTSentinelPingWithSource(client, account, ts, conversationID, lastMessageID, state, "session_observer_background_submit", 0)
 }
 
 // POSTSentinelPingWithSource 支持自定义 ping_source 和 sequence_number。
-func POSTSentinelPingWithSource(client httpclient.AuroraHttpClient, account *accounts.Account, ts *TurnStile, conversationID, lastMessageID string, state *ChatClientState, pingSource string, sequenceNumber int) error {
+func POSTSentinelPingWithSource(client httpclient.HttpClient, account *accounts.Account, ts *TurnStile, conversationID, lastMessageID string, state *ChatClientState, pingSource string, sequenceNumber int) error {
 	apiUrl, targetPath := sentinelURL(account, "/sentinel/ping")
 	header := sentinelHeaderWithState(account, targetPath, state)
 	// 注入所有 sentinel token header
@@ -398,12 +398,12 @@ func POSTSentinelPingWithSource(client httpclient.AuroraHttpClient, account *acc
 }
 
 // POSTSentinelPrepare 发送 /sentinel/chat-requirements/prepare（无 state）。
-func POSTSentinelPrepare(client httpclient.AuroraHttpClient, account *accounts.Account, requirementsToken string) (*ChatRequire, int, error) {
+func POSTSentinelPrepare(client httpclient.HttpClient, account *accounts.Account, requirementsToken string) (*ChatRequire, int, error) {
 	return POSTSentinelPrepareWithState(client, account, requirementsToken, nil)
 }
 
 // POSTSentinelPrepareWithState 发送 /sentinel/chat-requirements/prepare（带 state）。
-func POSTSentinelPrepareWithState(client httpclient.AuroraHttpClient, account *accounts.Account, requirementsToken string, state *ChatClientState) (*ChatRequire, int, error) {
+func POSTSentinelPrepareWithState(client httpclient.HttpClient, account *accounts.Account, requirementsToken string, state *ChatClientState) (*ChatRequire, int, error) {
 	apiUrl, targetPath := sentinelURL(account, "/sentinel/chat-requirements/prepare")
 	bodyJSON, err := json.Marshal(map[string]string{"p": requirementsToken})
 	if err != nil {
@@ -426,12 +426,12 @@ func POSTSentinelPrepareWithState(client httpclient.AuroraHttpClient, account *a
 }
 
 // POSTSentinelFinalize 发送 /sentinel/chat-requirements/finalize（无 state）。
-func POSTSentinelFinalize(client httpclient.AuroraHttpClient, account *accounts.Account, prepareToken, proofToken, turnstileToken string) (*sentinelFinalizeResponse, int, error) {
+func POSTSentinelFinalize(client httpclient.HttpClient, account *accounts.Account, prepareToken, proofToken, turnstileToken string) (*sentinelFinalizeResponse, int, error) {
 	return POSTSentinelFinalizeWithState(client, account, prepareToken, proofToken, turnstileToken, nil)
 }
 
 // POSTSentinelFinalizeWithState 发送 /sentinel/chat-requirements/finalize（带 state）。
-func POSTSentinelFinalizeWithState(client httpclient.AuroraHttpClient, account *accounts.Account, prepareToken, proofToken, turnstileToken string, state *ChatClientState) (*sentinelFinalizeResponse, int, error) {
+func POSTSentinelFinalizeWithState(client httpclient.HttpClient, account *accounts.Account, prepareToken, proofToken, turnstileToken string, state *ChatClientState) (*sentinelFinalizeResponse, int, error) {
 	apiUrl, targetPath := sentinelURL(account, "/sentinel/chat-requirements/finalize")
 	payload := map[string]string{"prepare_token": prepareToken}
 	if proofToken != "" {
@@ -517,7 +517,7 @@ func randomWindowKey() string {
 }
 
 // POSTSentinelReq 调用 /sentinel/req 端点。
-func POSTSentinelReq(client httpclient.AuroraHttpClient, account *accounts.Account, requirementsToken, deviceID, flow string, state *ChatClientState) (*sentinelReqResponse, int, error) {
+func POSTSentinelReq(client httpclient.HttpClient, account *accounts.Account, requirementsToken, deviceID, flow string, state *ChatClientState) (*sentinelReqResponse, int, error) {
 	if flow == "" {
 		flow = "conversation"
 	}

@@ -1,1 +1,1 @@
-web: aurora
+web: ai-web-free

@@ -29,7 +29,7 @@ type TranscribeResult struct {
 //   - language:   语言提示(ISO 代码,如 "zh","en",可传 "")
 //
 // 返回转写后的文本、HTTP 状态码和错误。
-func TranscribeAudio(client httpclient.AuroraHttpClient, account *accounts.Account, proxy string, audioData []byte, filename, mimeType, language string) (string, int, error) {
+func TranscribeAudio(client httpclient.HttpClient, account *accounts.Account, proxy string, audioData []byte, filename, mimeType, language string) (string, int, error) {
 	if proxy != "" {
 		client.SetProxy(proxy)
 	}

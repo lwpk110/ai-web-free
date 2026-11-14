@@ -65,7 +65,7 @@ export const LogsView: React.FC = () => {
   const handleDownloadJsonl = () => {
     const content = entries.map((e) => JSON.stringify(e)).join("\n");
     triggerTextDownload(
-      `aurora_audit_${new Date().toISOString().slice(0, 10)}.jsonl`,
+      `ai_web_free_audit_${new Date().toISOString().slice(0, 10)}.jsonl`,
       content,
       "application/x-ndjson;charset=utf-8"
     );

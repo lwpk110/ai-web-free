@@ -14,7 +14,7 @@ import (
 	"strings"
 )
 
-func ConvertAPIRequest(api_request official_types.APIRequest, account *accounts.Account, proxy string, client httpclient.AuroraHttpClient) chatgpt_types.ChatGPTRequest {
+func ConvertAPIRequest(api_request official_types.APIRequest, account *accounts.Account, proxy string, client httpclient.HttpClient) chatgpt_types.ChatGPTRequest {
 	chatgpt_request := chatgpt_types.NewChatGPTRequest()
 
 	// ChatGPT Web 使用 model=auto + system_hints=["reason"] 开启思考模式，
@@ -129,7 +129,7 @@ func ConvertAPIRequest(api_request official_types.APIRequest, account *accounts.
 			chatgpt_request.AddToolMessage(toolName, apiMessage.Text())
 			continue
 		}
-		// 转换 role:critic 是 ChatGPT 内部"系统级"角色(由 aurora 在 system 阶段处理)
+		// 转换 role:critic 是 ChatGPT 内部"系统级"角色(由网关在 system 阶段处理)
 		role := apiMessage.Role
 		if role == "system" {
 			role = "critic"
@@ -190,7 +190,7 @@ func ConvertTTSAPIRequest(input string) chatgpt_types.ChatGPTRequest {
 	return chatgpt_request
 }
 
-func buildMessageParts(message official_types.APIMessage, client httpclient.AuroraHttpClient, account *accounts.Account, proxy string) ([]interface{}, map[string]interface{}) {
+func buildMessageParts(message official_types.APIMessage, client httpclient.HttpClient, account *accounts.Account, proxy string) ([]interface{}, map[string]interface{}) {
 	text := message.Text()
 	files := enrichFiles(message.Files(), client, account, proxy)
 	if len(files) == 0 {
@@ -257,7 +257,7 @@ func buildMessageParts(message official_types.APIMessage, client httpclient.Auro
 	}
 }
 
-func enrichFiles(files []official_types.FileAttachment, client httpclient.AuroraHttpClient, account *accounts.Account, proxy string) []official_types.FileAttachment {
+func enrichFiles(files []official_types.FileAttachment, client httpclient.HttpClient, account *accounts.Account, proxy string) []official_types.FileAttachment {
 	enriched := make([]official_types.FileAttachment, 0, len(files))
 	seen := make(map[string]bool)
 	for _, file := range files {
@@ -306,7 +306,7 @@ func enrichFiles(files []official_types.FileAttachment, client httpclient.Aurora
 }
 
 // uploadInlineImage 将 data: URL 或 http URL 图片上传到 ChatGPT 文件服务。
-func uploadInlineImage(file official_types.FileAttachment, client httpclient.AuroraHttpClient, account *accounts.Account, proxy string) (official_types.FileAttachment, bool) {
+func uploadInlineImage(file official_types.FileAttachment, client httpclient.HttpClient, account *accounts.Account, proxy string) (official_types.FileAttachment, bool) {
 	src := file.Source
 	var data []byte
 	var filename string

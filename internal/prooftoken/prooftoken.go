@@ -158,7 +158,7 @@ func (c *Config) rngFloat(rng *mathRand) float64 {
 }
 
 // envFlags 返回 [19-22] 的环境探测值 (Number("X" in window))。
-// 当前 aurora 不是真浏览器,默认全部 0;后续如需模拟,可在 Config 里加字段。
+// 当前网关不是真浏览器,默认全部 0;后续如需模拟,可在 Config 里加字段。
 func (c *Config) envFlags() [4]int {
 	return [4]int{0, 0, 0, 0}
 }

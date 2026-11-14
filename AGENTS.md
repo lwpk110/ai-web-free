@@ -68,7 +68,7 @@ cd web && npm ci && npx tsc --noEmit && npm run build
 go test ./...
 
 # 3. 编译纯静态二进制（与 Dockerfile / Release 一致）
-CGO_ENABLED=0 go build -o aurora .
+CGO_ENABLED=0 go build -o ai-web-free .
 
 # 4. 运行 Python 辅助脚本单元测试
 python3 -m unittest discover -s scripts -p "test_*.py" -v
@@ -76,15 +76,15 @@ python3 -m unittest discover -s scripts -p "test_*.py" -v
 
 ### 本地调试提示
 
-- **配置模板**：环境变量参考 `env.template`（支持 `.env` 自动加载）。默认监听 `0.0.0.0:8080`；若本机 `8080` 端口被占用，可通过 `SERVER_PORT=18080 ./aurora` 启动，避免影响现有服务。
-- **Vite 开发代理**：`cd web && npm run dev` 默认将 `/admin`、`/v1`、`/auth`、`/backend-api` 代理至 `http://localhost:8080`（见 `web/vite.config.ts`）。
+- **配置模板**：环境变量参考 `env.template`（支持 `.env` 自动加载）。默认监听 `0.0.0.0:18080`；若需使用其他端口，可通过 `SERVER_PORT=19080 ./ai-web-free` 启动。
+- **Vite 开发代理**：`cd web && npm run dev` 默认将 `/admin`、`/v1`、`/auth`、`/backend-api` 代理至 `http://localhost:18080`（见 `web/vite.config.ts`，可通过 `VITE_API_TARGET` 覆盖）。
 - **卡密浏览器登录**：`internal/provider/kami_login.go` 会自动探测 `CHROME_PATH` 或系统中的 `google-chrome` / `chromium` / Playwright 缓存二进制。
 
 ---
 
 ## 5. 安全、凭据与编码约定
 
-- **严禁提交真实凭据或构建产物**：`.gitignore` 已忽略 `*.txt`（如 `access_tokens.txt`、`refresh_tokens.txt`、`session_tokens.txt`、`free_tokens.txt`、`kami_accounts.txt`、`proxies.txt`）、`.env`、`aurora` 二进制与临时日志；切勿将真实账号、密码、TOTP 密钥、代理或 Token 写入源码、测试或示例文件。
+- **严禁提交真实凭据或构建产物**：`.gitignore` 已忽略 `*.txt`（如 `access_tokens.txt`、`refresh_tokens.txt`、`session_tokens.txt`、`free_tokens.txt`、`kami_accounts.txt`、`proxies.txt`）、`.env`、`ai-web-free` 二进制与临时日志；切勿将真实账号、密码、TOTP 密钥、代理或 Token 写入源码、测试或示例文件。
 - **凭据脱敏原则**：列表/快照接口仅暴露掩码预览；`Sub2API` JSON 导出默认不输出明文 `password` / `totp_secret`，仅在显式请求 `include_secrets=true` 时包含。若设置了 `ADMIN_TOKEN`，除 `/admin/api/v1/auth/status` 外的 `/admin/api/v1/*` 均须校验管理令牌。
 - **代码风格与测试要求**：
   - 共用逻辑提取为明确助手函数，避免在聊天、图像、音频等 `handler` 中复制粘贴相同重试或转换逻辑。

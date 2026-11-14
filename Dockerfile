@@ -41,6 +41,6 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 # ---- 阶段 2: 运行镜像(distroless,~2MB,无 shell 更安全)----
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/ai-web-free /ai-web-free
-EXPOSE 8080
+EXPOSE 18080
 USER nonroot:nonroot
 ENTRYPOINT ["/ai-web-free"]
