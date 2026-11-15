@@ -1087,7 +1087,18 @@ func (p *MetaMuseProvider) runCDPVideoGeneration(taskID, prompt string, sess *me
 	}
 
 	// 等待 WebSocket / React 水合
-	time.Sleep(6 * time.Second)
+	time.Sleep(5 * time.Second)
+
+	// 确保开启独立全新对话（避免继承历史旧会话的任何卡片与视频）
+	_, _ = chromedp.Run(ctx, chromedp.Evaluate[string](`(() => {
+		const newChatLink = document.querySelector('a[aria-label="聊天"], a[href="/"]');
+		if (newChatLink) {
+			newChatLink.click();
+			return 'clicked_new_chat';
+		}
+		return 'none';
+	})()`))
+	time.Sleep(2 * time.Second)
 
 	// 4. 注入 URL.createObjectURL 拦截器并记录初始视频 Blob 集合
 	_, _ = chromedp.Run(ctx, chromedp.Evaluate[string](`(() => {
