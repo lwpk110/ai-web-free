@@ -14,6 +14,7 @@ import (
 	"ai-web-free/internal/audit"
 	"ai-web-free/internal/chatgpt"
 	"ai-web-free/internal/config"
+	"ai-web-free/internal/db"
 	"ai-web-free/internal/provider"
 	"ai-web-free/internal/proxy"
 	"ai-web-free/middlewares"
@@ -176,6 +177,21 @@ func (h *AdminHandler) ListProviders(c *gin.Context) {
 	})
 }
 
+// ListChannels 返回号池数据库持久化记录的多模态渠道清单: GET /admin/api/v1/providers/channels
+func (h *AdminHandler) ListChannels(c *gin.Context) {
+	gormDB := db.GetDB()
+	if gormDB == nil {
+		c.JSON(http.StatusOK, gin.H{"channels": []interface{}{}, "total": 0})
+		return
+	}
+	var channels []db.ProviderChannelRecord
+	_ = gormDB.Order("created_at asc").Find(&channels).Error
+	c.JSON(http.StatusOK, gin.H{
+		"channels": channels,
+		"total":    len(channels),
+	})
+}
+
 // ProviderStats 返回指定供应商号池统计
 func (h *AdminHandler) ProviderStats(c *gin.Context) {
 	providerID := c.Param("provider")
@@ -224,10 +240,6 @@ func (h *AdminHandler) ListAccounts(c *gin.Context) {
 // BulkUpdateAccountProxy applies one proxy binding to a selected account set.
 func (h *AdminHandler) BulkUpdateAccountProxy(c *gin.Context) {
 	providerID := strings.ToLower(strings.TrimSpace(c.Param("provider")))
-	if providerID != "chatgpt" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "当前仅支持 ChatGPT 号池代理编辑"}})
-		return
-	}
 	providerPlugin, ok := h.registry.Get(providerID)
 	if !ok {
 		c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"message": "未找到供应商插件: " + providerID}})
@@ -273,10 +285,9 @@ func (h *AdminHandler) BulkUpdateAccountProxy(c *gin.Context) {
 			return
 		}
 	}
-	pool := h.accountPool()
-	if pool == nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"message": "号池运行时未初始化"}})
-		return
+
+	type bulkProxyUpdater interface {
+		BulkUpdateAccountProxy(accountIDs []string, proxyURL string) (int, error)
 	}
 
 	type accountProxyResult struct {
@@ -285,6 +296,41 @@ func (h *AdminHandler) BulkUpdateAccountProxy(c *gin.Context) {
 		OK    bool   `json:"ok"`
 		Error string `json:"error,omitempty"`
 	}
+
+	if updater, ok := providerPlugin.(bulkProxyUpdater); ok {
+		upCount, err := updater.BulkUpdateAccountProxy(ids, proxyURL)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "更新代理失败: " + err.Error()}})
+			return
+		}
+		results := make([]accountProxyResult, 0, len(ids))
+		for _, id := range ids {
+			results = append(results, accountProxyResult{ID: id, OK: true})
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"provider": providerID,
+			"result": gin.H{
+				"total":   len(ids),
+				"updated": upCount,
+				"failed":  len(ids) - upCount,
+				"results": results,
+			},
+			"stats": providerPlugin.Stats(),
+		})
+		return
+	}
+
+	if providerID != "chatgpt" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": fmt.Sprintf("供应商 %s 暂不支持代理绑定", providerID)}})
+		return
+	}
+
+	pool := h.accountPool()
+	if pool == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"message": "号池运行时未初始化"}})
+		return
+	}
+
 	results := make([]accountProxyResult, 0, len(ids))
 	updated := 0
 	for _, id := range ids {

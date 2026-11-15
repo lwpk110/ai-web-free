@@ -677,9 +677,10 @@ type OpenAIRefreshToken struct {
 }
 
 type TTSAPIRequest struct {
-	Input  string `json:"input"`
-	Voice  string `json:"voice"`
-	Format string `json:"response_format"`
+	Input  string  `json:"input"`
+	Voice  string  `json:"voice"`
+	Format string  `json:"response_format"`
+	Speed  float64 `json:"speed,omitempty"`
 }
 
 type ImageGenerationRequest struct {

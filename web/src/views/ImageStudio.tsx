@@ -38,14 +38,17 @@ import { NoticeBanner } from "../components/ui";
 import { useModelsCatalog } from "../lib/models";
 import {
   base64ToBlob,
-  clearStoredImages,
+  checkLocalLegacyImagesCount,
+  clearUnifiedImages,
   dataUrlToBlob,
-  deleteStoredImage,
+  deleteUnifiedImage,
   hydrateStoredImage,
-  loadFavoritePromptIds,
-  loadStoredImages,
-  saveStoredImage,
-  toggleFavoritePromptId,
+  loadUnifiedFavoritePromptIds,
+  loadUnifiedImages,
+  saveUnifiedImage,
+  syncLocalImagesToServer,
+  toggleUnifiedFavorite,
+  toggleUnifiedFavoritePromptId,
   type HydratedImageItem,
   type StoredImageRecord,
 } from "../lib/storage";
@@ -75,6 +78,21 @@ const MODEL_CARDS = [
     id: "dall-e-3",
     desc: "OpenAI 标准兼容自动映射",
     tag: "兼容",
+  },
+  {
+    id: "flux-schnell",
+    desc: "硅基流动 FLUX.1 极速生图",
+    tag: "永久免费",
+  },
+  {
+    id: "wanx-v1",
+    desc: "阿里云百炼通义万相高质量生图",
+    tag: "万相免费",
+  },
+  {
+    id: "jimeng-4.5",
+    desc: "字节即梦 4.5 电影级质感生图",
+    tag: "每日积分",
   },
 ];
 
@@ -541,9 +559,14 @@ export const ImageStudio: React.FC = () => {
   const [plazaSource, setPlazaSource] = useState<string>("all");
   const [plazaSort, setPlazaSort] = useState<"popular" | "latest">("popular");
   const [plazaQuery, setPlazaQuery] = useState<string>("");
-  const [favoriteIds, setFavoriteIds] = useState<string[]>(() =>
-    loadFavoritePromptIds()
-  );
+  const [favoriteIds, setFavoriteIds] = useState<string[]>([]);
+  const [legacyLocalCount, setLegacyLocalCount] = useState(0);
+  const [dismissedMigration, setDismissedMigration] = useState(false);
+  const [isMigrating, setIsMigrating] = useState(false);
+  const [migrationProgress, setMigrationProgress] = useState<{
+    current: number;
+    total: number;
+  } | null>(null);
   const [expandingPrompt, setExpandingPrompt] = useState(false);
   const [activeTemplate, setActiveTemplate] =
     useState<ActiveTemplateState | null>(null);
@@ -648,7 +671,7 @@ export const ImageStudio: React.FC = () => {
 
   useEffect(() => {
     let alive = true;
-    loadStoredImages()
+    loadUnifiedImages()
       .then((items) => {
         if (!alive) {
           items.forEach((it) => {
@@ -663,6 +686,16 @@ export const ImageStudio: React.FC = () => {
         setHydratedIdb(true);
       })
       .catch(() => setHydratedIdb(true));
+
+    checkLocalLegacyImagesCount().then((cnt) => {
+      if (!alive) return;
+      setLegacyLocalCount(cnt);
+    });
+
+    loadUnifiedFavoritePromptIds().then((ids) => {
+      if (!alive) return;
+      setFavoriteIds(ids);
+    });
 
     fetchAccounts("chatgpt")
       .then((res) => {
@@ -772,8 +805,7 @@ export const ImageStudio: React.FC = () => {
       timestamp: Date.now() - idx,
     };
 
-    await saveStoredImage(record);
-    const hydrated = hydrateStoredImage(record);
+    const hydrated = await saveUnifiedImage(record, item.b64_json);
     if (hydrated?.isObjectUrl) {
       objectUrlsRef.current.add(hydrated.url);
     }
@@ -1020,11 +1052,42 @@ export const ImageStudio: React.FC = () => {
   };
 
   const handleToggleFavorite = (id: string) => {
-    setFavoriteIds(toggleFavoritePromptId(id));
+    toggleUnifiedFavoritePromptId(id).then(setFavoriteIds);
+  };
+
+  const handleToggleWorkFavorite = async (item: HydratedImageItem) => {
+    const nextFav = await toggleUnifiedFavorite(item.id, item.isFavorite);
+    setResults((prev) =>
+      prev.map((x) => (x.id === item.id ? { ...x, isFavorite: nextFav } : x))
+    );
+    if (lightboxItem?.id === item.id) {
+      setLightboxItem((prev) => (prev ? { ...prev, isFavorite: nextFav } : null));
+    }
+  };
+
+  const handleSyncLegacyToServer = async () => {
+    setIsMigrating(true);
+    try {
+      const res = await syncLocalImagesToServer((curr, tot) => {
+        setMigrationProgress({ current: curr, total: tot });
+      });
+      setLegacyLocalCount(0);
+      setNotice({
+        type: "success",
+        text: `已成功将 ${res.migrated} 张作品同步至服务端持久化数据库（已存在跳过 ${res.skipped} 张），换浏览器登录同一服务即可随时查看！`,
+      });
+      const refreshed = await loadUnifiedImages();
+      setResults(refreshed);
+    } catch (err: any) {
+      setError(err?.message || "同步到服务端失败");
+    } finally {
+      setIsMigrating(false);
+      setMigrationProgress(null);
+    }
   };
 
   const handleDeleteOne = async (item: HydratedImageItem) => {
-    await deleteStoredImage(item.id);
+    await deleteUnifiedImage(item.id);
     if (item.isObjectUrl) {
       URL.revokeObjectURL(item.url);
       objectUrlsRef.current.delete(item.url);
@@ -1036,7 +1099,7 @@ export const ImageStudio: React.FC = () => {
   };
 
   const handleClearGallery = async () => {
-    await clearStoredImages();
+    await clearUnifiedImages();
     results.forEach((r) => {
       if (r.isObjectUrl) {
         URL.revokeObjectURL(r.url);
@@ -1595,8 +1658,8 @@ export const ImageStudio: React.FC = () => {
                 <Database size={11} />
                 <span>
                   {hydratedIdb
-                    ? `IndexedDB 本地已保存 ${results.length} 项`
-                    : "读取本地画廊中..."}
+                    ? `持久化画廊 ${results.length} 项`
+                    : "读取画廊中..."}
                 </span>
               </span>
               {results.length > 0 && (
@@ -1626,6 +1689,51 @@ export const ImageStudio: React.FC = () => {
             text={notice.text}
             onClose={() => setNotice(null)}
           />
+        )}
+
+        {legacyLocalCount > 0 && !dismissedMigration && (
+          <div className="rounded-xl border border-sky-500/30 bg-sky-500/10 p-3.5 flex flex-wrap items-center justify-between gap-3 text-xs md:text-sm">
+            <div className="flex items-center gap-2.5 text-sky-800 dark:text-sky-200">
+              <Database className="w-4 h-4 shrink-0 text-sky-500 animate-pulse" />
+              <span>
+                检测到当前浏览器本地 IndexedDB 存有{" "}
+                <strong className="underline decoration-sky-500">{legacyLocalCount}</strong> 张历史作品。
+                换浏览器或无痕模式将无法访问，建议立即一键同步至服务端持久化数据库！
+              </span>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                disabled={isMigrating}
+                onClick={handleSyncLegacyToServer}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-medium text-xs shadow-sm transition disabled:opacity-50 cursor-pointer"
+              >
+                {isMigrating ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>
+                      同步中
+                      {migrationProgress
+                        ? ` (${migrationProgress.current}/${migrationProgress.total})`
+                        : "..."}
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <UploadCloud className="w-3.5 h-3.5" />
+                    <span>一键同步到云端数据库</span>
+                  </>
+                )}
+              </button>
+              <button
+                type="button"
+                onClick={() => setDismissedMigration(true)}
+                className="text-xs text-muted-foreground hover:text-foreground px-2 py-1 cursor-pointer"
+              >
+                暂不提醒
+              </button>
+            </div>
+          </div>
         )}
 
         {/* TAB 1: PROMPT PLAZA */}
@@ -1818,17 +1926,37 @@ export const ImageStudio: React.FC = () => {
                         <span className="px-2 py-0.5 rounded-md bg-black/55 backdrop-blur-xs font-mono-num truncate max-w-[170px]">
                           {item.model}
                         </span>
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setLightboxItem(item);
-                          }}
-                          className="p-1.5 rounded-lg bg-black/55 hover:bg-black/75 text-white cursor-pointer"
-                          title="放大检视与 Remix"
-                        >
-                          <Maximize2 size={13} />
-                        </button>
+                        <div className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleToggleWorkFavorite(item);
+                            }}
+                            className={`p-1.5 rounded-lg bg-black/55 hover:bg-black/75 cursor-pointer transition ${
+                              item.isFavorite
+                                ? "text-amber-400"
+                                : "text-white/80 hover:text-white"
+                            }`}
+                            title={item.isFavorite ? "取消收藏作品" : "收藏该作品"}
+                          >
+                            <Star
+                              size={13}
+                              className={item.isFavorite ? "fill-amber-400" : ""}
+                            />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setLightboxItem(item);
+                            }}
+                            className="p-1.5 rounded-lg bg-black/55 hover:bg-black/75 text-white cursor-pointer"
+                            title="放大检视与 Remix"
+                          >
+                            <Maximize2 size={13} />
+                          </button>
+                        </div>
                       </div>
                     </div>
 
@@ -1884,7 +2012,7 @@ export const ImageStudio: React.FC = () => {
                           onClick={() => handleDeleteOne(item)}
                           className="p-1.5 rounded-xl border z-border z-ghost-btn cursor-pointer"
                           style={{ color: "var(--pill-danger-text)" }}
-                          title="从 IndexedDB 画廊删除"
+                          title="从画廊与持久化存储删除"
                         >
                           <Trash2 size={12} />
                         </button>
@@ -1927,14 +2055,31 @@ export const ImageStudio: React.FC = () => {
                       {lightboxItem.model}
                     </h3>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => setLightboxItem(null)}
-                    className="p-1 rounded-lg border z-border z-ghost-btn cursor-pointer"
-                    aria-label="关闭大图检视"
-                  >
-                    <X size={14} />
-                  </button>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => handleToggleWorkFavorite(lightboxItem)}
+                      className={`p-1.5 rounded-lg border z-border cursor-pointer transition ${
+                        lightboxItem.isFavorite
+                          ? "text-amber-400 border-amber-400/40 bg-amber-400/10"
+                          : "z-ghost-btn"
+                      }`}
+                      title={lightboxItem.isFavorite ? "取消收藏" : "标星收藏"}
+                    >
+                      <Star
+                        size={14}
+                        className={lightboxItem.isFavorite ? "fill-amber-400" : ""}
+                      />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setLightboxItem(null)}
+                      className="p-1 rounded-lg border z-border z-ghost-btn cursor-pointer"
+                      aria-label="关闭大图检视"
+                    >
+                      <X size={14} />
+                    </button>
+                  </div>
                 </div>
 
                 <div className="space-y-1.5">

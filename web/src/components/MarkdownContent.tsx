@@ -1245,7 +1245,7 @@ function renderInlineMarkdown(
   }
   const nodes: React.ReactNode[] = [];
   const tokenRe =
-    /(`[^`]+`|<br\s*\/?>|\*\*[^*\n]+?\*\*|__[^_\n]+?__|~~[^~\n]+?~~|\*[^*\n]+?\*|\[[^\]\n]+\]\([^)\s]+\)|https?:\/\/[^\s<>)"]+)/gi;
+    /(`[^`]+`|<br\s*\/?>|\*\*[^*\n]+?\*\*|__[^_\n]+?__|~~[^~\n]+?~~|\*[^*\n]+?\*|!\[[^\]\n]*\]\([^)\s]+\)|\[[^\]\n]+\]\([^)\s]+\)|https?:\/\/[^\s<>)"]+)/gi;
   let last = 0;
   let idx = 0;
   let m: RegExpExecArray | null;
@@ -1301,6 +1301,38 @@ function renderInlineMarkdown(
           )}
         </em>
       );
+    } else if (tok.startsWith("![")) {
+      const imgMatch = /^!\[([^\]\n]*)\]\(([^)\s]+)\)$/.exec(tok);
+      if (imgMatch) {
+        const [, alt, src] = imgMatch;
+        const safe = /^(https?:\/\/|data:image\/|\/storage\/)/i.test(src);
+        if (safe) {
+          nodes.push(
+            <span
+              key={key}
+              className="block my-3 max-w-lg overflow-hidden rounded-2xl border z-border shadow-sm group bg-[var(--bg-surface)] relative"
+            >
+              <img
+                src={src}
+                alt={alt || "AI 生成图片"}
+                loading="lazy"
+                className="w-full h-auto max-h-[520px] object-contain bg-black/5 dark:bg-white/5 cursor-zoom-in transition-transform duration-200 hover:scale-[1.01]"
+                onClick={() => window.open(src, "_blank")}
+                title="点击在新窗口查看高清原图"
+              />
+              {alt && (
+                <span className="block px-3 py-1.5 text-[11px] z-text-muted bg-[var(--bg-surface)] border-t z-border truncate">
+                  {alt}
+                </span>
+              )}
+            </span>
+          );
+        } else {
+          nodes.push(tok);
+        }
+      } else {
+        nodes.push(tok);
+      }
     } else if (tok.startsWith("[")) {
       const linkMatch = /^\[([^\]\n]+)\]\(([^)\s]+)\)$/.exec(tok);
       if (linkMatch) {

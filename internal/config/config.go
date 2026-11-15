@@ -32,6 +32,14 @@ type Config struct {
 	KamiAutoRenew           bool
 	PromptSyncIntervalHours int
 	PromptPlazaFile         string
+	DatabaseURL             string
+	StorageDir              string
+	S3Endpoint              string
+	S3Bucket                string
+	S3AccessKey             string
+	S3SecretKey             string
+	S3Region                string
+	S3PublicURL             string
 }
 
 func Load() Config {
@@ -62,6 +70,14 @@ func Load() Config {
 		KamiAutoRenew:           getBoolEnv("KAMI_AUTO_RENEW", true),
 		PromptSyncIntervalHours: getIntEnv("PROMPT_SYNC_INTERVAL_HOURS", 6),
 		PromptPlazaFile:         os.Getenv("PROMPT_PLAZA_FILE"),
+		DatabaseURL:             getEnvWithFallback("DATABASE_URL", "DB_DSN", "data/ai-web-free.db"),
+		StorageDir:              getEnv("STORAGE_DIR", "data/storage"),
+		S3Endpoint:              os.Getenv("S3_ENDPOINT"),
+		S3Bucket:                os.Getenv("S3_BUCKET"),
+		S3AccessKey:             os.Getenv("S3_ACCESS_KEY"),
+		S3SecretKey:             os.Getenv("S3_SECRET_KEY"),
+		S3Region:                getEnv("S3_REGION", "auto"),
+		S3PublicURL:             os.Getenv("S3_PUBLIC_URL"),
 	}
 }
 

@@ -18,19 +18,25 @@ import (
 	"ai-web-free/internal/promptplaza"
 	"ai-web-free/internal/provider"
 	"ai-web-free/internal/proxy"
+	"ai-web-free/internal/storage"
+	"ai-web-free/internal/vectorstore"
 
 	"github.com/bogdanfinn/websocket"
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
 // GatewayRuntime 聚合网关路由共享的高可用与可观测组件，nil-safe。
 type GatewayRuntime struct {
-	AccountPool *accounts.Pool
-	ProxyPool   *proxy.Pool
-	KamiWorker  *provider.KamiRenewWorker
-	AuditLog    *audit.RingBuffer
-	PromptPlaza *promptplaza.Manager
-	Config      *config.Config
+	AccountPool   *accounts.Pool
+	ProxyPool     *proxy.Pool
+	KamiWorker    *provider.KamiRenewWorker
+	AuditLog      *audit.RingBuffer
+	PromptPlaza   *promptplaza.Manager
+	Config        *config.Config
+	DB            *gorm.DB
+	StorageEngine storage.StorageEngine
+	VectorStore   vectorstore.VectorStore
 }
 
 // FailoverOptions 控制单次请求账号容灾尝试策略与能力过滤。

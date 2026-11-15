@@ -23,8 +23,8 @@ from typing import Any, Optional
 
 DEFAULT_BRAIN_ROOT = Path.home() / ".gemini" / "antigravity" / "brain"
 USER_REQUEST_RE = re.compile(r"<USER_REQUEST>\s*(.*?)\s*</USER_REQUEST>", re.S)
-GRILL_ME_CMD_RE = re.compile(r"(?:^|\s)/grill-me(?:\s|$)")
-GRILL_ME_PREFIX_RE = re.compile(r"^\s*(?:/grill-me\s*)+", re.I)
+GRILL_ME_CMD_RE = re.compile(r"(?:^|\s)/grill-me(?:-adr)?(?:\s|$)")
+GRILL_ME_PREFIX_RE = re.compile(r"^\s*(?:/grill-me(?:-adr)?\s*)+", re.I)
 ANSWER_LINE_RE = re.compile(r"^A(\d+):\s*(.*)$")
 TIMESTAMP_META_RE = re.compile(r"^(?:Created At|Completed At):\s*")
 ADR_FILE_RE = re.compile(r"^ADR-(\d{4})-.*\.md$")

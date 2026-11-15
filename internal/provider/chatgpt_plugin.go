@@ -155,6 +155,9 @@ func (p *ChatGPTProvider) Descriptor() ProviderDescriptor {
 			"websocket",
 		},
 		FeaturedModels: featured,
+		Tags:           MakeTags("daily-credits", "cookie-pool", "reverse-web"),
+		CostType:       "daily_credits",
+		AuthType:       "cookie",
 	}
 }
 
@@ -754,7 +757,32 @@ func minLen(a, b int) int {
 
 // RegisterDefaultProviders 注册 ChatGPT 主插件以及预留的多供应商插件槽位
 func RegisterDefaultProviders(reg *Registry, chatgptPlugin *ChatGPTProvider) {
-	reg.Register(chatgptPlugin)
+	if chatgptPlugin != nil {
+		reg.Register(chatgptPlugin)
+	}
+
+	var pPool *proxy.Pool
+	if chatgptPlugin != nil {
+		pPool = chatgptPlugin.proxyPool
+	}
+
+	// 注册免密剪映 TTS 引擎
+	reg.Register(NewJianYingProvider(pPool))
+
+	// 注册免密微软 Edge-TTS 引擎
+	reg.Register(NewEdgeTTSProvider())
+
+	// 注册硅基流动永久免费模型号池插件
+	reg.Register(NewSiliconFlowProvider(nil, ""))
+
+	// 注册阿里云百炼多模态号池插件
+	reg.Register(NewDashScopeProvider(nil, ""))
+
+	// 注册字节即梦 AI 号池插件
+	reg.Register(NewJimengProvider(nil))
+
+	// 注册 Meta AI Muse 视频生成插件
+	reg.Register(NewMetaMuseProvider(nil, ""))
 
 	reg.Register(NewStubProvider(ProviderDescriptor{
 		ID:                    "claude",

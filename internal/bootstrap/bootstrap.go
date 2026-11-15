@@ -15,10 +15,12 @@ import (
 	"ai-web-free/internal/browserfp"
 	"ai-web-free/internal/chatgpt"
 	"ai-web-free/internal/config"
+	"ai-web-free/internal/db"
 	"ai-web-free/internal/handler"
 	"ai-web-free/internal/promptplaza"
 	"ai-web-free/internal/provider"
 	"ai-web-free/internal/proxy"
+	"ai-web-free/internal/storage"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -232,12 +234,23 @@ func Init() (*App, error) {
 			}
 		}()
 	}
+	// 初始化持久化数据库与文件存储引擎（严格零 CGO，优雅降级）
+	database, _ := db.InitDB(cfg.DatabaseURL)
+	var storageEngine storage.StorageEngine
+	var storageErr error
+	storageEngine, storageErr = storage.NewLocalStorageEngine(cfg.StorageDir)
+	if storageErr != nil {
+		storageEngine = storage.NewMemoryStorageEngine()
+	}
+
 	rtForPlaza := &handler.GatewayRuntime{
-		AccountPool: accountPool,
-		ProxyPool:   proxyPool,
-		KamiWorker:  kamiWorker,
-		AuditLog:    auditLog,
-		Config:      &cfg,
+		AccountPool:   accountPool,
+		ProxyPool:     proxyPool,
+		KamiWorker:    kamiWorker,
+		AuditLog:      auditLog,
+		Config:        &cfg,
+		DB:            database,
+		StorageEngine: storageEngine,
 	}
 	plazaMgr := promptplaza.NewManager(promptplaza.Options{
 		PersistFile:  cfg.PromptPlazaFile,
@@ -247,13 +260,15 @@ func Init() (*App, error) {
 	stopPromptSync := plazaMgr.StartScheduler(time.Duration(cfg.PromptSyncIntervalHours) * time.Hour)
 
 	router := handler.RegisterRouterWithDeps(handler.RouterDeps{
-		AccountPool: accountPool,
-		ProxyPool:   proxyPool,
-		Registry:    reg,
-		Config:      &cfg,
-		KamiWorker:  kamiWorker,
-		AuditLog:    auditLog,
-		PromptPlaza: plazaMgr,
+		AccountPool:   accountPool,
+		ProxyPool:     proxyPool,
+		Registry:      reg,
+		Config:        &cfg,
+		KamiWorker:    kamiWorker,
+		AuditLog:      auditLog,
+		PromptPlaza:   plazaMgr,
+		DB:            database,
+		StorageEngine: storageEngine,
 	})
 
 	return &App{

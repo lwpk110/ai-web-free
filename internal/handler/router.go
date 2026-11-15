@@ -13,10 +13,13 @@ import (
 	"ai-web-free/internal/promptplaza"
 	"ai-web-free/internal/provider"
 	"ai-web-free/internal/proxy"
+	"ai-web-free/internal/storage"
+	"ai-web-free/internal/vectorstore"
 	"ai-web-free/middlewares"
 	"ai-web-free/web"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
 func optionsHandler(c *gin.Context) {
@@ -30,13 +33,16 @@ func optionsHandler(c *gin.Context) {
 
 // RouterDeps 聚合 RegisterRouterWithDeps 所需的运行时依赖。
 type RouterDeps struct {
-	AccountPool *accounts.Pool
-	ProxyPool   *proxy.Pool
-	Registry    *provider.Registry
-	Config      *config.Config
-	KamiWorker  *provider.KamiRenewWorker
-	AuditLog    *audit.RingBuffer
-	PromptPlaza *promptplaza.Manager
+	AccountPool   *accounts.Pool
+	ProxyPool     *proxy.Pool
+	Registry      *provider.Registry
+	Config        *config.Config
+	KamiWorker    *provider.KamiRenewWorker
+	AuditLog      *audit.RingBuffer
+	PromptPlaza   *promptplaza.Manager
+	DB            *gorm.DB
+	StorageEngine storage.StorageEngine
+	VectorStore   vectorstore.VectorStore
 }
 
 func RegisterRouter(accountPool *accounts.Pool, proxyPool *proxy.Pool, registry *provider.Registry, cfg *config.Config) *gin.Engine {
@@ -55,12 +61,18 @@ func RegisterRouterWithDeps(deps RouterDeps) *gin.Engine {
 	cfg := deps.Config
 
 	rt := &GatewayRuntime{
-		AccountPool: accountPool,
-		ProxyPool:   proxyPool,
-		KamiWorker:  deps.KamiWorker,
-		AuditLog:    deps.AuditLog,
-		PromptPlaza: deps.PromptPlaza,
-		Config:      cfg,
+		AccountPool:   accountPool,
+		ProxyPool:     proxyPool,
+		KamiWorker:    deps.KamiWorker,
+		AuditLog:      deps.AuditLog,
+		PromptPlaza:   deps.PromptPlaza,
+		Config:        cfg,
+		DB:            deps.DB,
+		StorageEngine: deps.StorageEngine,
+		VectorStore:   deps.VectorStore,
+	}
+	if rt.VectorStore == nil {
+		rt.VectorStore = vectorstore.NewMemoryVectorStore()
 	}
 	if rt.PromptPlaza == nil {
 		var proxyFn promptplaza.ProxyFunc
@@ -83,10 +95,15 @@ func RegisterRouterWithDeps(deps RouterDeps) *gin.Engine {
 	authHandler := NewAuthHandler(accountPool)
 	modelsHandler := NewModelsHandler(accountPool, cfg)
 	adminHandler := NewAdminHandler(registry, proxyPool, cfg)
+	galleryHandler := NewGalleryHandler(rt.DB, rt.StorageEngine)
+	chatWorkbenchHandler := NewChatWorkbenchHandler(rt.DB, rt.VectorStore)
 	chatHandler.SetRuntime(rt)
 	imageHandler.SetRuntime(rt)
 	audioHandler.SetRuntime(rt)
 	adminHandler.SetRuntime(rt)
+	audioHandler.SetRegistry(registry)
+	imageHandler.SetRegistry(registry)
+	videoHandler := NewVideoHandler(registry, deps.AuditLog)
 
 	// 初始化基础前置参数（DPL、BasicCookies 等）
 	proxyUrl := cfg.ProxyURL
@@ -120,6 +137,9 @@ func RegisterRouterWithDeps(deps RouterDeps) *gin.Engine {
 		})
 		router.GET("/index.html", serveIndex)
 		router.GET("/assets/*filepath", func(c *gin.Context) {
+			fileServer.ServeHTTP(c.Writer, c.Request)
+		})
+		router.GET("/samples/*filepath", func(c *gin.Context) {
 			fileServer.ServeHTTP(c.Writer, c.Request)
 		})
 	} else {
@@ -160,7 +180,48 @@ func RegisterRouterWithDeps(deps RouterDeps) *gin.Engine {
 		adminGroup.GET("/prompts", adminHandler.ListPrompts)
 		adminGroup.POST("/prompts/sync", adminHandler.SyncPrompts)
 		adminGroup.POST("/prompts/expand", adminHandler.ExpandPrompt)
+
+		// 图像工坊作品画廊
+		adminGroup.GET("/gallery", galleryHandler.ListWorks)
+		adminGroup.POST("/gallery", galleryHandler.SaveWork)
+		adminGroup.POST("/gallery/batch-migrate", galleryHandler.BatchMigrate)
+		adminGroup.PUT("/gallery/:id/favorite", galleryHandler.ToggleFavorite)
+		adminGroup.DELETE("/gallery/:id", galleryHandler.DeleteWork)
+		adminGroup.DELETE("/gallery", galleryHandler.ClearWorks)
+
+		// AI Copilot 会话历史持久化（旧版兼容接口）
+		adminGroup.GET("/chat/messages", galleryHandler.ListChatMessages)
+		adminGroup.POST("/chat/messages", galleryHandler.SaveChatMessages)
+		adminGroup.DELETE("/chat/messages", galleryHandler.ClearChatMessages)
+
+		// 专业 AI 对话工作台（多会话、预设、全文检索与导入导出）
+		adminGroup.GET("/chat/conversations", chatWorkbenchHandler.ListConversations)
+		adminGroup.POST("/chat/conversations", chatWorkbenchHandler.CreateConversation)
+		adminGroup.GET("/chat/conversations/:id", chatWorkbenchHandler.GetConversation)
+		adminGroup.PATCH("/chat/conversations/:id", chatWorkbenchHandler.UpdateConversation)
+		adminGroup.DELETE("/chat/conversations/:id", chatWorkbenchHandler.DeleteConversation)
+		adminGroup.POST("/chat/conversations/:id/messages", chatWorkbenchHandler.SaveConversationMessages)
+		adminGroup.DELETE("/chat/conversations/:id/messages/:msg_id", chatWorkbenchHandler.DeleteConversationMessage)
+		adminGroup.GET("/chat/conversations/:id/export", chatWorkbenchHandler.ExportConversation)
+		adminGroup.POST("/chat/conversations/import", chatWorkbenchHandler.ImportConversations)
+		adminGroup.GET("/chat/search", chatWorkbenchHandler.SearchChat)
+		adminGroup.GET("/chat/presets", chatWorkbenchHandler.ListPresets)
+		adminGroup.POST("/chat/presets", chatWorkbenchHandler.SavePreset)
+		adminGroup.DELETE("/chat/presets/:id", chatWorkbenchHandler.DeletePreset)
+
+		// 提示词广场收藏持久化
+		adminGroup.GET("/prompts/favorites", galleryHandler.ListPromptFavorites)
+		adminGroup.POST("/prompts/favorites/toggle", galleryHandler.TogglePromptFavorite)
+		adminGroup.POST("/prompts/favorites/sync", galleryHandler.SyncPromptFavorites)
+
+		// 多模态音频与视频任务运维
+		adminGroup.GET("/multimodal/video-tasks", videoHandler.ListTasks)
+		adminGroup.GET("/multimodal/audio-history", audioHandler.ListAudioHistory)
+		adminGroup.GET("/providers/channels", adminHandler.ListChannels)
 	}
+
+	// 静态生图资源强缓存分发
+	router.GET("/storage/images/:filename", galleryHandler.ServeStaticImage)
 
 	router.POST("/auth/session", authHandler.Session)
 	router.POST("/auth/refresh", authHandler.Refresh)
@@ -175,6 +236,23 @@ func RegisterRouterWithDeps(deps RouterDeps) *gin.Engine {
 	router.OPTIONS("/v1/audio/speech", optionsHandler)
 	router.OPTIONS("/v1/audio/transcriptions", optionsHandler)
 	router.OPTIONS("/v1/audio/translations", optionsHandler)
+	router.OPTIONS("/v1/audio/voices", optionsHandler)
+	router.OPTIONS("/v1/audio/voices/design", optionsHandler)
+	router.OPTIONS("/v1/audio/voices/clone", optionsHandler)
+	router.OPTIONS("/v1/audio/history", optionsHandler)
+	router.OPTIONS("/v1/audio/files/:id", optionsHandler)
+	router.OPTIONS("/v1/videos/generations", optionsHandler)
+	router.OPTIONS("/v1/videos/tasks/:id", optionsHandler)
+	router.OPTIONS("/v1/videos/:id", optionsHandler)
+	router.OPTIONS("/v1/videos/:id/content", optionsHandler)
+	router.OPTIONS("/v1/videos/models", optionsHandler)
+	router.OPTIONS("/v1/videos/files/:id", optionsHandler)
+	router.GET("/v1/videos/files/:id", videoHandler.StreamVideoFile)
+	router.HEAD("/v1/videos/files/:id", videoHandler.StreamVideoFile)
+	router.GET("/v1/videos/:id/content", videoHandler.StreamVideoFile)
+	router.HEAD("/v1/videos/:id/content", videoHandler.StreamVideoFile)
+	router.GET("/storage/videos/:id", videoHandler.StreamVideoFile)
+	router.HEAD("/storage/videos/:id", videoHandler.StreamVideoFile)
 
 	authGroup := router.Group("").Use(middlewares.Authorization)
 	authGroup.POST("/v1/chat/completions", chatHandler.Nightmare)
@@ -188,6 +266,15 @@ func RegisterRouterWithDeps(deps RouterDeps) *gin.Engine {
 	authGroup.POST("/v1/audio/speech", audioHandler.TTS)
 	authGroup.POST("/v1/audio/transcriptions", audioHandler.Transcriptions)
 	authGroup.POST("/v1/audio/translations", audioHandler.Translations)
+	authGroup.GET("/v1/audio/voices", audioHandler.ListVoices)
+	authGroup.POST("/v1/audio/voices/design", audioHandler.VoiceDesign)
+	authGroup.POST("/v1/audio/voices/clone", audioHandler.VoiceClone)
+	authGroup.GET("/v1/audio/history", audioHandler.ListAudioHistory)
+	authGroup.GET("/v1/audio/files/:id", audioHandler.GetAudioFile)
+	authGroup.POST("/v1/videos/generations", videoHandler.Generations)
+	authGroup.GET("/v1/videos/tasks/:id", videoHandler.GetTask)
+	authGroup.GET("/v1/videos/:id", videoHandler.GetTask)
+	authGroup.GET("/v1/videos/models", videoHandler.ListModels)
 
 	return router
 }
