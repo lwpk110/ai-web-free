@@ -22,13 +22,47 @@ func TestProviderRegistry(t *testing.T) {
 	RegisterDefaultProviders(reg, chatgptPlugin)
 
 	descriptors := reg.ListDescriptors()
-	if len(descriptors) != 5 {
-		t.Fatalf("expected 5 descriptors, got %d", len(descriptors))
+	if len(descriptors) != 11 {
+		t.Fatalf("expected 11 descriptors, got %d", len(descriptors))
 	}
 
 	p, ok := reg.Get("chatgpt")
 	if !ok || p.Descriptor().ID != "chatgpt" {
 		t.Fatalf("failed to get chatgpt provider")
+	}
+
+	// 检查新增的免费多模态 provider
+	jy, ok := reg.Get("jianying")
+	if !ok || jy.Descriptor().ID != "jianying" || len(jy.Descriptor().Tags) == 0 {
+		t.Fatalf("expected valid jianying provider with tags")
+	}
+
+	edge, ok := reg.Get("edge_tts")
+	if !ok || edge.Descriptor().ID != "edge_tts" || len(edge.Descriptor().Tags) == 0 {
+		t.Fatalf("expected valid edge_tts provider with tags")
+	}
+
+	sf, ok := reg.Get("siliconflow")
+	if !ok || sf.Descriptor().ID != "siliconflow" || len(sf.Descriptor().Tags) == 0 {
+		t.Fatalf("expected valid siliconflow provider with tags")
+	}
+
+	ds, ok := reg.Get("dashscope")
+	if !ok || ds.Descriptor().ID != "dashscope" || len(ds.Descriptor().Tags) == 0 {
+		t.Fatalf("expected valid dashscope provider with tags")
+	}
+
+	jm, ok := reg.Get("jimeng")
+	if !ok || jm.Descriptor().ID != "jimeng" || len(jm.Descriptor().Tags) == 0 {
+		t.Fatalf("expected valid jimeng provider with tags")
+	}
+
+	muse, ok := reg.Get("meta_muse")
+	if !ok || muse.Descriptor().ID != "meta_muse" || len(muse.Descriptor().Tags) == 0 {
+		t.Fatalf("expected valid meta_muse provider with tags")
+	}
+	if !ok || jm.Descriptor().ID != "jimeng" || len(jm.Descriptor().Tags) == 0 {
+		t.Fatalf("expected valid jimeng provider with tags")
 	}
 
 	// 检查预留槽位

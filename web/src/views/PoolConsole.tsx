@@ -14,6 +14,9 @@ import {
   RefreshCw,
   Search,
   X,
+  KeyRound,
+  ExternalLink,
+  Sparkles,
 } from "lucide-react";
 import {
   cancelKamiLogin,
@@ -34,6 +37,8 @@ import {
   type ProbeTask,
   type ProviderSummary,
   type ProxyNodeStatus,
+  fetchProviderChannels,
+  type ProviderChannel,
 } from "../api/client";
 import {
   formatElapsedSeconds,
@@ -46,12 +51,14 @@ import {
 import { seedModelsCatalogFromSlugs } from "../lib/models";
 
 const IMPORT_PLACEHOLDERS: Record<string, string> = {
-  kami: "每行一条卡密，格式: email----password----2FA_secret\n例如: user@example.com----DemoPass123----JBSWY3DPEHPK3PXP",
+  cookie:
+    "每行一个账号凭据，支持纯 Cookie 内容：\ndatr=...; hatch_sess=...; ps_l=0\n\n或附带账号标识（邮箱/备注）：\nuser@example.com----datr=...; hatch_sess=...\n\n导入后将直接激活号池并持久化。",
+  kami: "每行一条账号密码，格式: 手机号或邮箱----密码\n例如: user@example.com----MyPassword123\n支持在号池中一键启动无头浏览器自动化登录并提取 Cookie",
   sub2api_json:
     '粘贴 Sub2API 标准导出 JSON（包含 "type": "sub2api-data" 与 "accounts" 数组）',
   access_token: "每行一条 Access Token (eyJ...)，可选携带 account_id",
   refresh_token: "每行一条 Refresh Token (rt_...)",
-  session_token: "每行一条 __Secure-next-auth.session-token",
+  session_token: "每行一条会话 Cookie (如 datr=...; ps_l=1) 或 NextAuth Session Token",
   free_uuid: "留空则按下方数量自动生成 UUID 访客设备，或每行粘贴一个 UUID",
 };
 
@@ -93,6 +100,7 @@ export const PoolConsole: React.FC<{
   const [stats, setStats] = useState<PoolStats | null>(null);
   const [accounts, setAccounts] = useState<AccountView[]>([]);
   const [workerStats, setWorkerStats] = useState<KamiWorkerStats | null>(null);
+  const [dbChannels, setDbChannels] = useState<ProviderChannel[]>([]);
 
   const [statusFilter, setStatusFilter] = useState("");
   const [typeFilter, setTypeFilter] = useState("");
@@ -124,6 +132,11 @@ export const PoolConsole: React.FC<{
 
   const [showImport, setShowImport] = useState(false);
   const [showBulkEdit, setShowBulkEdit] = useState(false);
+  const [showOAuthGuide, setShowOAuthGuide] = useState(false);
+  const [oauthTargetEmail, setOauthTargetEmail] = useState("");
+  const [oauthCookieInput, setOauthCookieInput] = useState("");
+  const [oauthSubmitting, setOauthSubmitting] = useState(false);
+  const [extractingChrome, setExtractingChrome] = useState(false);
   const [importFormat, setImportFormat] = useState("kami");
   const [importText, setImportText] = useState("");
   const [generateCount, setGenerateCount] = useState(10);
@@ -218,6 +231,7 @@ export const PoolConsole: React.FC<{
       try {
         const ov = await fetchOverview();
         setProviders(ov.providers || []);
+        fetchProviderChannels().then((r) => setDbChannels(r.channels || [])).catch(() => {});
 
         const targetSummary = (ov.providers || []).find(
           (p) => p.descriptor.id === activeProvider
@@ -730,6 +744,66 @@ export const PoolConsole: React.FC<{
     }
   };
 
+  const handleOAuthSubmit = async () => {
+    const trimmed = oauthCookieInput.trim();
+    if (!trimmed) {
+      setNotice({ type: "error", text: "请粘贴登录成功后的完整 Cookie 内容" });
+      return;
+    }
+    setOauthSubmitting(true);
+    try {
+      const payload = oauthTargetEmail ? `${oauthTargetEmail}----${trimmed}` : trimmed;
+      const res = await importAccounts({
+        provider: activeProvider,
+        credentialType: "cookie",
+        rawText: payload,
+        persist: true,
+        autoLogin: false,
+        headless: true,
+      });
+      setShowOAuthGuide(false);
+      setOauthCookieInput("");
+      setNotice({
+        type: "success",
+        text: `🎉 OAuth2 / 网页授权成功！已为 ${oauthTargetEmail || "账号"} 录入完整凭据并点亮为 active 状态`,
+      });
+      await loadData();
+    } catch (e: any) {
+      setNotice({
+        type: "error",
+        text: `授权凭据提交失败: ${e?.message || "未知错误"}`,
+      });
+    } finally {
+      setOauthSubmitting(false);
+    }
+  };
+
+  const handleExtractLocalChromeCookie = async () => {
+    setExtractingChrome(true);
+    try {
+      const res = await executeAccountAction("meta_muse", "current", "extract_chrome");
+      if (res.result?.ok && res.result.cookie) {
+        setOauthCookieInput(res.result.cookie);
+        setNotice({
+          type: "success",
+          text: `🎉 成功从本机 Chrome 提取到 ${res.result.count || ""} 个 Cookie，已自动填入！点击下方确认即可激活。`,
+        });
+      } else {
+        setNotice({
+          type: "error",
+          text: res.result?.error || "未在本地 Chrome 中找到已登录的 muse.ai 凭据，请在网页中手动复制",
+        });
+      }
+    } catch (e: any) {
+      setNotice({
+        type: "error",
+        text: `读取本地 Chrome 失败: ${e?.message || "请在网页上手动复制"}`,
+      });
+    } finally {
+      setExtractingChrome(false);
+    }
+  };
+
   const isPlannedProvider =
     activeProviderSummary && activeProviderSummary.descriptor.status !== "enabled";
 
@@ -766,30 +840,34 @@ export const PoolConsole: React.FC<{
                   : "全池测活"}
             </span>
           </button>
-          <button
-            type="button"
-            onClick={handleLoginKami}
-            disabled={loggingInKami || proxyUnavailable || Boolean(isPlannedProvider)}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border z-border z-surface z-ghost-btn font-medium cursor-pointer disabled:opacity-50"
-          >
-            <LogIn size={13} />
-            <span>
-              {loggingInKami
-                ? "提交中..."
-                : loginTaskActive
-                  ? "追加待激活到队列"
-                  : "待激活批量登录"}
-            </span>
-          </button>
-          <label className="inline-flex items-center gap-1.5 px-2 py-1.5 border z-border rounded-xl z-text-sec">
-            <input
-              type="checkbox"
-              checked={headlessLogin}
-              onChange={(e) => setHeadlessLogin(e.target.checked)}
-              disabled={loggingInKami || updatingProxy}
-            />
-            无头模式
-          </label>
+          {activeProvider !== "meta_muse" && (
+            <>
+              <button
+                type="button"
+                onClick={handleLoginKami}
+                disabled={loggingInKami || proxyUnavailable || Boolean(isPlannedProvider)}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border z-border z-surface z-ghost-btn font-medium cursor-pointer disabled:opacity-50"
+              >
+                <LogIn size={13} />
+                <span>
+                  {loggingInKami
+                    ? "提交中..."
+                    : loginTaskActive
+                      ? "追加待激活到队列"
+                      : "待激活批量登录"}
+                </span>
+              </button>
+              <label className="inline-flex items-center gap-1.5 px-2 py-1.5 border z-border rounded-xl z-text-sec">
+                <input
+                  type="checkbox"
+                  checked={headlessLogin}
+                  onChange={(e) => setHeadlessLogin(e.target.checked)}
+                  disabled={loggingInKami || updatingProxy}
+                />
+                无头模式
+              </label>
+            </>
+          )}
           <button
             type="button"
             onClick={() => onOpenExport(activeProvider)}
@@ -799,14 +877,36 @@ export const PoolConsole: React.FC<{
             <Download size={13} />
             <span>导出号池</span>
           </button>
+          {activeProvider === "meta_muse" && (
+            <button
+              type="button"
+              onClick={() => {
+                setOauthTargetEmail("");
+                setOauthCookieInput("");
+                setShowOAuthGuide(true);
+              }}
+              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl border border-blue-500/30 bg-blue-500/10 text-blue-600 dark:text-blue-400 font-medium cursor-pointer hover:bg-blue-500/20 transition-colors"
+              title="打开网页完成认证，回填 Cookie 激活号池"
+            >
+              <KeyRound size={13} />
+              <span>Web 授权向导</span>
+            </button>
+          )}
           <button
             type="button"
-            onClick={() => setShowImport(true)}
+            onClick={() => {
+              if (activeProvider === "meta_muse") {
+                setImportFormat("cookie");
+              } else if (importFormat === "cookie") {
+                setImportFormat("kami");
+              }
+              setShowImport(true);
+            }}
             disabled={Boolean(isPlannedProvider)}
             className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl z-primary-btn font-medium cursor-pointer"
           >
             <Plus size={13} />
-            <span>导入卡密 / JSON</span>
+            <span>{activeProvider === "meta_muse" ? "导入 Cookie 凭据" : "导入卡密 / JSON"}</span>
           </button>
         </div>
       </div>
@@ -814,6 +914,62 @@ export const PoolConsole: React.FC<{
       {proxyUnavailable && (
         <div className="border-l-2 border-amber-500 px-3 py-2 text-xs text-amber-800" role="status">
           当前代理池没有健康节点，批量登录已暂停。请先测活代理或更新代理列表。
+        </div>
+      )}
+
+      {/* 数据库录入多模态免密与公共渠道池概览 */}
+      {dbChannels.length > 0 && (
+        <div className="p-card rounded-2xl border z-border p-4 shadow-xs space-y-3">
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+              <h3 className="text-xs font-semibold z-text">号池数据库录入的多模态渠道 (免登录 & 免费池)</h3>
+              <span className="px-2 py-0.2 rounded-full text-[10px] bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 font-mono">
+                {dbChannels.filter((c) => c.status === "active").length} 活跃可用 / 共 {dbChannels.length} 渠道
+              </span>
+            </div>
+            <span className="text-[11px] z-text-muted">
+              免密逆向已开箱即用；如需真实云端超大算力可随时提供 Free 账号/Key
+            </span>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2.5">
+            {dbChannels.map((ch) => (
+              <div
+                key={ch.id}
+                onClick={() => {
+                  if (providers.some((p) => p.descriptor.id === ch.provider_id)) {
+                    setActiveProvider(ch.provider_id);
+                  }
+                }}
+                className={`p-3 rounded-xl border z-border transition-all cursor-pointer ${
+                  ch.status === "active"
+                    ? "bg-emerald-500/5 hover:border-emerald-500/40"
+                    : "bg-muted/20 hover:border-primary/30"
+                }`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-medium z-text truncate">{ch.channel_name}</span>
+                  <span
+                    className={`px-1.5 py-0.2 text-[10px] rounded font-mono ${
+                      ch.status === "active"
+                        ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+                        : "bg-amber-500/10 text-amber-600 dark:text-amber-400"
+                    }`}
+                  >
+                    {ch.status === "active" ? "免密可用" : "待配置Free账号"}
+                  </span>
+                </div>
+                <p className="text-[11px] z-text-muted mt-1 line-clamp-2 leading-relaxed">
+                  {ch.description}
+                </p>
+                <div className="flex items-center justify-between mt-2 pt-1.5 border-t z-border text-[10px] z-text-muted font-mono">
+                  <span>{ch.provider_id}</span>
+                  <span className="capitalize">{ch.auth_type.replace("_", " ")}</span>
+                </div>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 
@@ -865,6 +1021,35 @@ export const PoolConsole: React.FC<{
           </div>
         )}
       </div>
+
+      {/* 渠道标签体系徽章 */}
+      {activeProviderSummary?.descriptor.tags && activeProviderSummary.descriptor.tags.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5 py-1 text-xs">
+          <span className="z-text-muted font-medium text-[11px]">渠道特性：</span>
+          {activeProviderSummary.descriptor.tags.map((t) => (
+            <span
+              key={t.key}
+              title={t.tooltip}
+              className={`px-2 py-0.5 rounded-full text-[11px] font-medium border ${
+                t.variant === "success"
+                  ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20"
+                  : t.variant === "purple"
+                  ? "bg-purple-500/10 text-purple-600 dark:text-purple-400 border-purple-500/20"
+                  : t.variant === "warning"
+                  ? "bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20"
+                  : t.variant === "cyan"
+                  ? "bg-cyan-500/10 text-cyan-600 dark:text-cyan-400 border-cyan-500/20"
+                  : "bg-muted z-text-muted border-border"
+              }`}
+            >
+              {t.label}
+            </span>
+          ))}
+          <span className="z-text-muted text-[11px] ml-1">
+            · {activeProviderSummary.descriptor.description}
+          </span>
+        </div>
+      )}
 
       {notice && (
         <NoticeBanner
@@ -1550,7 +1735,40 @@ export const PoolConsole: React.FC<{
                               )}
                               <span>{isProbing ? "测活中" : "测活"}</span>
                             </button>
-                            {acc.has_kami_credentials && (
+                            {activeProvider === "meta_muse" && (
+                              <button
+                                type="button"
+                                disabled={actionLoadingKey === `${acc.id}:sync_chrome`}
+                                onClick={() => handleAction(acc, "sync_chrome")}
+                                className="z-text-sec hover:underline cursor-pointer disabled:opacity-60 inline-flex items-center gap-1 text-xs"
+                                title="从本机已登录 Chrome 自动提取并同步更新凭据"
+                              >
+                                {actionLoadingKey === `${acc.id}:sync_chrome` && (
+                                  <Loader2 size={11} className="animate-spin" />
+                                )}
+                                <span>
+                                  {actionLoadingKey === `${acc.id}:sync_chrome`
+                                    ? "同步中"
+                                    : "从本机同步"}
+                                </span>
+                              </button>
+                            )}
+                            {activeProvider === "meta_muse" && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setOauthTargetEmail(acc.email || acc.id);
+                                  setOauthCookieInput("");
+                                  setShowOAuthGuide(true);
+                                }}
+                                className="hover:underline cursor-pointer font-medium text-blue-500 inline-flex items-center gap-0.5 text-xs"
+                                title="打开网页授权向导，为该账号录入最新 Cookie"
+                              >
+                                <KeyRound size={11} />
+                                <span>Web授权</span>
+                              </button>
+                            )}
+                            {activeProvider !== "meta_muse" && acc.has_kami_credentials && (
                               <>
                                 <button
                                   type="button"
@@ -1682,9 +1900,13 @@ export const PoolConsole: React.FC<{
           >
             <div className="flex items-center justify-between pb-3 border-b z-border">
               <div>
-                <h3 className="text-sm font-semibold">导入账号到号池</h3>
+                <h3 className="text-sm font-semibold">
+                  {activeProvider === "meta_muse" ? "导入 Meta AI Muse 凭据" : "导入账号到号池"}
+                </h3>
                 <p className="z-text-muted mt-0.5">
-                  支持 ChatGPT 卡密（email----pwd----totp）、Sub2API JSON、JWT Token 等格式。
+                  {activeProvider === "meta_muse"
+                    ? "支持批量粘贴 muse.ai 会话 Cookie，或使用 Web 授权向导一键提取。"
+                    : "支持 ChatGPT 卡密（email----pwd----totp）、Sub2API JSON、JWT Token 等格式。"}
                 </p>
               </div>
               <button
@@ -1696,32 +1918,54 @@ export const PoolConsole: React.FC<{
               </button>
             </div>
 
-            <div className="space-y-1.5">
-              <label className="font-medium z-text-sec block">凭据格式</label>
-              <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
-                {[
-                  { k: "kami", label: "卡密账号" },
-                  { k: "sub2api_json", label: "Sub2API JSON" },
-                  { k: "access_token", label: "Access Token" },
-                  { k: "refresh_token", label: "Refresh Token" },
-                  { k: "session_token", label: "Session Token" },
-                  { k: "free_uuid", label: "NoAuth UUID" },
-                ].map((opt) => (
+            {activeProvider === "meta_muse" ? (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <label className="font-medium z-text-sec block">凭据格式</label>
                   <button
-                    key={opt.k}
                     type="button"
-                    onClick={() => setImportFormat(opt.k)}
-                    className={`px-2.5 py-1.5 rounded-xl border text-center cursor-pointer ${
-                      importFormat === opt.k
-                        ? "z-primary-btn border-transparent font-medium"
-                        : "z-border z-surface z-ghost-btn"
-                    }`}
+                    onClick={() => {
+                      setShowImport(false);
+                      setShowOAuthGuide(true);
+                    }}
+                    className="inline-flex items-center gap-1 text-[11px] text-blue-500 hover:underline cursor-pointer"
                   >
-                    {opt.label}
+                    <KeyRound size={12} />
+                    <span>改用 Web 授权向导一键提取</span>
                   </button>
-                ))}
+                </div>
+                <div className="p-2.5 rounded-xl border border-blue-500/20 bg-blue-500/5 text-xs text-blue-600 dark:text-blue-400">
+                  当前供应商仅支持 <strong>Cookie 会话凭据</strong>。已为您移除失效的卡密/账密自动登录方式。
+                </div>
               </div>
-            </div>
+            ) : (
+              <div className="space-y-1.5">
+                <label className="font-medium z-text-sec block">凭据格式</label>
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
+                  {[
+                    { k: "kami", label: "卡密账号" },
+                    { k: "sub2api_json", label: "Sub2API JSON" },
+                    { k: "access_token", label: "Access Token" },
+                    { k: "refresh_token", label: "Refresh Token" },
+                    { k: "session_token", label: "Session Token" },
+                    { k: "free_uuid", label: "NoAuth UUID" },
+                  ].map((opt) => (
+                    <button
+                      key={opt.k}
+                      type="button"
+                      onClick={() => setImportFormat(opt.k)}
+                      className={`px-2.5 py-1.5 rounded-xl border text-center cursor-pointer ${
+                        importFormat === opt.k
+                          ? "z-primary-btn border-transparent font-medium"
+                          : "z-border z-surface z-ghost-btn"
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {importFormat === "free_uuid" && (
               <div className="space-y-1.5">
@@ -1757,9 +2001,14 @@ export const PoolConsole: React.FC<{
               />
             </div>
 
-            {importFormat === "kami" && (
+            {importFormat === "kami" && activeProvider !== "meta_muse" && (
               <div className="px-3 py-2.5 rounded-lg border z-border z-muted">
                 导入后可全量选择账号，使用后台批量登录任务；账号按序处理并动态更新状态。
+              </div>
+            )}
+            {activeProvider === "meta_muse" && (
+              <div className="px-3 py-2.5 rounded-lg border border-blue-500/20 bg-blue-500/5 text-xs text-blue-600 dark:text-blue-400">
+                支持直接粘贴 Cookie（如 datr=...; hatch_sess=...），导入后将立即以 active 状态入池并持久化。
               </div>
             )}
 
@@ -1882,6 +2131,156 @@ export const PoolConsole: React.FC<{
         }}
         onClose={() => setTotpInfo(null)}
       />
+
+      {/* sub2api 风格的 OAuth2 / 网页授权向导弹窗 */}
+      {showOAuthGuide && (
+        <div
+          className="fixed inset-0 z-50 bg-black/55 backdrop-blur-xs flex items-center justify-center p-4"
+          onClick={() => !oauthSubmitting && setShowOAuthGuide(false)}
+        >
+          <div
+            className="w-full max-w-lg p-card rounded-2xl border z-border shadow-2xl p-6 space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between pb-3 border-b z-border">
+              <div className="flex items-center gap-2">
+                <div className="p-2 bg-blue-500/10 text-blue-500 rounded-lg">
+                  <KeyRound size={18} />
+                </div>
+                <div>
+                  <h3 className="font-semibold text-sm z-text">
+                    Meta AI Muse Web 授权登录助手
+                  </h3>
+                  <p className="text-xs z-text-muted">
+                    向 sub2api 架构对齐：浏览器完成认证，快速回传 Cookie 激活号池
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => !oauthSubmitting && setShowOAuthGuide(false)}
+                className="p-1 rounded-lg border z-border z-ghost-btn cursor-pointer"
+              >
+                <X size={14} />
+              </button>
+            </div>
+
+            {/* 步骤向导 */}
+            <div className="space-y-3 text-xs">
+              <div className="p-3 rounded-xl border border-blue-500/20 bg-blue-500/5 space-y-2">
+                <div className="flex items-center justify-between font-medium text-blue-600 dark:text-blue-400">
+                  <span>步骤 1：打开官方登录页面完成认证</span>
+                  <a
+                    href="https://muse.ai/"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition-colors"
+                  >
+                    <ExternalLink size={11} />
+                    <span>打开 muse.ai 登录页</span>
+                  </a>
+                </div>
+                <p className="z-text-muted">
+                  在新打开的标签页中使用您的账号密码正常登录。如遇到滑块人机或邮箱验证码，直接在网页上手动完成即可。
+                </p>
+              </div>
+
+              <div className="p-3 rounded-xl border z-border bg-muted/30 space-y-2">
+                <div className="flex flex-wrap items-center justify-between gap-1.5 font-medium z-text">
+                  <span>步骤 2：获取已登录会话 Cookie</span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      disabled={extractingChrome}
+                      onClick={handleExtractLocalChromeCookie}
+                      className="inline-flex items-center gap-1 text-[11px] text-emerald-600 dark:text-emerald-400 font-medium hover:underline cursor-pointer disabled:opacity-60"
+                      title="尝试直接从本机 Chrome 数据库解密提取 muse.ai 的 Cookie"
+                    >
+                      {extractingChrome ? (
+                        <Loader2 size={11} className="animate-spin" />
+                      ) : (
+                        <Sparkles size={11} />
+                      )}
+                      <span>{extractingChrome ? "正在读取..." : "从本机 Chrome 一键提取"}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        navigator.clipboard.writeText("copy(document.cookie)");
+                        setNotice({ type: "info", text: "已复制提取代码: copy(document.cookie)，可在官方页 F12 Console 运行" });
+                      }}
+                      className="inline-flex items-center gap-1 text-[11px] text-primary hover:underline cursor-pointer"
+                    >
+                      <Copy size={11} />
+                      <span>复制 F12 提取代码</span>
+                    </button>
+                  </div>
+                </div>
+                <p className="z-text-muted">
+                  若您已在本机 Chrome 登录，可直接点击「从本机 Chrome 一键提取」；也可在官方页面按 <kbd className="px-1 py-0.5 rounded bg-muted font-mono">F12</kbd> 打开控制台（Console），粘贴执行 <code className="px-1 py-0.5 rounded bg-muted font-mono">copy(document.cookie)</code> 复制后填入下方。
+                </p>
+              </div>
+
+              {/* 目标账号 */}
+              <div className="space-y-1.5">
+                <label className="font-medium z-text-sec block">
+                  目标账号邮箱 / 身份标识
+                </label>
+                <input
+                  type="text"
+                  value={oauthTargetEmail}
+                  onChange={(e) => setOauthTargetEmail(e.target.value)}
+                  placeholder="例如：amyreed374923@outlook.com（留空则自动建新凭据）"
+                  className="w-full px-3 py-2 rounded-xl p-code-box font-mono-num text-xs focus:outline-none"
+                />
+              </div>
+
+              {/* Cookie 粘贴框 */}
+              <div className="space-y-1.5">
+                <label className="font-medium z-text-sec block">
+                  粘贴会话 Cookie 内容
+                </label>
+                <textarea
+                  rows={4}
+                  value={oauthCookieInput}
+                  onChange={(e) => setOauthCookieInput(e.target.value)}
+                  placeholder="粘贴完整的 Cookie 字符串，例如：c_user=...; xs=...; datr=...;"
+                  className="w-full p-2.5 rounded-xl p-code-box font-mono-num text-xs resize-y focus:outline-none"
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t z-border">
+              <button
+                type="button"
+                onClick={() => setShowOAuthGuide(false)}
+                disabled={oauthSubmitting}
+                className="px-3.5 py-1.5 rounded-xl border z-border z-surface z-ghost-btn text-xs cursor-pointer"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={handleOAuthSubmit}
+                disabled={oauthSubmitting || !oauthCookieInput.trim()}
+                className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-xl z-primary-btn text-xs font-medium cursor-pointer disabled:opacity-50"
+              >
+                {oauthSubmitting ? (
+                  <>
+                    <Loader2 size={12} className="animate-spin" />
+                    <span>正在验真并保存...</span>
+                  </>
+                ) : (
+                  <>
+                    <Check size={12} />
+                    <span>确认授权并激活</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Delete Confirmation Modal */}
       {deleteTarget && (

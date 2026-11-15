@@ -9,12 +9,14 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"ai-web-free/httpclient"
 	"ai-web-free/httpclient/bogdanfinn"
 	"ai-web-free/internal/accounts"
 	"ai-web-free/internal/chatgpt"
 	"ai-web-free/internal/config"
+	"ai-web-free/internal/provider"
 	officialtypes "ai-web-free/typings/official"
 
 	"github.com/gin-gonic/gin"
@@ -24,10 +26,52 @@ type ImageHandler struct {
 	accountPool *accounts.Pool
 	cfg         *config.Config
 	runtime     *GatewayRuntime
+	registry    *provider.Registry
 }
 
 func NewImageHandler(pool *accounts.Pool, cfg *config.Config) *ImageHandler {
 	return &ImageHandler{accountPool: pool, cfg: cfg}
+}
+
+// SetRegistry 注入多供应商插件注册中心
+func (h *ImageHandler) SetRegistry(reg *provider.Registry) {
+	h.registry = reg
+}
+
+func (h *ImageHandler) getDashScopeProvider() *provider.DashScopeProvider {
+	if h.registry == nil {
+		return nil
+	}
+	if p, ok := h.registry.Get("dashscope"); ok {
+		if casted, ok := p.(*provider.DashScopeProvider); ok {
+			return casted
+		}
+	}
+	return nil
+}
+
+func (h *ImageHandler) getJimengProvider() *provider.JimengProvider {
+	if h.registry == nil {
+		return nil
+	}
+	if p, ok := h.registry.Get("jimeng"); ok {
+		if casted, ok := p.(*provider.JimengProvider); ok {
+			return casted
+		}
+	}
+	return nil
+}
+
+func (h *ImageHandler) getSiliconFlowProvider() *provider.SiliconFlowProvider {
+	if h.registry == nil {
+		return nil
+	}
+	if p, ok := h.registry.Get("siliconflow"); ok {
+		if casted, ok := p.(*provider.SiliconFlowProvider); ok {
+			return casted
+		}
+	}
+	return nil
 }
 
 // SetRuntime 注入网关共享的容灾、代理健康与审计运行时。
@@ -165,6 +209,52 @@ func (h *ImageHandler) Generations(c *gin.Context) {
 	}
 	if imageRequest.ResponseFormat == "" {
 		imageRequest.ResponseFormat = "b64_json"
+	}
+
+	modelLower := strings.ToLower(strings.TrimSpace(imageRequest.Model))
+	if strings.Contains(modelLower, "wanx") || strings.Contains(modelLower, "jimeng") || strings.Contains(modelLower, "flux") {
+		var imgURL string
+		var genErr error
+		usedProvider := ""
+
+		if strings.Contains(modelLower, "wanx") {
+			if ds := h.getDashScopeProvider(); ds != nil {
+				imgURL, genErr = ds.GenerateImage(c.Request.Context(), imageRequest.Prompt, imageRequest.Size)
+				usedProvider = "dashscope"
+			}
+		} else if strings.Contains(modelLower, "jimeng") {
+			if jm := h.getJimengProvider(); jm != nil {
+				imgURL, genErr = jm.GenerateImage(c.Request.Context(), imageRequest.Prompt, imageRequest.Size)
+				usedProvider = "jimeng"
+			}
+		}
+
+		// 若指定 FLUX，或上述渠道异常时执行跨平台降级至硅基流动 FLUX
+		if imgURL == "" && (strings.Contains(modelLower, "flux") || genErr != nil) {
+			if sf := h.getSiliconFlowProvider(); sf != nil {
+				fallbackURL, sfErr := sf.GenerateImage(c.Request.Context(), imageRequest.Prompt, imageRequest.Size)
+				if sfErr == nil && fallbackURL != "" {
+					imgURL = fallbackURL
+					usedProvider = "siliconflow"
+					genErr = nil
+					c.Header("X-Fallback-Provider", "siliconflow")
+				}
+			}
+		}
+
+		if genErr == nil && imgURL != "" {
+			c.Header("X-Image-Provider", usedProvider)
+			c.JSON(200, gin.H{
+				"created": time.Now().Unix(),
+				"data": []gin.H{
+					{
+						"url":            imgURL,
+						"revised_prompt": imageRequest.Prompt,
+					},
+				},
+			})
+			return
+		}
 	}
 
 	effectivePrompt := chatgpt.DecorateImagePrompt(imageRequest.Prompt, imageRequest.Model, imageRequest.Size, imageRequest.Quality)

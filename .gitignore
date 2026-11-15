@@ -15,6 +15,12 @@ tools/authenticator/.proxies.txt.swp
 /logs/
 /target/
 /bin/
+/data/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
 .claude/
 .gocache
 .atomcode

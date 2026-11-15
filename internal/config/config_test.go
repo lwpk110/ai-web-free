@@ -7,7 +7,7 @@ import (
 
 func TestLoadDefaults(t *testing.T) {
 	// 清除所有相关环境变量
-	for _, key := range []string{"SERVER_HOST", "SERVER_PORT", "PORT", "STREAM_MODE", "MAX_CONTINUE_COUNT", "PROMPT_SYNC_INTERVAL_HOURS", "PROMPT_PLAZA_FILE"} {
+	for _, key := range []string{"SERVER_HOST", "SERVER_PORT", "PORT", "STREAM_MODE", "MAX_CONTINUE_COUNT", "PROMPT_SYNC_INTERVAL_HOURS", "PROMPT_PLAZA_FILE", "DATABASE_URL", "STORAGE_DIR"} {
 		os.Unsetenv(key)
 	}
 
@@ -30,6 +30,12 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.PromptPlazaFile != "" {
 		t.Errorf("PromptPlazaFile = %q, want empty", cfg.PromptPlazaFile)
+	}
+	if cfg.DatabaseURL != "data/ai-web-free.db" {
+		t.Errorf("DatabaseURL = %q, want data/ai-web-free.db", cfg.DatabaseURL)
+	}
+	if cfg.StorageDir != "data/storage" {
+		t.Errorf("StorageDir = %q, want data/storage", cfg.StorageDir)
 	}
 }
 

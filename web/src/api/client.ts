@@ -49,6 +49,15 @@ async function adminFetch(input: RequestInfo | URL, init?: RequestInit): Promise
   return res;
 }
 
+export interface ChannelTag {
+  key: string;
+  label: string;
+  category: "cost" | "auth" | "feature" | "reliability";
+  variant: "default" | "success" | "warning" | "purple" | "cyan";
+  icon?: string;
+  tooltip?: string;
+}
+
 export interface ProviderDescriptor {
   id: string;
   name: string;
@@ -60,6 +69,49 @@ export interface ProviderDescriptor {
   credential_formats: string[];
   capabilities: string[];
   featured_models?: string[];
+  tags?: ChannelTag[];
+  cost_type?: string;
+  auth_type?: string;
+}
+
+export interface VoiceDescriptor {
+  id: string;
+  name: string;
+  provider: string;
+  category: string;
+  gender: "female" | "male";
+  sample_text: string;
+  tags: string[];
+  preview_url?: string;
+}
+
+export interface VideoTask {
+  task_id: string;
+  provider: string;
+  model: string;
+  prompt: string;
+  image_url?: string;
+  audio_url?: string;
+  duration: number;
+  status: "PENDING" | "RUNNING" | "SUCCEEDED" | "FAILED";
+  progress: number;
+  video_url?: string;
+  error_msg?: string;
+  created_at: string;
+  completed_at?: string;
+}
+
+export interface VideoModelInfo {
+  id: string;
+  name: string;
+  provider: string;
+  description: string;
+  max_duration: number;
+  resolutions: string[];
+  supports_i2v: boolean;
+  supports_a2v: boolean;
+  is_free_tier: boolean;
+  tag: string;
 }
 
 export interface PoolStats {
@@ -334,6 +386,8 @@ export type AccountActionType =
   | "disable"
   | "delete"
   | "totp"
+  | "sync_chrome"
+  | "extract_chrome"
   | "login";
 
 export async function executeAccountAction(
@@ -361,6 +415,8 @@ export async function executeAccountAction(
     queued?: boolean;
     task_id?: string;
     task?: KamiLoginTask;
+    cookie?: string;
+    count?: number;
   };
 }> {
   const payload: Record<string, unknown> = { action };
@@ -1069,3 +1125,647 @@ export async function expandImagePrompt(
   }
   return data;
 }
+
+// ─── 持久化画廊 API (Server-side Gallery) ──────────────────────────
+
+export interface ServerGalleryWork {
+  id: string;
+  prompt: string;
+  revised_prompt?: string;
+  model: string;
+  size: string;
+  quality?: string;
+  mode?: "generations" | "edits";
+  storage_type: "local" | "s3" | "blob" | "remote";
+  file_path?: string;
+  url: string;
+  file_size?: number;
+  mime_type?: string;
+  latency_ms?: number;
+  is_favorite: boolean;
+  client_ip?: string;
+  created_at: string;
+  updated_at?: string;
+}
+
+export interface FetchGalleryOptions {
+  page?: number;
+  pageSize?: number;
+  model?: string;
+  favorite?: boolean;
+  q?: string;
+}
+
+export async function fetchServerGallery(
+  options?: FetchGalleryOptions
+): Promise<{ items: ServerGalleryWork[]; total: number; page: number; page_size: number }> {
+  const params = new URLSearchParams();
+  if (options?.page) params.set("page", String(options.page));
+  if (options?.pageSize) params.set("page_size", String(options.pageSize));
+  if (options?.model && options.model !== "all") params.set("model", options.model);
+  if (options?.favorite) params.set("favorite", "true");
+  if (options?.q?.trim()) params.set("q", options.q.trim());
+
+  const query = params.toString();
+  const res = await adminFetch(`/admin/api/v1/gallery${query ? `?${query}` : ""}`);
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error || `Fetch gallery failed: HTTP ${res.status}`);
+  }
+  return data;
+}
+
+export async function saveServerGalleryWork(work: {
+  id?: string;
+  prompt: string;
+  revised_prompt?: string;
+  model: string;
+  size: string;
+  quality?: string;
+  mode?: "generations" | "edits";
+  b64_json?: string;
+  url?: string;
+  latency_ms?: number;
+  is_favorite?: boolean;
+  timestamp?: number;
+}): Promise<ServerGalleryWork> {
+  const res = await adminFetch("/admin/api/v1/gallery", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(work),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error || `Save work failed: HTTP ${res.status}`);
+  }
+  return data;
+}
+
+export async function batchMigrateServerGallery(items: Array<{
+  id?: string;
+  prompt: string;
+  revised_prompt?: string;
+  model: string;
+  size: string;
+  quality?: string;
+  mode?: "generations" | "edits";
+  b64_json?: string;
+  url?: string;
+  latency_ms?: number;
+  is_favorite?: boolean;
+  timestamp?: number;
+}>): Promise<{ migrated: number; skipped: number; total: number }> {
+  const res = await adminFetch("/admin/api/v1/gallery/batch-migrate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ items }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error || `Batch migrate failed: HTTP ${res.status}`);
+  }
+  return data;
+}
+
+export async function toggleServerGalleryFavorite(
+  id: string,
+  isFavorite?: boolean
+): Promise<ServerGalleryWork> {
+  const res = await adminFetch(`/admin/api/v1/gallery/${encodeURIComponent(id)}/favorite`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(typeof isFavorite === "boolean" ? { is_favorite: isFavorite } : {}),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error || `Toggle favorite failed: HTTP ${res.status}`);
+  }
+  return data;
+}
+
+export async function deleteServerGalleryWork(id: string): Promise<void> {
+  const res = await adminFetch(`/admin/api/v1/gallery/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data?.error || `Delete work failed: HTTP ${res.status}`);
+  }
+}
+
+export async function clearServerGallery(): Promise<number> {
+  const res = await adminFetch("/admin/api/v1/gallery", {
+    method: "DELETE",
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error || `Clear gallery failed: HTTP ${res.status}`);
+  }
+  return data?.deleted_count || 0;
+}
+
+// ─── 持久化会话历史 API (Server-side Chat) ──────────────────────────
+
+export interface ServerChatMessage {
+  id: string;
+  conversation_id?: string;
+  session_key?: string;
+  role: "user" | "assistant" | "system";
+  content: string;
+  model?: string;
+  openui_mode?: boolean;
+  skill?: string;
+  tokens_prompt?: number;
+  tokens_comp?: number;
+  latency_ms?: number;
+  citations?: string;
+  created_at?: string;
+}
+
+export interface ServerConversation {
+  id: string;
+  title: string;
+  model: string;
+  system_prompt?: string;
+  preset_id?: string;
+  is_pinned: boolean;
+  is_archived: boolean;
+  tags?: string;
+  message_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ServerChatPreset {
+  id: string;
+  name: string;
+  description: string;
+  icon: string;
+  system_prompt: string;
+  default_model?: string;
+  is_builtin: boolean;
+  sort_order: number;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface ServerSearchHit {
+  conversation_id: string;
+  conversation_title: string;
+  message_id: string;
+  role: string;
+  snippet: string;
+  created_at: string;
+}
+
+// ─── 专业 AI 对话工作台 API ──────────────────────────────────────────
+
+export async function fetchServerConversations(
+  page = 1,
+  limit = 30,
+  q = "",
+  archived = false
+): Promise<{ conversations: ServerConversation[]; total: number; page: number; limit: number }> {
+  const params = new URLSearchParams({
+    page: String(page),
+    limit: String(limit),
+  });
+  if (q.trim()) params.set("q", q.trim());
+  if (archived) params.set("archived", "1");
+
+  const res = await adminFetch(`/admin/api/v1/chat/conversations?${params.toString()}`);
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error || `Fetch conversations failed: HTTP ${res.status}`);
+  }
+  return data;
+}
+
+export async function createServerConversation(payload: {
+  id?: string;
+  title?: string;
+  model?: string;
+  system_prompt?: string;
+  preset_id?: string;
+  is_pinned?: boolean;
+}): Promise<ServerConversation> {
+  const res = await adminFetch("/admin/api/v1/chat/conversations", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error || `Create conversation failed: HTTP ${res.status}`);
+  }
+  return data;
+}
+
+export async function fetchServerConversationDetail(
+  id: string
+): Promise<{ conversation: ServerConversation; messages: ServerChatMessage[] }> {
+  const res = await adminFetch(`/admin/api/v1/chat/conversations/${encodeURIComponent(id)}`);
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error || `Fetch conversation failed: HTTP ${res.status}`);
+  }
+  return data;
+}
+
+export async function updateServerConversation(
+  id: string,
+  updates: {
+    title?: string;
+    model?: string;
+    system_prompt?: string;
+    preset_id?: string;
+    is_pinned?: boolean;
+    is_archived?: boolean;
+    tags?: string;
+  }
+): Promise<ServerConversation> {
+  const res = await adminFetch(`/admin/api/v1/chat/conversations/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(updates),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error || `Update conversation failed: HTTP ${res.status}`);
+  }
+  return data;
+}
+
+export async function deleteServerConversation(id: string): Promise<void> {
+  const res = await adminFetch(`/admin/api/v1/chat/conversations/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data?.error || `Delete conversation failed: HTTP ${res.status}`);
+  }
+}
+
+export async function saveServerConversationMessages(
+  id: string,
+  messages: Array<{
+    id?: string;
+    role: string;
+    content: string;
+    model?: string;
+    openuiMode?: boolean;
+    skill?: string;
+    tokensPrompt?: number;
+    tokensComp?: number;
+    latencyMs?: number;
+    citations?: string;
+    timestamp?: number;
+  }>
+): Promise<void> {
+  const res = await adminFetch(`/admin/api/v1/chat/conversations/${encodeURIComponent(id)}/messages`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ messages }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data?.error || `Save messages failed: HTTP ${res.status}`);
+  }
+}
+
+export async function deleteServerConversationMessage(convId: string, msgId: string): Promise<void> {
+  const res = await adminFetch(
+    `/admin/api/v1/chat/conversations/${encodeURIComponent(convId)}/messages/${encodeURIComponent(msgId)}`,
+    { method: "DELETE" }
+  );
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data?.error || `Delete message failed: HTTP ${res.status}`);
+  }
+}
+
+export async function searchServerChat(
+  q: string,
+  limit = 20
+): Promise<{ query: string; hits: ServerSearchHit[]; count: number }> {
+  const res = await adminFetch(`/admin/api/v1/chat/search?q=${encodeURIComponent(q)}&limit=${limit}`);
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error || `Search chat failed: HTTP ${res.status}`);
+  }
+  return data;
+}
+
+export async function fetchServerChatPresets(): Promise<ServerChatPreset[]> {
+  const res = await adminFetch("/admin/api/v1/chat/presets");
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error || `Fetch presets failed: HTTP ${res.status}`);
+  }
+  return data?.presets || [];
+}
+
+export async function saveServerChatPreset(preset: Partial<ServerChatPreset>): Promise<ServerChatPreset> {
+  const res = await adminFetch("/admin/api/v1/chat/presets", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(preset),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error || `Save preset failed: HTTP ${res.status}`);
+  }
+  return data;
+}
+
+export async function deleteServerChatPreset(id: string): Promise<void> {
+  const res = await adminFetch(`/admin/api/v1/chat/presets/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data?.error || `Delete preset failed: HTTP ${res.status}`);
+  }
+}
+
+export async function exportServerConversationMarkdown(id: string): Promise<string> {
+  const res = await adminFetch(`/admin/api/v1/chat/conversations/${encodeURIComponent(id)}/export?format=markdown`);
+  if (!res.ok) {
+    throw new Error(`Export markdown failed: HTTP ${res.status}`);
+  }
+  return res.text();
+}
+
+export async function importServerConversations(payload: any): Promise<{ success: boolean; imported_count: number }> {
+  const res = await adminFetch("/admin/api/v1/chat/conversations/import", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error || `Import conversations failed: HTTP ${res.status}`);
+  }
+  return data;
+}
+
+export async function fetchServerChatMessages(
+  sessionKey = "default"
+): Promise<ServerChatMessage[]> {
+  const res = await adminFetch(`/admin/api/v1/chat/messages?session_key=${encodeURIComponent(sessionKey)}`);
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error || `Fetch chat failed: HTTP ${res.status}`);
+  }
+  return data?.messages || [];
+}
+
+export async function saveServerChatMessages(
+  messages: Array<{
+    id?: string;
+    role: string;
+    content: string;
+    openuiMode?: boolean;
+    skill?: string;
+    timestamp?: number;
+  }>,
+  sessionKey = "default"
+): Promise<void> {
+  const res = await adminFetch("/admin/api/v1/chat/messages", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      session_key: sessionKey,
+      messages,
+    }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data?.error || `Save chat failed: HTTP ${res.status}`);
+  }
+}
+
+export async function clearServerChatMessages(sessionKey = "default"): Promise<void> {
+  const res = await adminFetch(`/admin/api/v1/chat/messages?session_key=${encodeURIComponent(sessionKey)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data?.error || `Clear chat failed: HTTP ${res.status}`);
+  }
+}
+
+// ─── 持久化提示词广场收藏 API (Server-side Prompt Favorites) ─────────
+
+export async function fetchServerPromptFavorites(): Promise<string[]> {
+  const res = await adminFetch("/admin/api/v1/prompts/favorites");
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error || `Fetch prompt favorites failed: HTTP ${res.status}`);
+  }
+  return data?.favorite_ids || [];
+}
+
+export async function toggleServerPromptFavorite(id: string): Promise<string[]> {
+  const res = await adminFetch("/admin/api/v1/prompts/favorites/toggle", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error || `Toggle prompt favorite failed: HTTP ${res.status}`);
+  }
+  return data?.favorite_ids || [];
+}
+
+export async function syncServerPromptFavorites(ids: string[]): Promise<string[]> {
+  const res = await adminFetch("/admin/api/v1/prompts/favorites/sync", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ids }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error || `Sync prompt favorites failed: HTTP ${res.status}`);
+  }
+  return data?.favorite_ids || [];
+}
+
+// ─── 免费多模态 API (TTS / 声音克隆 / 声音设计 / AI 视频生成) ─────────────
+
+export async function fetchVoices(): Promise<{ voices: VoiceDescriptor[]; total: number }> {
+  const res = await fetch("/v1/audio/voices");
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error?.message || `Fetch voices failed: HTTP ${res.status}`);
+  }
+  return data;
+}
+
+export async function synthesizeSpeech(input: string, voice = "zh_female_shuangkuai", speed = 1.0): Promise<Blob> {
+  const res = await fetch("/v1/audio/speech", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Prefer-Tag": "permanent-free",
+    },
+    body: JSON.stringify({
+      model: "tts-1",
+      input,
+      voice,
+      response_format: "mp3",
+      speed,
+    }),
+  });
+  if (!res.ok) {
+    let errMsg = `TTS synthesis failed: HTTP ${res.status}`;
+    try {
+      const errJson = await res.json();
+      errMsg = errJson?.error?.message || errJson?.error || errMsg;
+    } catch {
+      // ignore
+    }
+    throw new Error(errMsg);
+  }
+  return await res.blob();
+}
+
+export async function voiceDesign(
+  voicePrompt: string,
+  previewText?: string,
+  preferredName?: string,
+): Promise<{ voice_id: string; preview_url: string }> {
+  const res = await fetch("/v1/audio/voices/design", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      voice_prompt: voicePrompt,
+      preview_text: previewText || "各位听众朋友，大家好，这是我的定制音色测试。",
+      preferred_name: preferredName || "custom_voice",
+    }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error || `Voice design failed: HTTP ${res.status}`);
+  }
+  return data;
+}
+
+export async function voiceClone(
+  audioUrl: string,
+  prefix?: string,
+): Promise<{ voice_id: string }> {
+  const res = await fetch("/v1/audio/voices/clone", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      audio_url: audioUrl,
+      prefix: prefix || "clone_voice",
+    }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error || `Voice clone failed: HTTP ${res.status}`);
+  }
+  return data;
+}
+
+export async function fetchVideoModels(): Promise<VideoModelInfo[]> {
+  const res = await fetch("/v1/videos/models");
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error?.message || `Fetch video models failed: HTTP ${res.status}`);
+  }
+  return data.data || [];
+}
+
+export async function submitVideo(
+  prompt: string,
+  imageUrl?: string,
+  duration = 5,
+  model = "THUDM/CogVideoX-5b",
+  audioUrl?: string,
+): Promise<{ task_id: string; status: string; provider?: string }> {
+  const res = await fetch("/v1/videos/generations", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model,
+      prompt,
+      image_url: imageUrl,
+      audio_url: audioUrl,
+      duration,
+      wait: false,
+    }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error?.message || `Submit video failed: HTTP ${res.status}`);
+  }
+  return data;
+}
+
+export async function getVideoTask(taskId: string): Promise<VideoTask> {
+  const res = await fetch(`/v1/videos/tasks/${taskId}`);
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error?.message || `Get video task failed: HTTP ${res.status}`);
+  }
+  return data;
+}
+
+export async function fetchVideoTasks(): Promise<{ tasks: VideoTask[]; total: number }> {
+  const res = await adminFetch("/admin/api/v1/multimodal/video-tasks");
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error || `Fetch video tasks failed: HTTP ${res.status}`);
+  }
+  return data;
+}
+
+export interface ProviderChannel {
+  id: string;
+  provider_id: string;
+  channel_name: string;
+  auth_type: string;
+  credential: string;
+  status: string;
+  is_free_tier: boolean;
+  capabilities: string;
+  description: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function fetchProviderChannels(): Promise<{ channels: ProviderChannel[]; total: number }> {
+  const res = await adminFetch("/admin/api/v1/providers/channels");
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error || `Fetch provider channels failed: HTTP ${res.status}`);
+  }
+  return data;
+}
+
+export interface AudioHistoryItem {
+  id: string;
+  voice_id: string;
+  voice_name: string;
+  provider: string;
+  input_text: string;
+  speed: number;
+  format: string;
+  audio_url: string;
+  duration: number;
+  created_at: string;
+}
+
+export async function fetchAudioHistory(): Promise<{ records: AudioHistoryItem[]; total: number }> {
+  const res = await fetch("/v1/audio/history");
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error || `Fetch audio history failed: HTTP ${res.status}`);
+  }
+  return data;
+}
+

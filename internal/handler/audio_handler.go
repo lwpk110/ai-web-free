@@ -4,25 +4,83 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"ai-web-free/httpclient/bogdanfinn"
 	"ai-web-free/internal/accounts"
 	"ai-web-free/internal/chatgpt"
 	"ai-web-free/internal/config"
+	"ai-web-free/internal/db"
+	"ai-web-free/internal/provider"
 	officialtypes "ai-web-free/typings/official"
 	chatgptrequestconverter "ai-web-free/conversion/requests/chatgpt"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 type AudioHandler struct {
 	accountPool *accounts.Pool
 	cfg         *config.Config
 	runtime     *GatewayRuntime
+	registry    *provider.Registry
 }
 
 func NewAudioHandler(pool *accounts.Pool, cfg *config.Config) *AudioHandler {
 	return &AudioHandler{accountPool: pool, cfg: cfg}
+}
+
+// SetRegistry 注入多供应商插件注册中心
+func (h *AudioHandler) SetRegistry(reg *provider.Registry) {
+	h.registry = reg
+}
+
+func (h *AudioHandler) getJianyingProvider() *provider.JianYingProvider {
+	if h.registry == nil {
+		return nil
+	}
+	if p, ok := h.registry.Get("jianying"); ok {
+		if casted, ok := p.(*provider.JianYingProvider); ok {
+			return casted
+		}
+	}
+	return nil
+}
+
+func (h *AudioHandler) getEdgeTTSProvider() *provider.EdgeTTSProvider {
+	if h.registry == nil {
+		return nil
+	}
+	if p, ok := h.registry.Get("edge_tts"); ok {
+		if casted, ok := p.(*provider.EdgeTTSProvider); ok {
+			return casted
+		}
+	}
+	return nil
+}
+
+func (h *AudioHandler) getDashScopeProvider() *provider.DashScopeProvider {
+	if h.registry == nil {
+		return nil
+	}
+	if p, ok := h.registry.Get("dashscope"); ok {
+		if casted, ok := p.(*provider.DashScopeProvider); ok {
+			return casted
+		}
+	}
+	return nil
+}
+
+func (h *AudioHandler) getSiliconFlowProvider() *provider.SiliconFlowProvider {
+	if h.registry == nil {
+		return nil
+	}
+	if p, ok := h.registry.Get("siliconflow"); ok {
+		if casted, ok := p.(*provider.SiliconFlowProvider); ok {
+			return casted
+		}
+	}
+	return nil
 }
 
 // SetRuntime 注入网关共享的容灾、代理健康与审计运行时。
@@ -89,6 +147,80 @@ func (h *AudioHandler) TTS(c *gin.Context) {
 	}
 
 	ttsModel := "tts-1"
+	voiceLower := strings.ToLower(strings.TrimSpace(original_request.Voice))
+	preferTag := c.GetHeader("X-Prefer-Tag")
+	preferProvider := c.GetHeader("X-Prefer-Provider")
+
+	// 0. 微软 Edge-TTS 官方免密高品质音色（晓晓、云希、云扬等）
+	isEdgeVoice := strings.HasPrefix(original_request.Voice, "zh-CN-") || strings.HasPrefix(original_request.Voice, "zh-HK-") || strings.HasPrefix(original_request.Voice, "zh-TW-") || strings.HasPrefix(original_request.Voice, "en-US-") || strings.Contains(voiceLower, "xiaoxiao") || strings.Contains(voiceLower, "yunxi") || strings.Contains(voiceLower, "yunyang")
+	if isEdgeVoice || preferProvider == "edge_tts" {
+		if edge := h.getEdgeTTSProvider(); edge != nil {
+			audioBytes, err := edge.Synthesize(c.Request.Context(), original_request.Input, original_request.Voice, original_request.Speed)
+			if err == nil && len(audioBytes) > 0 {
+				h.recordAudioHistory(original_request.Voice, "微软官方", "edge_tts", original_request.Input, original_request.Speed, audioBytes)
+				c.Header("Content-Type", "audio/mpeg")
+				c.Header("X-TTS-Provider", "edge_tts")
+				c.Data(200, "audio/mpeg", audioBytes)
+				return
+			}
+		}
+		// 若 Edge-TTS 握手受阻，无缝映射为剪映免密爆款音色（晓晓 -> zh_female_shuangkuai，云希 -> zh_male_chunhou 等）
+		if jy := h.getJianyingProvider(); jy != nil {
+			mappedVoice := "zh_female_shuangkuai"
+			if strings.Contains(voiceLower, "yunxi") || strings.Contains(voiceLower, "yunyang") || strings.Contains(voiceLower, "yunjian") {
+				mappedVoice = "zh_male_chunhou"
+			}
+			audioBytes, err := jy.Synthesize(c.Request.Context(), original_request.Input, mappedVoice, original_request.Speed)
+			if err == nil && len(audioBytes) > 0 {
+				h.recordAudioHistory(original_request.Voice, "剪映免密(映射)", "jianying", original_request.Input, original_request.Speed, audioBytes)
+				c.Header("Content-Type", "audio/mpeg")
+				c.Header("X-TTS-Provider", "jianying")
+				c.Header("X-TTS-Fallback", "true")
+				c.Data(200, "audio/mpeg", audioBytes)
+				return
+			}
+		}
+	}
+
+	// 1. 若指定剪映音色、带有免密偏好或为中文特色音色
+	isJianyingVoice := strings.HasPrefix(voiceLower, "zh_") || strings.HasPrefix(voiceLower, "dy_") || strings.HasPrefix(voiceLower, "en_")
+	if isJianyingVoice || preferProvider == "jianying" || preferTag == "permanent-free" {
+		if jy := h.getJianyingProvider(); jy != nil {
+			audioBytes, err := jy.Synthesize(c.Request.Context(), original_request.Input, original_request.Voice, original_request.Speed)
+			if err == nil && len(audioBytes) > 0 {
+				h.recordAudioHistory(original_request.Voice, "剪映爆款", "jianying", original_request.Input, original_request.Speed, audioBytes)
+				c.Header("Content-Type", "audio/mpeg")
+				c.Header("X-TTS-Provider", "jianying")
+				c.Data(200, "audio/mpeg", audioBytes)
+				return
+			}
+		}
+	}
+
+	// 2. 若指定 CosyVoice 或百炼定制音色
+	if strings.Contains(voiceLower, "cosyvoice") || strings.HasPrefix(voiceLower, "long") || strings.HasPrefix(voiceLower, "designed_") || strings.HasPrefix(voiceLower, "custom_") {
+		if ds := h.getDashScopeProvider(); ds != nil {
+			audioBytes, err := ds.SynthesizeSpeech(c.Request.Context(), original_request.Input, original_request.Voice)
+			if err == nil && len(audioBytes) > 0 {
+				h.recordAudioHistory(original_request.Voice, "CosyVoice", "dashscope", original_request.Input, original_request.Speed, audioBytes)
+				c.Header("Content-Type", "audio/mpeg")
+				c.Header("X-TTS-Provider", "dashscope")
+				c.Data(200, "audio/mpeg", audioBytes)
+				return
+			}
+		}
+		if sf := h.getSiliconFlowProvider(); sf != nil {
+			audioBytes, err := sf.SynthesizeSpeech(c.Request.Context(), original_request.Input, original_request.Voice)
+			if err == nil && len(audioBytes) > 0 {
+				h.recordAudioHistory(original_request.Voice, "CosyVoice", "siliconflow", original_request.Input, original_request.Speed, audioBytes)
+				c.Header("Content-Type", "audio/mpeg")
+				c.Header("X-TTS-Provider", "siliconflow")
+				c.Data(200, "audio/mpeg", audioBytes)
+				return
+			}
+		}
+	}
+
 	rt := h.ensureRuntime()
 	res, err := rt.RunWithFailover(c, h.accountPool, h.cfg, FailoverOptions{
 		NeedsPaid:  true,
@@ -115,6 +247,20 @@ func (h *AudioHandler) TTS(c *gin.Context) {
 		}
 	})
 	if err != nil {
+		// 优雅降级：若 ChatGPT 逆向无可用账号，自动降级至剪映免费通道输出
+		if jy := h.getJianyingProvider(); jy != nil {
+			mappedVoice := provider.MapOpenAIVoiceToJianying(original_request.Voice)
+			audioBytes, jyErr := jy.Synthesize(c.Request.Context(), original_request.Input, mappedVoice, original_request.Speed)
+			if jyErr == nil && len(audioBytes) > 0 {
+				h.recordAudioHistory(original_request.Voice, "剪映免密降级", "jianying", original_request.Input, original_request.Speed, audioBytes)
+				c.Header("Content-Type", "audio/mpeg")
+				c.Header("X-TTS-Provider", "jianying")
+				c.Header("X-TTS-Fallback", "true")
+				c.Data(200, "audio/mpeg", audioBytes)
+				return
+			}
+		}
+
 		errStatus := res.Outcome.StatusCode
 		if errStatus <= 0 {
 			errStatus = 400
@@ -191,6 +337,7 @@ func (h *AudioHandler) TTS(c *gin.Context) {
 		rt.RecordAudit(c, ttsModel, res, status, err)
 		return
 	}
+	h.recordAudioHistory(original_request.Voice, "ChatGPT官方", "chatgpt", original_request.Input, original_request.Speed, data)
 	rt.RecordAudit(c, ttsModel, res, 200, nil)
 	c.Data(200, ttsTypeMap[format], data)
 }
@@ -376,3 +523,163 @@ func (h *AudioHandler) handleTranscription(c *gin.Context, isTranslation bool) {
 		c.Data(200, respContentType, []byte(text))
 	}
 }
+
+// ListVoices 返回聚合音色清单与分类元数据: GET /v1/audio/voices
+func (h *AudioHandler) ListVoices(c *gin.Context) {
+	// 1. 微软 Edge-TTS 官方免密神级音色（晓晓、云希、云扬等）置顶
+	voices := provider.GetEdgeTTSVoiceDescriptors()
+
+	// 2. 剪映 200+ 热门爆款音色
+	voices = append(voices, provider.GetJianyingVoices()...)
+
+	// 3. 补充百炼/硅基流动 CosyVoice 音色
+	voices = append(voices, provider.VoiceDescriptor{
+		ID:         "cosyvoice-v1:alex",
+		Name:       "Alex (沉稳自然男声)",
+		Provider:   "siliconflow",
+		Category:   "自然情感",
+		Gender:     "male",
+		SampleText: "这是由 CosyVoice 语音大模型合成的超自然拟真人声。",
+		Tags:       []string{"CosyVoice", "大模型拟真", "永久免费"},
+	}, provider.VoiceDescriptor{
+		ID:         "cosyvoice-v1:anna",
+		Name:       "Anna (温柔知性女声)",
+		Provider:   "siliconflow",
+		Category:   "自然情感",
+		Gender:     "female",
+		SampleText: "很高兴与你相遇，希望我的声音能给你带来一丝温暖。",
+		Tags:       []string{"CosyVoice", "治愈温暖", "永久免费"},
+	}, provider.VoiceDescriptor{
+		ID:         "longxiaochun",
+		Name:       "龙小春 (亲切女声)",
+		Provider:   "dashscope",
+		Category:   "自然情感",
+		Gender:     "female",
+		SampleText: "今天阳光明媚，微风正好，要一起出去走走吗？",
+		Tags:       []string{"百炼官方", "多情感", "大模型"},
+	})
+
+	c.JSON(200, gin.H{
+		"voices": voices,
+		"total":  len(voices),
+	})
+}
+
+// VoiceDesignRequest 声音设计请求体
+type VoiceDesignRequest struct {
+	VoicePrompt   string `json:"voice_prompt"`
+	PreviewText   string `json:"preview_text"`
+	PreferredName string `json:"preferred_name"`
+}
+
+// VoiceDesign 自然语言文字捏声音: POST /v1/audio/voices/design
+func (h *AudioHandler) VoiceDesign(c *gin.Context) {
+	var req VoiceDesignRequest
+	if err := c.BindJSON(&req); err != nil || strings.TrimSpace(req.VoicePrompt) == "" {
+		c.JSON(400, gin.H{"error": "voice_prompt is required"})
+		return
+	}
+
+	ds := h.getDashScopeProvider()
+	if ds == nil {
+		c.JSON(503, gin.H{"error": "dashscope provider is not configured or unavailable"})
+		return
+	}
+
+	voiceID, previewURL, err := ds.VoiceDesign(c.Request.Context(), req.VoicePrompt, req.PreviewText, req.PreferredName)
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(200, gin.H{
+		"voice_id":    voiceID,
+		"preview_url": previewURL,
+		"status":      "success",
+	})
+}
+
+// VoiceCloneRequest 声音克隆请求体
+type VoiceCloneRequest struct {
+	AudioURL string `json:"audio_url"`
+	Prefix   string `json:"prefix"`
+}
+
+// VoiceClone 上传短音频克隆声音: POST /v1/audio/voices/clone
+func (h *AudioHandler) VoiceClone(c *gin.Context) {
+	var req VoiceCloneRequest
+	if err := c.BindJSON(&req); err != nil || strings.TrimSpace(req.AudioURL) == "" {
+		c.JSON(400, gin.H{"error": "audio_url is required"})
+		return
+	}
+
+	ds := h.getDashScopeProvider()
+	if ds == nil {
+		c.JSON(503, gin.H{"error": "dashscope provider is not configured or unavailable"})
+		return
+	}
+
+	voiceID, err := ds.VoiceCloning(c.Request.Context(), req.AudioURL, req.Prefix)
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(200, gin.H{
+		"voice_id": voiceID,
+		"status":   "success",
+	})
+}
+
+func (h *AudioHandler) recordAudioHistory(voiceID, voiceName, prov, input string, speed float64, audioBytes []byte) {
+	gormDB := db.GetDB()
+	if gormDB == nil {
+		return
+	}
+	recordID := "aud_" + uuid.New().String()[:12]
+	audioURL := fmt.Sprintf("/v1/audio/files/%s", recordID)
+	rec := db.AudioGenerationRecord{
+		ID:        recordID,
+		VoiceID:   voiceID,
+		VoiceName: voiceName,
+		Provider:  prov,
+		InputText: input,
+		Speed:     speed,
+		Format:    "mp3",
+		AudioURL:  audioURL,
+		BlobData:  audioBytes,
+		Duration:  float64(len(audioBytes)) / 16000.0,
+		CreatedAt: time.Now().UTC(),
+	}
+	_ = gormDB.Create(&rec).Error
+}
+
+// ListAudioHistory 返回配音历史列表: GET /v1/audio/history 与 GET /admin/api/v1/multimodal/audio-history
+func (h *AudioHandler) ListAudioHistory(c *gin.Context) {
+	gormDB := db.GetDB()
+	if gormDB == nil {
+		c.JSON(200, gin.H{"records": []interface{}{}, "total": 0})
+		return
+	}
+	var list []db.AudioGenerationRecord
+	_ = gormDB.Order("created_at desc").Limit(100).Find(&list).Error
+	c.JSON(200, gin.H{"records": list, "total": len(list)})
+}
+
+// GetAudioFile 根据音频 ID 直取二进制音频流: GET /v1/audio/files/:id
+func (h *AudioHandler) GetAudioFile(c *gin.Context) {
+	id := c.Param("id")
+	gormDB := db.GetDB()
+	if gormDB == nil {
+		c.Status(404)
+		return
+	}
+	var rec db.AudioGenerationRecord
+	if err := gormDB.Where("id = ?", id).First(&rec).Error; err != nil || len(rec.BlobData) == 0 {
+		c.Status(404)
+		return
+	}
+	c.Header("Content-Type", "audio/mpeg")
+	c.Data(200, "audio/mpeg", rec.BlobData)
+}
+

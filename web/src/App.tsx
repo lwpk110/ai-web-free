@@ -2,12 +2,14 @@ import React, { useEffect, useState } from "react";
 import {
   Check,
   Copy,
+  Film,
   Globe,
   Image as ImageIcon,
   LayoutGrid,
   ListChecks,
   Lock,
   Menu,
+  Mic,
   Moon,
   PanelLeftClose,
   PanelLeftOpen,
@@ -16,6 +18,7 @@ import {
   Sparkles,
   Sun,
   Unlock,
+  Video,
   X,
   Zap,
 } from "lucide-react";
@@ -40,6 +43,9 @@ import { LogsView } from "./views/LogsView";
 import { NetworkView } from "./views/NetworkView";
 import { OverviewView } from "./views/OverviewView";
 import { PoolConsole } from "./views/PoolConsole";
+import { ShortDramaStudio } from "./views/ShortDramaStudio";
+import { TTSStudio } from "./views/TTSStudio";
+import { VideoStudio } from "./views/VideoStudio";
 
 const THEME_STORAGE_KEY = "ai_web_free_theme_mode";
 
@@ -60,6 +66,9 @@ function resolveRouteFromHash(): RouteKey {
   if (h.startsWith("logs")) return "logs";
   if (h.startsWith("chat")) return "chat";
   if (h.startsWith("image")) return "image";
+  if (h.startsWith("tts")) return "tts";
+  if (h.startsWith("video")) return "video";
+  if (h.startsWith("drama") || h.startsWith("prototype")) return "drama";
   return "overview";
 }
 
@@ -77,6 +86,12 @@ function renderNavIcon(id: RouteKey) {
       return <Sparkles size={15} className="shrink-0" />;
     case "image":
       return <ImageIcon size={15} className="shrink-0" />;
+    case "tts":
+      return <Mic size={15} className="shrink-0" />;
+    case "video":
+      return <Video size={15} className="shrink-0" />;
+    case "drama":
+      return <Film size={15} className="shrink-0" />;
   }
 }
 
@@ -224,7 +239,8 @@ export const App: React.FC = () => {
 
   const currentNav =
     NAV_ITEMS.find((n) => n.id === route) || NAV_ITEMS[0];
-  const fullEdge = route === "chat" || route === "image";
+  const fullEdge =
+    route === "chat" || route === "image" || route === "drama" || route === "tts" || route === "video";
 
   const portHint = window.location.port ? `:${window.location.port}/v1` : "/v1";
 
@@ -238,6 +254,9 @@ export const App: React.FC = () => {
     }
     if (id === "chat") return "OpenUI";
     if (id === "image") return "IDB";
+    if (id === "tts") return "剪映200+";
+    if (id === "video") return "即梦/Wan";
+    if (id === "drama") return "Studio";
     return "";
   };
 
@@ -585,8 +604,14 @@ export const App: React.FC = () => {
             {fullEdge ? (
               route === "chat" ? (
                 <GenerativeWorkbench themeMode={themeMode} />
-              ) : (
+              ) : route === "image" ? (
                 <ImageStudio />
+              ) : route === "tts" ? (
+                <TTSStudio />
+              ) : route === "video" ? (
+                <VideoStudio />
+              ) : (
+                <ShortDramaStudio />
               )
             ) : (
               <div className="max-w-7xl mx-auto">

@@ -27,7 +27,10 @@ export type RouteKey =
   | "network"
   | "logs"
   | "chat"
-  | "image";
+  | "image"
+  | "drama"
+  | "tts"
+  | "video";
 
 export interface NavItemConfig {
   id: RouteKey;
@@ -78,7 +81,28 @@ export const NAV_ITEMS: NavItemConfig[] = [
     group: "studio",
     label: "图像创作工坊",
     hash: "#/image",
-    description: "GPT-Image 文生图与参考图编辑工作台（IndexedDB 本地画廊）",
+    description: "GPT-Image / 万相 / 即梦 / FLUX 文生图与本地画廊",
+  },
+  {
+    id: "tts",
+    group: "studio",
+    label: "语音工坊 (TTS)",
+    hash: "#/tts",
+    description: "剪映 200+ 热门爆款音色、CosyVoice 声音复刻与自然语言捏声音",
+  },
+  {
+    id: "video",
+    group: "studio",
+    label: "视频工坊 (Video)",
+    hash: "#/video",
+    description: "字节即梦 2.0 电影级运镜与阿里 Wan 视频大模型生成",
+  },
+  {
+    id: "drama",
+    group: "studio",
+    label: "短剧创作工坊",
+    hash: "#/drama",
+    description: "五步向导式流水线：AI剧本大纲、角色立绘与免费音色、分镜拆解、云端视频与剪映工程导出",
   },
 ];
 
