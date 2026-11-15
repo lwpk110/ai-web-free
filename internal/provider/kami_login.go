@@ -610,41 +610,76 @@ func (p *ChatGPTProvider) importKamiAccounts(rawText string, persist, autoLogin,
 	var res ImportResult
 	parsed := accounts.ParseKamiText(rawText)
 	if len(parsed) == 0 {
-		return res, errors.New("未解析到有效的卡密账号（格式: 邮箱----密码----2FA密钥）")
+		return res, errors.New("未解析到有效的卡密账号（支持邮箱/密码/2FA/AccessToken 任意顺序）")
 	}
 
 	profiles := accounts.DefaultProfiles
 	var loginCandidates []*accounts.Account
+	hasImportedAT := false
+	now := time.Now()
 
 	for _, k := range parsed {
+		if k.AccessToken != "" {
+			hasImportedAT = true
+		}
 		if existing := p.pool.FindByEmail(k.Email); existing != nil {
-			existing.Password = k.Password
-			existing.TOTPSecret = k.TOTPSecret
+			if k.Password != "" {
+				existing.Password = k.Password
+			}
+			if k.TOTPSecret != "" {
+				existing.TOTPSecret = k.TOTPSecret
+			}
+			if k.RefreshToken != "" {
+				existing.RefreshToken = k.RefreshToken
+			}
+			if k.AccessToken != "" && (existing.Token == "" || existing.Status != accounts.StatusActive || (!existing.ExpiresAt.IsZero() && existing.ExpiresAt.Before(now))) {
+				existing.Token = k.AccessToken
+				existing.SyncJWTMetadata()
+				if existing.ExpiresAt.IsZero() || existing.ExpiresAt.After(now) {
+					existing.Status = accounts.StatusActive
+					existing.LastError = ""
+				}
+			}
 			if existing.Status == accounts.StatusActive && existing.Token != "" {
 				res.Skipped++
 			} else {
-				loginCandidates = append(loginCandidates, existing)
+				if existing.Password != "" {
+					loginCandidates = append(loginCandidates, existing)
+				}
 				res.Skipped++
 			}
 			continue
 		}
 
-		acct := accounts.CreateAccount("", accounts.TypeFree, profiles)
-		acct.Email = k.Email
+		acct := accounts.CreateAccount(k.AccessToken, accounts.TypeFree, profiles)
+		if acct.Email == "" {
+			acct.Email = k.Email
+		}
 		acct.Password = k.Password
 		acct.TOTPSecret = k.TOTPSecret
+		acct.RefreshToken = k.RefreshToken
 		acct.Proxy = p.allocateProxy()
-		acct.Status = accounts.StatusPending
-		acct.LastError = "待浏览器登录提取 Token"
+		if acct.Token != "" && (acct.ExpiresAt.IsZero() || acct.ExpiresAt.After(now)) {
+			acct.Status = accounts.StatusActive
+			acct.LastError = ""
+		} else {
+			acct.Status = accounts.StatusPending
+			acct.LastError = "待浏览器登录提取 Token"
+			if acct.Password != "" {
+				loginCandidates = append(loginCandidates, acct)
+			}
+		}
 		_ = acct.InitClient()
 		p.pool.AddAccount(acct)
-		loginCandidates = append(loginCandidates, acct)
 		res.Added++
 	}
 
 	if persist {
 		if err := p.PersistKamiAccounts(); err == nil {
 			res.Persisted = true
+		}
+		if hasImportedAT {
+			_ = p.PersistAccessTokens()
 		}
 	}
 
@@ -1151,6 +1186,25 @@ func (p *ChatGPTProvider) ActiveKamiLoginTask() *KamiLoginTask {
 
 // CancelKamiLogin 从正在运行的批量/单号登录队列中移除尚未开始的等待账号。
 func (p *ChatGPTProvider) CancelKamiLogin(taskID, accountID string, cancelAll bool) (*KamiLoginTask, int, error) {
+	var targets map[string]bool
+	if id := strings.TrimSpace(accountID); id != "" {
+		targets = map[string]bool{id: true}
+	}
+	return p.cancelKamiLoginTargets(taskID, targets, cancelAll)
+}
+
+// CancelKamiLoginBatch 从正在运行的登录队列中批量移除尚未开始的等待账号。
+func (p *ChatGPTProvider) CancelKamiLoginBatch(taskID string, accountIDs []string) (*KamiLoginTask, int, error) {
+	targets := make(map[string]bool, len(accountIDs))
+	for _, raw := range accountIDs {
+		if id := strings.TrimSpace(raw); id != "" {
+			targets[id] = true
+		}
+	}
+	return p.cancelKamiLoginTargets(taskID, targets, false)
+}
+
+func (p *ChatGPTProvider) cancelKamiLoginTargets(taskID string, targets map[string]bool, cancelAll bool) (*KamiLoginTask, int, error) {
 	p.kamiLoginMu.Lock()
 	targetID := strings.TrimSpace(taskID)
 	if targetID == "" {
@@ -1161,12 +1215,11 @@ func (p *ChatGPTProvider) CancelKamiLogin(taskID, accountID string, cancelAll bo
 		p.kamiLoginMu.Unlock()
 		return nil, 0, errors.New("当前没有运行中的重登任务")
 	}
-	accountID = strings.TrimSpace(accountID)
-	if !cancelAll && accountID == "" {
+	if !cancelAll && len(targets) == 0 {
 		p.kamiLoginMu.Unlock()
 		return nil, 0, errors.New("请指定要取消排队的账号或选择取消全部排队")
 	}
-	if !cancelAll && task.CurrentAccountID == accountID {
+	if !cancelAll && len(targets) == 1 && targets[task.CurrentAccountID] {
 		p.kamiLoginMu.Unlock()
 		return nil, 0, errors.New("该账号正在执行登录中，无法取消")
 	}
@@ -1177,7 +1230,7 @@ func (p *ChatGPTProvider) CancelKamiLogin(taskID, accountID string, cancelAll bo
 		if item.account == nil {
 			continue
 		}
-		if cancelAll || item.account.ID == accountID {
+		if cancelAll || targets[item.account.ID] {
 			cancelled = append(cancelled, KamiLoginTaskResult{
 				AccountID: item.account.ID,
 				Email:     item.account.Email,
@@ -1194,7 +1247,7 @@ func (p *ChatGPTProvider) CancelKamiLogin(taskID, accountID string, cancelAll bo
 		if cancelAll {
 			return nil, 0, errors.New("当前队列中没有等待执行的账号")
 		}
-		return nil, 0, errors.New("该账号不在等待队列中")
+		return nil, 0, errors.New("所选账号不在等待队列中")
 	}
 
 	p.kamiLoginQueue = remaining

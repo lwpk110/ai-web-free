@@ -3,20 +3,24 @@ package accounts
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 	"time"
 )
 
-// KamiAccount 表示单条标准卡密账号凭据（邮箱----密码----2FA密钥）。
+// KamiAccount 表示单条卡密账号凭据（支持邮箱、密码、2FA 密钥、可选 AccessToken / RefreshToken）。
 type KamiAccount struct {
-	Email      string `json:"email"`
-	Password   string `json:"password"`
-	TOTPSecret string `json:"totp_secret"`
-	LineNo     int    `json:"line_no,omitempty"`
+	Email        string `json:"email"`
+	Password     string `json:"password"`
+	TOTPSecret   string `json:"totp_secret"`
+	AccessToken  string `json:"access_token,omitempty"`
+	RefreshToken string `json:"refresh_token,omitempty"`
+	LineNo       int    `json:"line_no,omitempty"`
 }
 
-// ParseKamiText 解析多行卡密文本，支持 `----` 分隔或空白 3 列格式，自动过滤空行与 # 注释。
+// ParseKamiText 解析多行卡密文本，支持 `----` / `|` / `\t` / `;` / 空白分隔，
+// 自动识别邮箱、密码、2FA 密钥、Access Token (JWT) 与 Refresh Token (rt_*)，不限字段顺序，自动过滤空行与 # 注释。
 func ParseKamiText(raw string) []KamiAccount {
 	var out []KamiAccount
 	seen := make(map[string]bool)
@@ -27,41 +31,195 @@ func ParseKamiText(raw string) []KamiAccount {
 			continue
 		}
 
-		var email, password, totpSecret string
-		if strings.Contains(line, "----") {
-			parts := strings.Split(line, "----")
-			if len(parts) != 3 {
-				continue
-			}
-			email = strings.TrimSpace(parts[0])
-			password = strings.TrimSpace(parts[1])
-			totpSecret = strings.TrimSpace(parts[2])
-		} else {
-			fields := strings.Fields(line)
-			if len(fields) != 3 {
-				continue
-			}
-			email = strings.TrimSpace(fields[0])
-			password = strings.TrimSpace(fields[1])
-			totpSecret = strings.TrimSpace(fields[2])
-		}
-
-		if email == "" || password == "" || totpSecret == "" {
+		fields := splitKamiFields(line)
+		if len(fields) < 2 {
 			continue
 		}
-		lowerEmail := strings.ToLower(email)
+
+		acc, ok := classifyKamiFields(fields)
+		if !ok {
+			continue
+		}
+
+		lowerEmail := strings.ToLower(acc.Email)
 		if seen[lowerEmail] {
 			continue
 		}
 		seen[lowerEmail] = true
-		out = append(out, KamiAccount{
-			Email:      email,
-			Password:   password,
-			TOTPSecret: totpSecret,
-			LineNo:     idx + 1,
-		})
+		acc.LineNo = idx + 1
+		out = append(out, acc)
 	}
 	return out
+}
+
+func splitKamiFields(line string) []string {
+	var rawParts []string
+	switch {
+	case strings.Contains(line, "----"):
+		rawParts = strings.Split(line, "----")
+	case strings.Contains(line, "|"):
+		rawParts = strings.Split(line, "|")
+	case strings.Contains(line, "\t"):
+		rawParts = strings.Split(line, "\t")
+	case strings.Contains(line, ";"):
+		rawParts = strings.Split(line, ";")
+	default:
+		rawParts = strings.Fields(line)
+	}
+	out := make([]string, 0, len(rawParts))
+	for _, p := range rawParts {
+		if trimmed := strings.TrimSpace(p); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
+}
+
+func classifyKamiFields(fields []string) (KamiAccount, bool) {
+	var acc KamiAccount
+	var leftovers []string
+
+	for _, f := range fields {
+		switch {
+		case isLikelyJWT(f):
+			// 若出现多段 JWT（如 id_token + access_token），优先保留含 chatgpt_account_id 的令牌
+			if acc.AccessToken == "" || (ExtractChatGPTAccountID(acc.AccessToken) == "" && ExtractChatGPTAccountID(f) != "") {
+				acc.AccessToken = f
+			}
+		case strings.HasPrefix(f, "rt_") && len(f) >= 16:
+			if acc.RefreshToken == "" {
+				acc.RefreshToken = f
+			}
+		case strings.HasPrefix(strings.ToLower(f), "otpauth://"):
+			if secret := extractOTPSecretFromURI(f); secret != "" && acc.TOTPSecret == "" {
+				acc.TOTPSecret = secret
+			}
+		case isLikelyEmail(f):
+			if acc.Email == "" {
+				acc.Email = f
+			} else {
+				leftovers = append(leftovers, f)
+			}
+		default:
+			leftovers = append(leftovers, f)
+		}
+	}
+
+	if acc.Email == "" && acc.AccessToken != "" {
+		acc.Email = ExtractEmail(acc.AccessToken)
+	}
+	if acc.Email == "" {
+		return KamiAccount{}, false
+	}
+
+	// 优先识别严格大写 Base32 2FA 密钥（避免误判纯小写密码）
+	if acc.TOTPSecret == "" {
+		var nextLeftovers []string
+		for _, f := range leftovers {
+			if acc.TOTPSecret == "" && isLikelyTOTPSecret(f, true) {
+				acc.TOTPSecret = normalizeTOTPSecret(f)
+				continue
+			}
+			nextLeftovers = append(nextLeftovers, f)
+		}
+		leftovers = nextLeftovers
+	}
+
+	// 若仍未识别到 2FA，且剩余字段不少于 2 个（或已带 AccessToken），尝试大小写不敏感 Base32 识别
+	if acc.TOTPSecret == "" && (len(leftovers) >= 2 || (acc.AccessToken != "" && len(leftovers) == 1)) {
+		var nextLeftovers []string
+		for _, f := range leftovers {
+			if acc.TOTPSecret == "" && isLikelyTOTPSecret(f, false) {
+				acc.TOTPSecret = normalizeTOTPSecret(f)
+				continue
+			}
+			nextLeftovers = append(nextLeftovers, f)
+		}
+		leftovers = nextLeftovers
+	}
+
+	if len(leftovers) > 0 {
+		acc.Password = leftovers[0]
+	}
+
+	if acc.Password == "" && acc.AccessToken == "" {
+		return KamiAccount{}, false
+	}
+	return acc, true
+}
+
+func isLikelyEmail(s string) bool {
+	if strings.ContainsAny(s, " \t\r\n") || strings.HasPrefix(s, "eyJ") {
+		return false
+	}
+	at := strings.IndexByte(s, '@')
+	if at <= 0 || at >= len(s)-3 {
+		return false
+	}
+	domain := s[at+1:]
+	if strings.Contains(domain, "@") {
+		return false
+	}
+	dot := strings.LastIndexByte(domain, '.')
+	return dot > 0 && dot < len(domain)-1
+}
+
+func isLikelyJWT(s string) bool {
+	if !strings.HasPrefix(s, "eyJ") || len(s) < 40 || strings.Count(s, ".") != 2 {
+		return false
+	}
+	_, err := ParseJWTClaims(s)
+	return err == nil
+}
+
+func extractOTPSecretFromURI(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	sec := strings.TrimSpace(u.Query().Get("secret"))
+	if isLikelyTOTPSecret(sec, false) {
+		return normalizeTOTPSecret(sec)
+	}
+	return ""
+}
+
+func normalizeTOTPSecret(s string) string {
+	s = strings.ReplaceAll(s, " ", "")
+	s = strings.ReplaceAll(s, "-", "")
+	return strings.ToUpper(strings.TrimSpace(s))
+}
+
+func isLikelyTOTPSecret(s string, strictUpper bool) bool {
+	cleaned := strings.ReplaceAll(strings.ReplaceAll(strings.TrimSpace(s), " ", ""), "-", "")
+	if len(cleaned) < 16 || len(cleaned) > 64 {
+		return false
+	}
+	if strictUpper && cleaned != strings.ToUpper(cleaned) {
+		return false
+	}
+	upper := strings.ToUpper(cleaned)
+	hasLetter := false
+	seenPad := false
+	for i := 0; i < len(upper); i++ {
+		c := upper[i]
+		if c == '=' {
+			seenPad = true
+			continue
+		}
+		if seenPad {
+			return false
+		}
+		if c >= 'A' && c <= 'Z' {
+			hasLetter = true
+			continue
+		}
+		if c >= '2' && c <= '7' {
+			continue
+		}
+		return false
+	}
+	return hasLetter
 }
 
 // LoadKamiFromFile 从本地卡密文件加载账号凭据列表。

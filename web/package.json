@@ -13,6 +13,7 @@
     "@openuidev/react-headless": "^0.18.7",
     "@openuidev/react-lang": "^1.1.1",
     "@openuidev/react-ui": "^0.18.7",
+    "@xyflow/react": "^12.12.1",
     "lucide-react": "^0.511.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",

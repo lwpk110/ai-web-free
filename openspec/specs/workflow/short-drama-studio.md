@@ -216,3 +216,29 @@
    - 前端新增 `ShortDramaStudio.tsx`，建立五步流水线向导与 IndexedDB 存储。
    - 实现角色外貌圣经自动注入、分镜批量并发渲染。
    - 构建多轨道时间轴播放器，落地剪映草稿工程导出与完整素材包 ZIP 打包。
+
+---
+
+## 8. v2.0 无限画布工作台与全平台一键连贯短片架构（Infinite Canvas）
+
+在 Phase 3 原型基础上，系统将 `#/drama` 升级为**双模式协同、全平台能力打通的无限画布短剧创作平台**：
+
+### 8.1 核心设计决策
+1. **双模式协同**：默认以基于 `@xyflow/react`（React Flow v12）的无限画布为主工作台，同时保留一键切换至「五步流水线 / 分镜列表」精简视图，两者共享同一工程与持久化数据。
+2. **可切换断点的全自动 DAG 流水线**：
+   - 支持从一句话梗概「一键生成连贯剧情短片」，自动依次编排「AI 编剧拆解 → 角色定妆与音色绑定 → 场景锚点 → 运镜润色 → 多参考图首帧生成 → 真实 TTS 配音与物理时长测量 → I2V 图生视频 / MuseTalk 对口型 → 时间轴装配」。
+   - 支持开关「断点检查点模式」（在角色定妆或分镜首帧完成时自动暂停等待创作者微调，确认后续跑下游），任意单节点支持局部重生成与 A/B 多版本平行分支对比。
+3. **跨镜头视觉与声线连贯性保障**：
+   - 使用 `/v1/images/generations` 生成角色正面定妆图与场景参考图，并入库 `/admin/api/v1/gallery`。
+   - 分镜首帧优先经 `/v1/images/edits` 传入「角色定妆图 + 场景锚点图（及前序镜头衔接参考）」生成高度一致的分镜关键帧；无参考编辑渠道时自动降级为外貌圣经 + 风格锁 Prompt 注入。
+   - 视频阶段将分镜首帧与真实配音分别传入 `muse-talk`（对白口型同步）或 `jimeng-video-2.0` / `THUDM/CogVideoX-5b` / `muse-video` / `wan-video-v1`（I2V 图生视频）。
+4. **全平台能力节点与跨工坊联动**：
+   - 接入提示词广场（`/admin/api/v1/prompts`）、AI 运镜扩写（`/admin/api/v1/prompts/video-expand` + `VIDEO_CAMERA_PRESETS`）、`PromptChatAssistant`、DashScope 自然语言捏音色（`/v1/audio/voices/design`）与声音克隆（`/v1/audio/voices/clone`）、Whisper 语音转台词（`/v1/audio/transcriptions`）。
+   - 支持从 `#/chat`、`#/image`、`#/tts`、`#/video` 一键「发送到短剧画布」（`dramaCanvasBridge`）。
+5. **能力矩阵预检与诚实降级**：
+   - 出片前实时检测各供应商状态（`GET /admin/api/v1/drama/capabilities`），支持「永久免费优先 / 画质优先 / 极速直出」路由偏好。
+   - 若请求启用 `no_mock_fallback: true` 且无真实可用视频账号/Key，网关明确返回 `no_video_provider` 错误而非伪装样片，前端自动降级为「真实分镜高清首帧 + Ken Burns 运镜动画 + 真实配音」，保持剧情连贯。
+6. **混合双写持久化、同源媒体缓存与纯前端视频合成（`CGO_ENABLED=0`）**：
+   - 新增 GORM `DramaProjectRecord` 表与 `/admin/api/v1/drama/*` 接口持久化多工程与画布拓扑 `graph_json`，刷新页面可恢复视频任务轮询。
+   - 后端 `StorageEngine` 与 `/v1/videos/files/:id` 提供图片/视频同源代理与本地落盘缓存（支持本地 `/storage/images/...` 参考图直接解码传递与 CORS 安全输出）。
+   - 前端成片终端节点支持多轨音画同步连播、纯前端 `Canvas + AudioContext + MediaRecorder` 合成单个完整连续视频文件，以及打包真实 `.mp4` / `.mp3` / `.png` / `.srt` / `draft_content.json` 的 ZIP 下载包。

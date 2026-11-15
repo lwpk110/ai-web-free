@@ -20,12 +20,14 @@ import {
   setStoredAdminToken,
   type AuditEntry,
 } from "../api/client";
+import { recordFrontendOpsLog } from "../lib/ops-logger";
 
 export type RouteKey =
   | "overview"
   | "pools"
   | "network"
   | "logs"
+  | "ops-logs"
   | "chat"
   | "image"
   | "drama"
@@ -68,6 +70,13 @@ export const NAV_ITEMS: NavItemConfig[] = [
     label: "链路审计日志",
     hash: "#/logs",
     description: "内存环形缓冲追踪、Failover 切号 Span 与异常分析",
+  },
+  {
+    id: "ops-logs",
+    group: "ops",
+    label: "前后端运维日志",
+    hash: "#/ops-logs",
+    description: "实时聚合 Go 后台控制台日志与前端报错堆栈，快速排错",
   },
   {
     id: "chat",
@@ -1291,6 +1300,15 @@ export class ErrorBoundary extends Component<
 
   static getDerivedStateFromError(error: Error) {
     return { hasError: true, message: error?.message || "组件渲染异常" };
+  }
+
+  componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
+    recordFrontendOpsLog({
+      level: "error",
+      module: "react.error_boundary",
+      message: error?.message || "组件渲染异常",
+      detail: errorInfo?.componentStack || error?.stack,
+    });
   }
 
   render() {

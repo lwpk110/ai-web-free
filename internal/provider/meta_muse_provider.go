@@ -9,9 +9,9 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -22,6 +22,7 @@ import (
 
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/chromedp"
+	"github.com/chromedp/chromedp/remote"
 	"github.com/google/uuid"
 )
 
@@ -486,6 +487,37 @@ func (p *MetaMuseProvider) BulkUpdateAccountProxy(accountIDs []string, proxyURL 
 	return updated, nil
 }
 
+func (p *MetaMuseProvider) UpdateAccountCookie(id, cookie string) (map[string]interface{}, error) {
+	trimmed := strings.TrimSpace(cookie)
+	if trimmed == "" || !strings.Contains(trimmed, "=") || len(trimmed) < 6 {
+		return nil, errors.New("Cookie 格式无效，请提供包含键值对的完整 Cookie 字符串")
+	}
+	if !strings.Contains(trimmed, "hatch_sess=") {
+		return nil, errors.New("Cookie 缺少核心 HttpOnly 鉴权字段 hatch_sess（在 Console 执行 document.cookie 会丢失该字段）")
+	}
+
+	p.loadFromDatabase()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	for _, s := range p.sessions {
+		if s.SessionID == id || strings.EqualFold(s.Email, id) {
+			s.Cookie = trimmed
+			s.Status = "active"
+			s.LastError = ""
+			s.CooldownUntil = time.Time{}
+			p.saveSessionToDB(s)
+			return map[string]interface{}{
+				"id":      s.SessionID,
+				"ok":      true,
+				"status":  "active",
+				"message": fmt.Sprintf("Cookie 已更新并激活 (%d 字符)", len(trimmed)),
+			}, nil
+		}
+	}
+	return nil, fmt.Errorf("未找到账号: %s", id)
+}
+
 func (p *MetaMuseProvider) ExecuteAccountAction(id, action string) (map[string]interface{}, error) {
 	return p.ExecuteAccountActionWithOpts(id, action, true)
 }
@@ -496,7 +528,7 @@ func (p *MetaMuseProvider) ExecuteAccountActionWithOpts(id, action string, headl
 		if err != nil {
 			return map[string]interface{}{
 				"ok":    false,
-				"error": "未能从本机 Chrome 自动读取凭据: " + err.Error() + "。请使用官方网页登录后手动复制 Cookie。",
+				"error": "未能从本机 Chrome 自动读取凭据: " + err.Error() + "。请使用「启动授权浏览器」或在官方网页登录后手动复制 Cookie。",
 			}, nil
 		}
 		return map[string]interface{}{
@@ -505,6 +537,39 @@ func (p *MetaMuseProvider) ExecuteAccountActionWithOpts(id, action string, headl
 			"count":   count,
 			"message": fmt.Sprintf("成功从本机 Chrome 自动提取 %d 个 Cookie 凭据", count),
 		}, nil
+	}
+
+	if action == "browser_login" {
+		cookieStr, count, err := launchBrowserMuseLogin()
+		if err != nil {
+			return map[string]interface{}{
+				"ok":    false,
+				"error": "浏览器授权登录失败: " + err.Error(),
+			}, nil
+		}
+		return map[string]interface{}{
+			"ok":      true,
+			"cookie":  cookieStr,
+			"count":   count,
+			"message": fmt.Sprintf("已通过内置浏览器捕获 %d 个真实会话 Cookie（含 HttpOnly）", count),
+		}, nil
+	}
+
+	if action == "get_cookie" {
+		p.loadFromDatabase()
+		p.mu.RLock()
+		defer p.mu.RUnlock()
+		for _, s := range p.sessions {
+			if s.SessionID == id || strings.EqualFold(s.Email, id) {
+				return map[string]interface{}{
+					"id":     s.SessionID,
+					"email":  s.Email,
+					"ok":     true,
+					"cookie": s.Cookie,
+				}, nil
+			}
+		}
+		return nil, fmt.Errorf("未找到账号: %s", id)
 	}
 
 	if action == "sync_chrome" || action == "sync" || action == "renew" {
@@ -585,6 +650,16 @@ func (p *MetaMuseProvider) ExecuteAccountActionWithOpts(id, action string, headl
 			}, nil
 		}
 
+		if !strings.Contains(target.Cookie, "hatch_sess=") {
+			return map[string]interface{}{
+				"id":        target.SessionID,
+				"ok":        false,
+				"status":    "error",
+				"error":     "Cookie 缺少核心 HttpOnly 鉴权字段 hatch_sess（通常由 Console 执行 document.cookie 导致残缺）；请使用「启动授权浏览器登录」或从 F12 -> Network 复制完整 Cookie",
+				"timestamp": time.Now().Unix(),
+			}, nil
+		}
+
 		models := p.Descriptor().FeaturedModels
 		return map[string]interface{}{
 			"id":           target.SessionID,
@@ -656,92 +731,122 @@ func (p *MetaMuseProvider) ExecuteAccountActionWithOpts(id, action string, headl
 	return nil, fmt.Errorf("unsupported action: %s", action)
 }
 
-// extractLocalChromeMuseCookies 跨平台探测并从本机 Google Chrome 读取解密后的 muse.ai 完整会话 Cookie
-func extractLocalChromeMuseCookies() (string, int, error) {
-	pyScript := `
-import os, sys, sqlite3, shutil, json
-
-def get_muse_cookie():
-    possible_paths = [
-        os.path.expanduser('~/.config/google-chrome/Default/Cookies'),
-        os.path.expanduser('~/.config/chromium/Default/Cookies'),
-        os.path.expanduser('~/Library/Application Support/Google/Chrome/Default/Cookies'),
-    ]
-    cookie_file = None
-    for p in possible_paths:
-        if os.path.exists(p):
-            cookie_file = p
-            break
-    if not cookie_file:
-        return None
-
-    try:
-        import secretstorage, hashlib
-        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-        conn = secretstorage.dbus_init()
-        collection = secretstorage.get_default_collection(conn)
-        items = collection.search_items({'application': 'chrome', 'xdg:schema': 'chrome_libsecret_os_crypt_password_v2'})
-        chrome_secret = None
-        for item in items:
-            chrome_secret = item.get_secret()
-            break
-        if not chrome_secret:
-            chrome_secret = b'peanuts'
-        salt = b'saltysalt'
-        iv = b' ' * 16
-        key = hashlib.pbkdf2_hmac('sha1', chrome_secret, salt, 1, 16)
-        
-        tmp_db = '/tmp/_chrome_cookies_sync.db'
-        shutil.copyfile(cookie_file, tmp_db)
-        db_conn = sqlite3.connect(tmp_db)
-        c = db_conn.cursor()
-        c.execute('SELECT host_key, name, encrypted_value FROM cookies WHERE host_key LIKE "%muse.ai%"')
-        rows = c.fetchall()
-        db_conn.close()
-        try: os.remove(tmp_db)
-        except: pass
-        
-        parts = []
-        for host, name, enc in rows:
-            if enc[:3] in (b'v10', b'v11'):
-                cipher = Cipher(algorithms.AES(key), modes.CBC(iv))
-                dec = cipher.decryptor().update(enc[3:]) + cipher.decryptor().finalize()
-                pad = dec[-1]
-                raw = dec[:-pad]
-                val = raw[32:].decode('utf-8', errors='ignore')
-                parts.append(f'{name}={val}')
-        if parts:
-            return '; '.join(parts)
-    except Exception:
-        return None
-    return None
-
-c = get_muse_cookie()
-if c:
-    count = len(c.split('; '))
-    print(json.dumps({'ok': True, 'cookie': c, 'count': count}))
-else:
-    print(json.dumps({'ok': False, 'error': 'not_found'}))
-`
-	cmd := exec.Command("python3", "-c", pyScript)
-	out, err := cmd.Output()
+// launchBrowserMuseLogin 启动可见 Chrome 窗口供用户登录 muse.ai，登录完成后自动通过 CDP 提取完整 Cookie（含 HttpOnly）。
+func launchBrowserMuseLogin() (string, int, error) {
+	chromePath, err := resolveChromeExecutable()
 	if err != nil {
-		return "", 0, fmt.Errorf("执行本地 Chrome 凭据读取失败: %w", err)
+		return "", 0, fmt.Errorf("未检测到系统 Chrome 浏览器: %w", err)
 	}
 
-	var res struct {
-		OK     bool   `json:"ok"`
-		Cookie string `json:"cookie"`
-		Count  int    `json:"count"`
-		Error  string `json:"error"`
+	profileDir, err := os.MkdirTemp("", "ai-web-free-muse-login-*")
+	if err != nil {
+		return "", 0, fmt.Errorf("创建临时浏览器配置目录失败: %w", err)
 	}
-	if err := json.Unmarshal(out, &res); err != nil {
-		return "", 0, fmt.Errorf("解析本地 Chrome 凭据输出失败: %w", err)
+	defer os.RemoveAll(profileDir)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return "", 0, fmt.Errorf("分配调试端口失败: %w", err)
 	}
-	if !res.OK || res.Cookie == "" {
-		return "", 0, errors.New("未在本地 Chrome 中检测到已登录的 muse.ai 会话凭据")
+	debugPort := ln.Addr().(*net.TCPAddr).Port
+	_ = ln.Close()
+
+	log.Printf("[muse-login] launching direct visible chrome=%s port=%d profile=%s", chromePath, debugPort, profileDir)
+	cleanupChrome, err := startVisibleChromeProcess(chromePath, []string{
+		fmt.Sprintf("--user-data-dir=%s", profileDir),
+		fmt.Sprintf("--remote-debugging-port=%d", debugPort),
+		"--no-first-run",
+		"--no-default-browser-check",
+		"--disable-blink-features=AutomationControlled",
+		"--new-window",
+		"https://muse.ai/",
+	})
+	if err != nil {
+		return "", 0, fmt.Errorf("启动 Chrome 浏览器失败: %w", err)
 	}
-	return res.Cookie, res.Count, nil
+	defer cleanupChrome()
+
+	// 等待 Chrome 调试端点就绪并获取 WebSocket 地址
+	var wsURL string
+	versionURL := fmt.Sprintf("http://127.0.0.1:%d/json/version", debugPort)
+	httpClient := &http.Client{Timeout: 2 * time.Second}
+	for i := 0; i < 40; i++ {
+		resp, reqErr := httpClient.Get(versionURL)
+		if reqErr == nil {
+			var ver struct {
+				WebSocketDebuggerURL string `json:"webSocketDebuggerUrl"`
+			}
+			_ = json.NewDecoder(resp.Body).Decode(&ver)
+			_ = resp.Body.Close()
+			if ver.WebSocketDebuggerURL != "" {
+				wsURL = ver.WebSocketDebuggerURL
+				break
+			}
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	if wsURL == "" {
+		return "", 0, errors.New("Chrome 已启动但调试端口未就绪，请检查本机 Chrome 是否正常")
+	}
+
+	allocCtx, allocCancel := remote.NewAllocator(context.Background(), wsURL)
+	defer allocCancel()
+
+	ctx, cancel := chromedp.NewContext(allocCtx)
+	defer cancel()
+
+	ctx, timeoutCancel := context.WithTimeout(ctx, 3*time.Minute)
+	defer timeoutCancel()
+
+	// 确保 chromedp 上下文已绑定浏览器目标，再开始轮询 Cookie
+	if _, err := chromedp.Run(ctx, chromedp.Evaluate[string]("document.readyState")); err != nil {
+		return "", 0, fmt.Errorf("连接 Chrome 调试会话失败: %w", err)
+	}
+
+	ticker := time.NewTicker(1500 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return "", 0, errors.New("等待浏览器登录超时或窗口已关闭")
+		case <-ticker.C:
+			cookieRes, err := chromedp.Call(ctx, network.GetCookies, network.GetCookiesParams{
+				URLs: []string{"https://muse.ai/", "https://www.muse.ai/"},
+			})
+			if err != nil {
+				continue
+			}
+
+			var hasHatchSess bool
+			seen := make(map[string]string)
+			var order []string
+			for _, c := range cookieRes.Cookies {
+				if c == nil || c.Name == "" || c.Value == "" {
+					continue
+				}
+				if _, exists := seen[c.Name]; !exists {
+					order = append(order, c.Name)
+				}
+				seen[c.Name] = c.Value
+				if c.Name == "hatch_sess" {
+					hasHatchSess = true
+				}
+			}
+
+			if !hasHatchSess {
+				continue
+			}
+
+			parts := make([]string, 0, len(order))
+			for _, name := range order {
+				parts = append(parts, fmt.Sprintf("%s=%s", name, seen[name]))
+			}
+			if len(parts) > 0 {
+				return strings.Join(parts, "; "), len(parts), nil
+			}
+		}
+	}
 }
 
 // StartKamiLoginBatch muse.ai 不支持卡密自动登录
@@ -765,6 +870,18 @@ func (p *MetaMuseProvider) KamiLoginTaskSnapshot(id string) (KamiLoginTask, bool
 // ActiveKamiLoginTask 获取当前活跃登录任务
 func (p *MetaMuseProvider) ActiveKamiLoginTask() *KamiLoginTask {
 	return nil
+}
+
+// PeekNextProxy 返回当前可用 Muse 会话配置的代理地址（用于网关审计日志展示）
+func (p *MetaMuseProvider) PeekNextProxy() string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	for _, s := range p.sessions {
+		if s != nil && s.Status != "disabled" && s.Proxy != "" {
+			return s.Proxy
+		}
+	}
+	return ""
 }
 
 // SubmitVideoTask 提交 Meta Muse 视频生成或口型合成任务
@@ -869,7 +986,7 @@ func (p *MetaMuseProvider) SubmitVideoTask(ctx context.Context, model, prompt, i
 	p.videoTasksMu.Unlock()
 
 	// 异步启动 CDP 自动化出片
-	go p.runCDPVideoGeneration(taskID, prompt, sess, sessIdx)
+	go p.runCDPVideoGeneration(taskID, prompt, imageURL, duration, sess, sessIdx)
 
 	return taskID, nil
 }
@@ -1018,7 +1135,99 @@ func extractPromptKeywords(prompt string) []string {
 	return candidates
 }
 
-func (p *MetaMuseProvider) runCDPVideoGeneration(taskID, prompt string, sess *metaMuseSession, sessIdx int) {
+func buildMuseVideoPrompt(prompt, vidID string, duration int, hasRefImage bool) string {
+	cleanPrompt := strings.ReplaceAll(strings.TrimSpace(prompt), "\r\n", " ")
+	cleanPrompt = strings.ReplaceAll(cleanPrompt, "\n", " ")
+	var extras []string
+	if duration > 0 {
+		extras = append(extras, fmt.Sprintf("视频时长严格生成为 %d 秒", duration))
+	}
+	if hasRefImage {
+		extras = append(extras, "请结合我上传的参考图像执行图生视频")
+	}
+	extraClause := ""
+	if len(extras) > 0 {
+		extraClause = "（" + strings.Join(extras, "，") + "）"
+	}
+	return fmt.Sprintf(
+		"请在“muse video”工作空间中完成本次视频生成（若“muse video”工作空间尚不存在，请先创建名为“muse video”的工作空间，并确保所有生成产物均在该工作空间内完成与保存）%s。画面要求：%s（注意：请在生成完成后的文字回复中必须原样包含视频ID：%s）",
+		extraClause, cleanPrompt, vidID,
+	)
+}
+
+func prepareMuseReferenceImageFile(ctx context.Context, imageURL string) (string, func(), error) {
+	trimmed := strings.TrimSpace(imageURL)
+	if trimmed == "" {
+		return "", func() {}, nil
+	}
+
+	var imgBytes []byte
+	ext := ".png"
+
+	if strings.HasPrefix(trimmed, "data:") {
+		commaIdx := strings.Index(trimmed, ",")
+		if commaIdx <= 0 {
+			return "", nil, fmt.Errorf("invalid data URL for reference image")
+		}
+		meta := strings.ToLower(trimmed[:commaIdx])
+		switch {
+		case strings.Contains(meta, "image/jpeg"), strings.Contains(meta, "image/jpg"):
+			ext = ".jpg"
+		case strings.Contains(meta, "image/webp"):
+			ext = ".webp"
+		case strings.Contains(meta, "image/gif"):
+			ext = ".gif"
+		}
+		decoded, err := base64.StdEncoding.DecodeString(trimmed[commaIdx+1:])
+		if err != nil {
+			return "", nil, fmt.Errorf("decode base64 reference image failed: %w", err)
+		}
+		imgBytes = decoded
+	} else if strings.HasPrefix(trimmed, "http://") || strings.HasPrefix(trimmed, "https://") {
+		dlCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		req, err := http.NewRequestWithContext(dlCtx, http.MethodGet, trimmed, nil)
+		if err != nil {
+			return "", nil, err
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return "", nil, fmt.Errorf("download reference image failed: %w", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return "", nil, fmt.Errorf("download reference image HTTP %d", resp.StatusCode)
+		}
+		ct := strings.ToLower(resp.Header.Get("Content-Type"))
+		if strings.Contains(ct, "jpeg") || strings.Contains(ct, "jpg") {
+			ext = ".jpg"
+		} else if strings.Contains(ct, "webp") {
+			ext = ".webp"
+		}
+		data, err := io.ReadAll(io.LimitReader(resp.Body, 20<<20))
+		if err != nil {
+			return "", nil, err
+		}
+		imgBytes = data
+	} else {
+		return "", nil, fmt.Errorf("unsupported reference image scheme")
+	}
+
+	tmpFile, err := os.CreateTemp("", "muse-ref-*"+ext)
+	if err != nil {
+		return "", nil, err
+	}
+	tmpPath := tmpFile.Name()
+	if _, err := tmpFile.Write(imgBytes); err != nil {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
+		return "", nil, err
+	}
+	_ = tmpFile.Close()
+	return tmpPath, func() { _ = os.Remove(tmpPath) }, nil
+}
+
+func (p *MetaMuseProvider) runCDPVideoGeneration(taskID, prompt, imageURL string, duration int, sess *metaMuseSession, sessIdx int) {
 	chromePath, err := resolveChromeExecutable()
 	if err != nil {
 		errMsg := "未检测到系统 Chrome 浏览器: " + err.Error()
@@ -1035,6 +1244,7 @@ func (p *MetaMuseProvider) runCDPVideoGeneration(taskID, prompt string, sess *me
 		chromedp.Flag("disable-blink-features", "AutomationControlled"),
 		chromedp.Flag("no-sandbox", true),
 		chromedp.Flag("disable-dev-shm-usage", true),
+		chromedp.Flag("lang", "zh-CN"),
 		chromedp.Flag("headless", "new"),
 		chromedp.WindowSize(1440, 900),
 	)
@@ -1056,7 +1266,7 @@ func (p *MetaMuseProvider) runCDPVideoGeneration(taskID, prompt string, sess *me
 	// 1. 先导航到 muse.ai 以设定 cookie 域
 	_, _ = chromedp.Run(ctx, chromedp.Navigate("https://muse.ai/"))
 
-	// 2. 注入所有会话 Cookie
+	// 2. 注入所有会话 Cookie（兼容 __Host- 前缀与 Secure 属性）
 	p.updateCDPTask(taskID, "RUNNING", 30, "", "")
 	parts := strings.Split(sess.Cookie, ";")
 	for _, part := range parts {
@@ -1064,16 +1274,22 @@ func (p *MetaMuseProvider) runCDPVideoGeneration(taskID, prompt string, sess *me
 		if len(kv) == 2 {
 			name := strings.TrimSpace(kv[0])
 			val := strings.TrimSpace(kv[1])
-			domain := ".muse.ai"
-			if strings.HasPrefix(name, "__Host-") || name == "hatch_native_auth_device" {
-				domain = "muse.ai"
+			if name == "" || val == "" {
+				continue
 			}
-			_, _ = chromedp.Call(ctx, network.SetCookie, network.SetCookieParams{
+			isSecure := true
+			params := network.SetCookieParams{
 				Name:   name,
 				Value:  val,
-				Domain: domain,
+				URL:    "https://muse.ai/",
 				Path:   "/",
-			})
+				Secure: &isSecure,
+			}
+			// __Host- Cookie 规范禁止设置 Domain 字段，否则 CDP 会拒绝写入
+			if !strings.HasPrefix(name, "__Host-") && name != "hatch_native_auth_device" {
+				params.Domain = ".muse.ai"
+			}
+			_, _ = chromedp.Call(ctx, network.SetCookie, params)
 		}
 	}
 
@@ -1086,19 +1302,33 @@ func (p *MetaMuseProvider) runCDPVideoGeneration(taskID, prompt string, sess *me
 		return
 	}
 
-	// 等待 WebSocket / React 水合
-	time.Sleep(5 * time.Second)
-
-	// 确保开启独立全新对话（避免继承历史旧会话的任何卡片与视频）
-	_, _ = chromedp.Run(ctx, chromedp.Evaluate[string](`(() => {
-		const newChatLink = document.querySelector('a[aria-label="聊天"], a[href="/"]');
-		if (newChatLink) {
-			newChatLink.click();
-			return 'clicked_new_chat';
+	// 等待 WebSocket / React 水合，并校验登录态与输入框就绪
+	inputSelector := `textarea[aria-label="消息"], textarea[aria-label="Message"], textarea[placeholder], main textarea, textarea`
+	var inputReady bool
+	for w := 0; w < 15; w++ {
+		time.Sleep(1 * time.Second)
+		curURL, _ := chromedp.Run(ctx, chromedp.Location())
+		if strings.Contains(curURL, "/login") || strings.Contains(curURL, "facebook.com/login") {
+			errMsg := "Muse 会话 Cookie 已失效（页面跳转至登录页），请更新 Cookie"
+			p.updateCDPTask(taskID, "FAILED", 0, "", errMsg)
+			p.reportStatus(sessIdx, false, false, errMsg)
+			return
 		}
-		return 'none';
-	})()`))
-	time.Sleep(2 * time.Second)
+		found, _ := chromedp.Run(ctx, chromedp.Evaluate[bool](fmt.Sprintf(`document.querySelector(%q) !== null`, inputSelector)))
+		if found {
+			inputReady = true
+			break
+		}
+	}
+	if !inputReady {
+		errMsg := "Muse 页面未渲染出对话输入框（Cookie 可能已失效或页面改版），请检查 Cookie 后重试"
+		p.updateCDPTask(taskID, "FAILED", 0, "", errMsg)
+		p.reportStatus(sessIdx, false, false, errMsg)
+		return
+	}
+
+	// 等待历史对话气泡与视频水合完毕，避免刚打开页面后异步加载的历史视频被误判为新生成产物
+	time.Sleep(4 * time.Second)
 
 	// 4. 注入 URL.createObjectURL 拦截器并记录初始视频 Blob 集合
 	_, _ = chromedp.Run(ctx, chromedp.Evaluate[string](`(() => {
@@ -1111,8 +1341,8 @@ func (p *MetaMuseProvider) runCDPVideoGeneration(taskID, prompt string, sess *me
 				try {
 					const mime = (obj && obj.type) ? obj.type : '';
 					const sz = (obj && obj.size) ? obj.size : 0;
-					// 过滤：真实生成的视频通常大于 1.0MB (官方吉祥物 Avatar 只有 200KB~400KB)
-					if mime.includes('video') && sz > 1000000 {
+					// 过滤：真实生成的视频通常大于 1.0MB (官方吉祥物 Avatar 约 200KB~600KB)
+					if (mime.includes('video') && sz > 1000000) {
 						window.__muse_intercepted_blobs.push({ url: u, size: sz, type: mime, ts: Date.now() });
 					}
 				} catch (e) {}
@@ -1133,12 +1363,50 @@ func (p *MetaMuseProvider) runCDPVideoGeneration(taskID, prompt string, sess *me
 
 	p.updateCDPTask(taskID, "RUNNING", 50, "", "")
 
-	// 5. 聚焦输入框并注入提示词，模拟点击发送
+	// 4.5 若提供了参考图像（支持 Ctrl+V 粘贴的 DataURL 或远程 URL），自动上传至 Muse 对话输入区（图生视频）
+	hasRefImage := strings.TrimSpace(imageURL) != ""
+	if hasRefImage {
+		imgPath, cleanupImg, imgErr := prepareMuseReferenceImageFile(ctx, imageURL)
+		if imgErr != nil {
+			errMsg := "准备图生视频参考图失败: " + imgErr.Error()
+			log.Printf("[MetaMuse CDP %s] %s", taskID, errMsg)
+			p.updateCDPTask(taskID, "FAILED", 0, "", errMsg)
+			p.reportStatus(sessIdx, false, false, errMsg)
+			return
+		}
+		defer cleanupImg()
+
+		hasFileInput, _ := chromedp.Run(ctx, chromedp.Evaluate[bool](`document.querySelector('input[type="file"]') !== null`))
+		if !hasFileInput {
+			_, _ = chromedp.Run(ctx, chromedp.Evaluate[bool](`(() => {
+				const btn = document.querySelector('button[aria-label*="上传"], button[aria-label*="图片"], button[aria-label*="附件"], button[aria-label*="Upload"], button[aria-label*="Attach"], button[aria-label*="Image"]');
+				if (btn) { btn.click(); return true; }
+				return false;
+			})()`))
+			time.Sleep(600 * time.Millisecond)
+		}
+		if upErr := chromedp.Do(ctx, chromedp.SetUploadFiles(`input[type="file"]`, []string{imgPath})); upErr != nil {
+			errMsg := "向 Muse 上传参考图失败: " + upErr.Error()
+			log.Printf("[MetaMuse CDP %s] %s", taskID, errMsg)
+			p.updateCDPTask(taskID, "FAILED", 0, "", errMsg)
+			p.reportStatus(sessIdx, false, false, errMsg)
+			return
+		}
+		log.Printf("[MetaMuse CDP %s] 已将参考图注入 Muse 文件上传控件 (%s)，等待缩略图挂载...", taskID, filepath.Base(imgPath))
+		time.Sleep(2 * time.Second)
+	}
+
+	// 5. 生成动态视频ID并注入提示词（要求创建/使用 muse video 工作空间、指定时长，并在回复中必须包含该动态视频ID）
+	vidID := "VID-" + strings.ToUpper(strings.TrimPrefix(taskID, "muse_"))
+	submitPrompt := buildMuseVideoPrompt(prompt, vidID, duration, hasRefImage)
+
+	// 聚焦输入框并注入提示词，模拟点击发送（兼容中英文 aria-label）
+	sendSelector := `button[aria-label="发送"], button[aria-label="Send"]`
 	err = chromedp.Do(ctx,
-		chromedp.Focus(`textarea[aria-label="消息"]`),
-		chromedp.SendKeys(`textarea[aria-label="消息"]`, prompt),
+		chromedp.Focus(inputSelector),
+		chromedp.SendKeys(inputSelector, submitPrompt),
 		chromedp.Sleep(800*time.Millisecond),
-		chromedp.Click(`button[aria-label="发送"]`),
+		chromedp.Click(sendSelector),
 	)
 	if err != nil {
 		errMsg := "向对话流注入提示词或点击发送失败: " + err.Error()
@@ -1148,9 +1416,47 @@ func (p *MetaMuseProvider) runCDPVideoGeneration(taskID, prompt string, sess *me
 		return
 	}
 
+	vidBytes, _ := json.Marshal(vidID)
+
+	// 确认包含动态视频ID的提示词确实已经从输入框发出并进入 Muse 对话气泡
+	sentConfirmed := false
+	confirmExpr := fmt.Sprintf(`(() => {
+		const ta = document.querySelector('textarea');
+		const taVal = ta ? (ta.value || '').trim() : '';
+		const vid = %s;
+		const mainEl = document.querySelector('main') || document.body;
+		const bodyText = mainEl ? (mainEl.innerText || '') : '';
+		return taVal === '' && bodyText.includes(vid);
+	})()`, string(vidBytes))
+	for sTry := 0; sTry < 6; sTry++ {
+		if ok, evalErr := chromedp.Run(ctx, chromedp.Evaluate[bool](confirmExpr)); evalErr == nil && ok {
+			sentConfirmed = true
+			break
+		}
+		if sTry == 1 {
+			_ = chromedp.Do(ctx,
+				chromedp.Focus(inputSelector),
+				chromedp.SendKeys(inputSelector, "\r"),
+				chromedp.Click(sendSelector),
+			)
+		}
+		time.Sleep(800 * time.Millisecond)
+	}
+	if !sentConfirmed {
+		errMsg := "提示词未能成功进入 Muse 对话气泡，请检查登录态或页面输入框状态"
+		log.Printf("[MetaMuse CDP %s] %s", taskID, errMsg)
+		p.updateCDPTask(taskID, "FAILED", 0, "", errMsg)
+		p.reportStatus(sessIdx, false, false, errMsg)
+		return
+	}
+
 	keywords := extractPromptKeywords(prompt)
 	kwBytes, _ := json.Marshal(keywords)
-	log.Printf("[MetaMuse CDP %s] 成功提交提示词: %q (防串号关键词: %s)，开始高频捕获新出片流...", taskID, prompt, string(kwBytes))
+	proxyDesc := sess.Proxy
+	if proxyDesc == "" {
+		proxyDesc = "直连"
+	}
+	log.Printf("[MetaMuse CDP %s] 成功提交提示词 [视频ID=%s, 代理=%s]: %q (防串号关键词: %s)，开始高频捕获新出片流...", taskID, vidID, proxyDesc, prompt, string(kwBytes))
 	p.updateCDPTask(taskID, "RUNNING", 60, "", "")
 
 	// 6. 轮询监听新成片 (最长等待 300 秒，高频每 2 秒一次探测)
@@ -1166,78 +1472,92 @@ func (p *MetaMuseProvider) runCDPVideoGeneration(taskID, prompt string, sess *me
 			p.updateCDPTask(taskID, "RUNNING", progress, "", "")
 		}
 
-		// 精准防串号检测：
-		// 1) 气泡必须包含完成语（“做好了”/“ready”）且必须包含本次 Prompt 的核心关键词！杜绝上一个生成的产物（如小橘猫）串号
-		// 2) 视频元素必须不含 data-muse-old 属性，不在 initial blobs 列表中
-		// 3) 若从拦截器取，时间戳必须晚于 __muse_send_ts 且大小 > 1.0MB
+		// 防串号新视频检测（基于动态视频ID精准匹配）：
+		// 1) 前 90 秒 (i < 45) 严格要求助手回复气泡已输出动态 vidID (replyVidNode)，未出现前绝不抓取任何视频
+		// 2) 命中 replyVidNode 后，仅从 <main> 内且属于该回复气泡或紧随其后的新 <video> 提取产物
+		// 3) 90 秒后若模型偶发漏写 vidID，才兜底允许 <main> 内排在 userPromptNode 之后的新 <video> 或 >1MB 拦截 Blob
+		allowFallback := i >= 45
 		checkExpr := fmt.Sprintf(`(() => {
-			const keywords = %s;
+			const vid = %s;
+			const allowFallback = %t;
 			const initial = window.__muse_initial_blobs || [];
 			const sendTs = window.__muse_send_ts || 0;
 
-			// 匹配当前任务成片气泡（必须包含“做好了”且匹配当前提示词关键词）
-			const isCurrentTaskBubble = (text) => {
-				const hasReady = text.includes('做好了') || text.includes('已做好') || text.includes('is ready') || text.includes('video is ready') || text.includes('Completed');
-				if (!hasReady) return false;
-				if (!keywords || keywords.length === 0) return true;
-				return keywords.some(k => k && text.includes(k));
-			};
-
-			// 优先策略 A: 遍历所有包含目标完成语和当前关键词的消息容器
-			const allBlocks = Array.from(document.querySelectorAll('*')).filter(el => {
-				const t = el.innerText || '';
-				return isCurrentTaskBubble(t) && el.querySelector('video');
+			// 查找包含动态 vidID 的最小文本节点（排除侧栏与输入框）
+			const vidNodes = Array.from(document.querySelectorAll('p, span, div')).filter(el => {
+				if (el.closest('aside') || el.tagName === 'TEXTAREA' || el.closest('textarea')) return false;
+				const t = (el.innerText || '').trim();
+				if (!t.includes(vid) || t.length >= 1500) return false;
+				return !Array.from(el.children).some(c => (c.innerText || '').includes(vid));
 			});
+			if (vidNodes.length === 0) {
+				return '';
+			}
 
-			for (let i = allBlocks.length - 1; i >= 0; i--) {
-				const blockVideos = Array.from(allBlocks[i].querySelectorAll('video')).filter(v => {
-					const outer = v.outerHTML || '';
-					return !outer.includes('hatch-avatar') && 
-					       !outer.includes('avatar') && 
-					       !v.hasAttribute('data-muse-old') && 
-					       !v.closest('[data-hatch-avatar]');
-				});
-				for (let j = blockVideos.length - 1; j >= 0; j--) {
-					const s = blockVideos[j].src || blockVideos[j].currentSrc;
-					if (s && s.startsWith('blob:') && !initial.includes(s)) {
-						return s;
-					}
+			const userPromptNode = vidNodes[0];
+			let replyVidNode = null;
+			for (let idx = vidNodes.length - 1; idx >= 1; idx--) {
+				if ((userPromptNode.compareDocumentPosition(vidNodes[idx]) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0) {
+					replyVidNode = vidNodes[idx];
+					break;
 				}
 			}
 
-			// 策略 B: 拦截器捕获到的晚于发送时间戳且 >1.0MB 的大视频 Blob
-			const intercepted = window.__muse_intercepted_blobs || [];
-			for (let i = intercepted.length - 1; i >= 0; i--) {
-				const item = intercepted[i];
-				if (item && item.size > 1000000 && item.url && item.ts >= sendTs && !initial.includes(item.url)) {
-					// 同时必须要求页面上出现了当前任务的完成语义
-					const pageText = document.body.innerText || '';
-					if (isCurrentTaskBubble(pageText)) {
+			// 助手尚未在回复中输出动态 vidID 时，继续等待，避免误抓右侧吉祥物待机/思考动画
+			if (!replyVidNode && !allowFallback) {
+				return '';
+			}
+
+			const isCandidateVideo = (v) => {
+				const outer = v.outerHTML || '';
+				if (outer.includes('hatch-avatar') || outer.includes('avatar') || v.hasAttribute('data-muse-old') || v.closest('[data-hatch-avatar]') || v.closest('aside')) {
+					return false;
+				}
+				if ((userPromptNode.compareDocumentPosition(v) & Node.DOCUMENT_POSITION_FOLLOWING) === 0) {
+					return false;
+				}
+				const s = v.src || v.currentSrc || '';
+				if (!s || initial.includes(s)) return false;
+				return (s.startsWith('blob:') || s.startsWith('https://')) && (v.duration > 0 || v.readyState >= 1);
+			};
+
+			// 优先策略 A: 仅从主聊天区 (<main>) 查找新视频，绝不扫描右侧吉祥物面板
+			const mainVideos = Array.from(document.querySelectorAll('main video, [role="main"] video')).filter(isCandidateVideo);
+
+			if (replyVidNode) {
+				let replyContainer = replyVidNode.parentElement;
+				if (replyContainer && replyContainer.parentElement && !replyContainer.parentElement.contains(userPromptNode)) {
+					replyContainer = replyContainer.parentElement;
+				}
+				const pool = mainVideos.length > 0 ? mainVideos : Array.from(document.querySelectorAll('video')).filter(isCandidateVideo);
+				const matchedInReply = pool.filter(v =>
+					(replyContainer && replyContainer.contains(v)) ||
+					(replyVidNode.compareDocumentPosition(v) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0
+				);
+				if (matchedInReply.length > 0) {
+					const v = matchedInReply[matchedInReply.length - 1];
+					return v.src || v.currentSrc || '';
+				}
+			}
+
+			if (allowFallback && mainVideos.length > 0) {
+				const last = mainVideos[mainVideos.length - 1];
+				return last.src || last.currentSrc || '';
+			}
+
+			// 策略 B: 仅在已收到回复ID或超时兜底阶段，才读取 >1MB 的拦截 Blob
+			if (replyVidNode || allowFallback) {
+				const intercepted = window.__muse_intercepted_blobs || [];
+				for (let idx = intercepted.length - 1; idx >= 0; idx--) {
+					const item = intercepted[idx];
+					if (item && item.size > 1000000 && item.url && item.ts >= sendTs && !initial.includes(item.url)) {
 						return item.url;
 					}
 				}
 			}
 
-			// 策略 C: 页面最新非 Avatar 且非 data-muse-old 的新视频
-			const pageText = document.body.innerText || '';
-			if (isCurrentTaskBubble(pageText)) {
-				const videos = Array.from(document.querySelectorAll('video')).filter(v => {
-					const outer = v.outerHTML || '';
-					return !outer.includes('hatch-avatar') && 
-					       !outer.includes('avatar') && 
-					       !v.hasAttribute('data-muse-old') && 
-					       !v.closest('[data-hatch-avatar]');
-				});
-				for (let i = videos.length - 1; i >= 0; i--) {
-					const s = videos[i].src || videos[i].currentSrc;
-					if (s && s.startsWith('blob:') && !initial.includes(s)) {
-						return s;
-					}
-				}
-			}
-
 			return '';
-		})()`, string(kwBytes))
+		})()`, string(vidBytes), allowFallback)
 
 		targetBlobURL, _ := chromedp.Run(ctx, chromedp.Evaluate[string](checkExpr))
 
@@ -1247,8 +1567,8 @@ func (p *MetaMuseProvider) runCDPVideoGeneration(taskID, prompt string, sess *me
 
 			extractedB64, err := chromedp.Run(ctx, chromedp.Evaluate[string](fmt.Sprintf(`(() => {
 				return fetch(%q).then(r => r.blob()).then(b => {
-					// 过滤掉小于 600KB 的非作品片段
-					if (b.size < 600000) return 'too_small:' + b.size;
+					// 过滤掉小于 100KB 的异常空片段（已通过 main / avatar / data-muse-old 排除吉祥物头像）
+					if (b.size < 100000) return 'too_small:' + b.size;
 					return new Promise((resolve) => {
 						const reader = new FileReader();
 						reader.onloadend = () => resolve(reader.result || '');

@@ -187,5 +187,29 @@ func (h *AdminHandler) ExpandPrompt(c *gin.Context) {
 	c.JSON(http.StatusOK, expanded)
 }
 
+// ExpandVideoPrompt 调用本机号池扩写或润色视频生成提示词。
+func (h *AdminHandler) ExpandVideoPrompt(c *gin.Context) {
+	mgr := h.promptPlaza()
+	if mgr == nil {
+		respondError(c, http.StatusServiceUnavailable, errors.New("prompt plaza unavailable"))
+		return
+	}
+	var req promptplaza.VideoExpandRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		respondError(c, http.StatusBadRequest, err)
+		return
+	}
+	if strings.TrimSpace(req.Prompt) == "" {
+		respondError(c, http.StatusBadRequest, errors.New("prompt is required"))
+		return
+	}
+	expanded, err := mgr.ExpandVideo(c.Request.Context(), req)
+	if err != nil {
+		respondError(c, http.StatusBadRequest, err)
+		return
+	}
+	c.JSON(http.StatusOK, expanded)
+}
+
 // ensure chatgpt_types stays imported for type completeness if needed
 var _ = chatgpt_types.NewChatGPTRequest

@@ -207,6 +207,11 @@ func (m *Manager) Expand(ctx context.Context, req ExpandRequest) (ExpandResponse
 	return ExpandIdea(ctx, m.chatExecutor, req)
 }
 
+// ExpandVideo 使用本机号池或降级策略扩写或润色视频提示词。
+func (m *Manager) ExpandVideo(ctx context.Context, req VideoExpandRequest) (VideoExpandResponse, error) {
+	return ExpandVideoPrompt(ctx, m.chatExecutor, req)
+}
+
 // TriggerSync 触发一次多源采集与 AI 策展同步（支持同步等待或异步后台执行）。
 func (m *Manager) TriggerSync(ctx context.Context, async bool) SyncStatus {
 	m.mu.Lock()

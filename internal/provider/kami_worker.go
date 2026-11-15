@@ -251,48 +251,101 @@ func (w *KamiRenewWorker) Enqueue(acct *accounts.Account, reason string) bool {
 	return true
 }
 
+func (w *KamiRenewWorker) clearQueuedAccountState(acct *accounts.Account) {
+	if acct == nil {
+		return
+	}
+	if w.pool != nil {
+		w.pool.ClearAccountQueuedAction(acct.ID, "已取消自动续期排队")
+		w.pool.SetAccountRenewState(acct.ID, "idle")
+		return
+	}
+	acct.ActiveAction = ""
+	acct.ActionPhase = ""
+	acct.ActionPhaseLabel = ""
+	acct.ActionQueuePos = 0
+	acct.ActionTaskID = ""
+	acct.ActionStartedAt = time.Time{}
+	acct.RenewState = "idle"
+	acct.LastAction = "renew"
+	acct.LastActionOK = false
+	acct.LastActionSummary = "已取消自动续期排队"
+	acct.LastActionAt = time.Now()
+}
+
 // CancelQueued 从自动续期等待队列中移除指定账号（如果尚未开始运行）。
 func (w *KamiRenewWorker) CancelQueued(accountID string) bool {
-	if w == nil || strings.TrimSpace(accountID) == "" {
-		return false
+	if id := strings.TrimSpace(accountID); id != "" {
+		return w.CancelQueuedBatch([]string{id}) > 0
 	}
+	return false
+}
+
+// CancelQueuedBatch 从自动续期等待队列中批量移除尚未开始运行的账号，返回取消数量。
+func (w *KamiRenewWorker) CancelQueuedBatch(accountIDs []string) int {
+	if w == nil || len(accountIDs) == 0 {
+		return 0
+	}
+	targets := make(map[string]bool, len(accountIDs))
+	for _, raw := range accountIDs {
+		if id := strings.TrimSpace(raw); id != "" {
+			targets[id] = true
+		}
+	}
+	if len(targets) == 0 {
+		return 0
+	}
+
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	if !w.queued[accountID] {
-		return false
+	if len(w.queue) == 0 {
+		return 0
 	}
 	next := make([]*accounts.Account, 0, len(w.queue))
-	var removedAcct *accounts.Account
+	removed := make([]*accounts.Account, 0, len(targets))
 	for _, item := range w.queue {
-		if item != nil && item.ID == accountID {
-			removedAcct = item
+		if item != nil && targets[item.ID] {
+			removed = append(removed, item)
+			delete(w.queued, item.ID)
 			continue
 		}
 		next = append(next, item)
 	}
+	if len(removed) == 0 {
+		return 0
+	}
 	w.queue = next
-	delete(w.queued, accountID)
 	w.refreshQueuePositionsLocked()
-	if removedAcct != nil {
-		if w.pool != nil {
-			w.pool.ClearAccountQueuedAction(accountID, "已取消自动续期排队")
-			w.pool.SetAccountRenewState(accountID, "idle")
-		} else {
-			removedAcct.ActiveAction = ""
-			removedAcct.ActionPhase = ""
-			removedAcct.ActionPhaseLabel = ""
-			removedAcct.ActionQueuePos = 0
-			removedAcct.ActionTaskID = ""
-			removedAcct.ActionStartedAt = time.Time{}
-			removedAcct.RenewState = "idle"
-			removedAcct.LastAction = "renew"
-			removedAcct.LastActionOK = false
-			removedAcct.LastActionSummary = "已取消自动续期排队"
-			removedAcct.LastActionAt = time.Now()
+	for _, item := range removed {
+		w.clearQueuedAccountState(item)
+	}
+	return len(removed)
+}
+
+// CancelAllQueued 清空自动续期等待队列中所有尚未开始运行的账号，返回取消数量。
+func (w *KamiRenewWorker) CancelAllQueued() int {
+	if w == nil {
+		return 0
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if len(w.queue) == 0 {
+		return 0
+	}
+	removed := make([]*accounts.Account, 0, len(w.queue))
+	for _, item := range w.queue {
+		if item != nil {
+			removed = append(removed, item)
 		}
 	}
-	return removedAcct != nil
+	w.queue = nil
+	w.queued = make(map[string]bool)
+	for _, item := range removed {
+		w.clearQueuedAccountState(item)
+	}
+	return len(removed)
 }
 
 // EnqueueDue 扫描号池中过期或临期（< within）的卡密账号并入队。

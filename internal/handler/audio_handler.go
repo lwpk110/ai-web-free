@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	chatgptrequestconverter "ai-web-free/conversion/requests/chatgpt"
 	"ai-web-free/httpclient/bogdanfinn"
 	"ai-web-free/internal/accounts"
 	"ai-web-free/internal/chatgpt"
@@ -13,7 +14,6 @@ import (
 	"ai-web-free/internal/db"
 	"ai-web-free/internal/provider"
 	officialtypes "ai-web-free/typings/official"
-	chatgptrequestconverter "ai-web-free/conversion/requests/chatgpt"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -164,12 +164,9 @@ func (h *AudioHandler) TTS(c *gin.Context) {
 				return
 			}
 		}
-		// 若 Edge-TTS 握手受阻，无缝映射为剪映免密爆款音色（晓晓 -> zh_female_shuangkuai，云希 -> zh_male_chunhou 等）
+		// Keep fallback voices distinct so an Edge outage does not collapse the whole catalog to two voices.
 		if jy := h.getJianyingProvider(); jy != nil {
-			mappedVoice := "zh_female_shuangkuai"
-			if strings.Contains(voiceLower, "yunxi") || strings.Contains(voiceLower, "yunyang") || strings.Contains(voiceLower, "yunjian") {
-				mappedVoice = "zh_male_chunhou"
-			}
+			mappedVoice := provider.MapEdgeVoiceToJianying(original_request.Voice)
 			audioBytes, err := jy.Synthesize(c.Request.Context(), original_request.Input, mappedVoice, original_request.Speed)
 			if err == nil && len(audioBytes) > 0 {
 				h.recordAudioHistory(original_request.Voice, "剪映免密(映射)", "jianying", original_request.Input, original_request.Speed, audioBytes)
@@ -682,4 +679,3 @@ func (h *AudioHandler) GetAudioFile(c *gin.Context) {
 	c.Header("Content-Type", "audio/mpeg")
 	c.Data(200, "audio/mpeg", rec.BlobData)
 }
-

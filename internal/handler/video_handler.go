@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"ai-web-free/internal/audit"
 	"ai-web-free/internal/db"
 	"ai-web-free/internal/provider"
+	"ai-web-free/internal/storage"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -94,6 +96,18 @@ var SupportedVideoModels = []VideoModelInfo{
 		IsFreeTier:  true,
 		Tag:         "每日免费积分",
 	},
+	{
+		ID:          "wan-video-v1",
+		Name:        "通义万相 Wanx 2.1 (文生/首帧图生视频)",
+		Provider:    "dashscope",
+		Description: "阿里云百炼通义万相 Wan2.1，支持文本与参考首帧图生视频，人物景别与运动过渡稳定",
+		MaxDuration: 5,
+		Resolutions: []string{"1280x720", "720x1280"},
+		SupportsI2V: true,
+		SupportsA2V: false,
+		IsFreeTier:  true,
+		Tag:         "百炼 API · 图生视频",
+	},
 }
 
 // VideoTask 视频生成任务模型（内存态与 API 响应）
@@ -108,6 +122,7 @@ type VideoTask struct {
 	Status      string    `json:"status"` // "PENDING" | "RUNNING" | "SUCCEEDED" | "FAILED"
 	Progress    int       `json:"progress"`
 	VideoURL    string    `json:"video_url,omitempty"`
+	LocalURL    string    `json:"local_url,omitempty"`
 	ErrorMsg    string    `json:"error_msg,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`
 	CompletedAt time.Time `json:"completed_at,omitempty"`
@@ -115,11 +130,17 @@ type VideoTask struct {
 
 // VideoHandler 处理 /v1/videos/* 视频生成、模型列表与任务轮询
 type VideoHandler struct {
-	mu       sync.RWMutex
-	tasks    map[string]*VideoTask
-	order    []string
-	registry *provider.Registry
-	auditLog *audit.RingBuffer
+	mu            sync.RWMutex
+	tasks         map[string]*VideoTask
+	order         []string
+	registry      *provider.Registry
+	auditLog      *audit.RingBuffer
+	storageEngine storage.StorageEngine
+}
+
+// SetStorageEngine 注入统一媒体存储引擎，用于解析本地参考图与缓存同源视频文件
+func (h *VideoHandler) SetStorageEngine(engine storage.StorageEngine) {
+	h.storageEngine = engine
 }
 
 // NewVideoHandler 创建视频处理器并恢复数据库历史任务
@@ -153,6 +174,9 @@ func NewVideoHandler(reg *provider.Registry, auditLog *audit.RingBuffer) *VideoH
 				if r.CompletedAt != nil {
 					task.CompletedAt = *r.CompletedAt
 				}
+				if r.Status == "SUCCEEDED" && r.VideoURL != "" {
+					task.LocalURL = "/v1/videos/files/" + r.TaskID
+				}
 				h.tasks[r.TaskID] = task
 				h.order = append(h.order, r.TaskID)
 			}
@@ -164,13 +188,14 @@ func NewVideoHandler(reg *provider.Registry, auditLog *audit.RingBuffer) *VideoH
 
 // VideoGenerationRequest 视频生成请求体
 type VideoGenerationRequest struct {
-	Model       string `json:"model"`
-	Prompt      string `json:"prompt"`
-	ImageURL    string `json:"image_url,omitempty"`
-	AudioURL    string `json:"audio_url,omitempty"`
-	Duration    int    `json:"duration,omitempty"`
-	AspectRatio string `json:"aspect_ratio,omitempty"`
-	Wait        bool   `json:"wait,omitempty"`
+	Model          string `json:"model"`
+	Prompt         string `json:"prompt"`
+	ImageURL       string `json:"image_url,omitempty"`
+	AudioURL       string `json:"audio_url,omitempty"`
+	Duration       int    `json:"duration,omitempty"`
+	AspectRatio    string `json:"aspect_ratio,omitempty"`
+	Wait           bool   `json:"wait,omitempty"`
+	NoMockFallback bool   `json:"no_mock_fallback,omitempty"`
 }
 
 // ListModels 获取支持的视频模型列表: GET /v1/videos/models
@@ -215,8 +240,21 @@ func (h *VideoHandler) Generations(c *gin.Context) {
 		providerName = "meta_muse"
 	} else if strings.Contains(lowerModel, "jimeng") || strings.Contains(lowerModel, "dreamina") {
 		providerName = "jimeng"
+	} else if strings.Contains(lowerModel, "wan") || strings.Contains(lowerModel, "dashscope") {
+		providerName = "dashscope"
 	} else if strings.Contains(lowerModel, "cog") || strings.Contains(lowerModel, "thudm") {
 		providerName = "siliconflow"
+	}
+
+	if req.NoMockFallback && !h.hasActiveCredentials(providerName) {
+		c.JSON(http.StatusFailedDependency, gin.H{"error": gin.H{
+			"message":  fmt.Sprintf("视频模型 %s 所属供应商 %s 暂无可用凭据或账号，已拒绝静默回退示例视频（请配置对应 Key/账号或由短剧画布自动降级为 Ken Burns 动效）", req.Model, providerName),
+			"type":     "no_video_provider",
+			"code":     "no_video_provider",
+			"provider": providerName,
+			"model":    req.Model,
+		}})
+		return
 	}
 
 	taskID := "vtask_" + uuid.New().String()[:12]
@@ -266,6 +304,12 @@ func (h *VideoHandler) Generations(c *gin.Context) {
 	go h.executeVideoTask(task)
 
 	if h.auditLog != nil {
+		proxyURL := ""
+		if providerName == "meta_muse" {
+			if muse := h.getMetaMuseProvider(); muse != nil {
+				proxyURL = muse.PeekNextProxy()
+			}
+		}
 		h.auditLog.Record(audit.Entry{
 			Kind:         "request",
 			Method:       "POST",
@@ -273,6 +317,7 @@ func (h *VideoHandler) Generations(c *gin.Context) {
 			Model:        req.Model,
 			AccountID:    taskID,
 			AccountEmail: providerName,
+			Proxy:        proxyURL,
 			Status:       http.StatusAccepted,
 			DurationMs:   10,
 			AttemptCount: 1,
@@ -322,6 +367,7 @@ func (h *VideoHandler) Generations(c *gin.Context) {
 		"model":       req.Model,
 		"provider":    providerName,
 		"status":      "PENDING",
+		"local_url":   "/v1/videos/files/" + taskID,
 		"created_at":  task.CreatedAt.Unix(),
 		"eta_seconds": 60,
 	})
@@ -356,6 +402,9 @@ func (h *VideoHandler) GetTask(c *gin.Context) {
 				}
 				if rec.CompletedAt != nil {
 					task.CompletedAt = *rec.CompletedAt
+				}
+				if rec.Status == "SUCCEEDED" && rec.VideoURL != "" {
+					task.LocalURL = "/v1/videos/files/" + rec.TaskID
 				}
 				h.mu.Lock()
 				h.tasks[taskID] = task
@@ -395,16 +444,90 @@ func (h *VideoHandler) ListTasks(c *gin.Context) {
 	})
 }
 
+// DeleteTask 管理端删除单条视频任务: DELETE /admin/api/v1/multimodal/video-tasks/:id
+func (h *VideoHandler) DeleteTask(c *gin.Context) {
+	id := strings.TrimSpace(c.Param("id"))
+	if id == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "missing task id"})
+		return
+	}
+
+	h.mu.Lock()
+	_, existed := h.tasks[id]
+	if existed {
+		delete(h.tasks, id)
+		filtered := make([]string, 0, len(h.order))
+		for _, oid := range h.order {
+			if oid != id {
+				filtered = append(filtered, oid)
+			}
+		}
+		h.order = filtered
+	}
+	h.mu.Unlock()
+
+	if gormDB := db.GetDB(); gormDB != nil {
+		_ = gormDB.Where("task_id = ?", id).Delete(&db.VideoTaskRecord{}).Error
+	}
+	_ = os.Remove(filepath.Join("data", "videos", id+".mp4"))
+
+	if !existed {
+		c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"deleted": id})
+}
+
+// ClearTasks 管理端按状态批量清理视频任务: DELETE /admin/api/v1/multimodal/video-tasks?status=FAILED
+func (h *VideoHandler) ClearTasks(c *gin.Context) {
+	targetStatus := strings.ToUpper(strings.TrimSpace(c.Query("status")))
+	if targetStatus == "" {
+		targetStatus = "FAILED"
+	}
+
+	h.mu.Lock()
+	removedIDs := make([]string, 0)
+	keptOrder := make([]string, 0, len(h.order))
+	for _, id := range h.order {
+		t, ok := h.tasks[id]
+		if ok && strings.EqualFold(t.Status, targetStatus) {
+			delete(h.tasks, id)
+			removedIDs = append(removedIDs, id)
+		} else if ok {
+			keptOrder = append(keptOrder, id)
+		}
+	}
+	h.order = keptOrder
+	h.mu.Unlock()
+
+	if gormDB := db.GetDB(); gormDB != nil {
+		_ = gormDB.Where("status = ?", targetStatus).Delete(&db.VideoTaskRecord{}).Error
+	}
+	for _, id := range removedIDs {
+		_ = os.Remove(filepath.Join("data", "videos", id+".mp4"))
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"status":        targetStatus,
+		"deleted_count": len(removedIDs),
+	})
+}
+
 func (h *VideoHandler) executeVideoTask(task *VideoTask) {
 	h.updateTaskStatus(task.TaskID, "RUNNING", 30, "", "")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 360*time.Second)
 	defer cancel()
 
+	// 将站内 /storage/... 相对路径透明解析为 data URI，保证任意远程供应商可消费首帧参考图/对白音频
+	gormDB := db.GetDB()
+	resolvedImageURL := ResolveMediaURLToDataURI(task.ImageURL, h.storageEngine, gormDB)
+	resolvedAudioURL := ResolveMediaURLToDataURI(task.AudioURL, h.storageEngine, gormDB)
+
 	// 1. 尝试通过硅基流动 CogVideoX
 	if task.Provider == "siliconflow" {
 		if sf := h.getSiliconFlowProvider(); sf != nil {
-			reqID, err := sf.SubmitVideoTask(ctx, task.Model, task.Prompt, task.ImageURL, task.Duration)
+			reqID, err := sf.SubmitVideoTask(ctx, task.Model, task.Prompt, resolvedImageURL, task.Duration)
 			if err != nil {
 				h.updateTaskStatus(task.TaskID, "FAILED", 0, "", fmt.Sprintf("SiliconFlow 上游调用失败: %v", err))
 				return
@@ -447,7 +570,7 @@ func (h *VideoHandler) executeVideoTask(task *VideoTask) {
 	// 2. 尝试通过 Meta Muse
 	if task.Provider == "meta_muse" {
 		if muse := h.getMetaMuseProvider(); muse != nil {
-			reqID, err := muse.SubmitVideoTask(ctx, task.Model, task.Prompt, task.ImageURL, task.AudioURL, task.Duration)
+			reqID, err := muse.SubmitVideoTask(ctx, task.Model, task.Prompt, resolvedImageURL, resolvedAudioURL, task.Duration)
 			if err != nil {
 				// 真实账号调用失败：如实报告错误，绝不静默伪装成功回退静态视频！
 				h.updateTaskStatus(task.TaskID, "FAILED", 0, "", fmt.Sprintf("Meta Muse 上游调用失败: %v", err))
@@ -489,7 +612,7 @@ func (h *VideoHandler) executeVideoTask(task *VideoTask) {
 	// 3. 尝试通过 即梦 Jimeng
 	if task.Provider == "jimeng" {
 		if jm := h.getJimengProvider(); jm != nil {
-			upstreamTID, err := jm.SubmitVideoTask(ctx, task.Prompt, task.ImageURL, task.Duration)
+			upstreamTID, err := jm.SubmitVideoTask(ctx, task.Prompt, resolvedImageURL, task.Duration)
 			if err != nil {
 				h.updateTaskStatus(task.TaskID, "FAILED", 0, "", fmt.Sprintf("即梦上游调用失败: %v", err))
 				return
@@ -497,6 +620,49 @@ func (h *VideoHandler) executeVideoTask(task *VideoTask) {
 			if upstreamTID != "" {
 				h.updateTaskStatus(task.TaskID, "SUCCEEDED", 100, fmt.Sprintf("https://lf-dreamina.bytegoofy.com/obj/dreamina-videos/%s.mp4", upstreamTID), "")
 				return
+			}
+		}
+	}
+
+	// 3.5 尝试通过 阿里云百炼 通义万相 Wanx 2.1
+	if task.Provider == "dashscope" {
+		if ds := h.getDashScopeProvider(); ds != nil && ds.Stats().Active > 0 {
+			reqID, err := ds.SubmitVideoTask(ctx, task.Model, task.Prompt, resolvedImageURL, task.Duration)
+			if err != nil {
+				h.updateTaskStatus(task.TaskID, "FAILED", 0, "", fmt.Sprintf("通义万相上游调用失败: %v", err))
+				return
+			}
+			if reqID != "" {
+				ticker := time.NewTicker(3 * time.Second)
+				defer ticker.Stop()
+				curProgress := 35
+				for {
+					select {
+					case <-ctx.Done():
+						h.updateTaskStatus(task.TaskID, "FAILED", 0, "", "通义万相视频生成超时 (上游耗时超出限制)")
+						return
+					case <-ticker.C:
+						st, vURL, prog, qErr := ds.QueryVideoTask(ctx, reqID)
+						if qErr != nil {
+							h.updateTaskStatus(task.TaskID, "FAILED", 0, "", qErr.Error())
+							return
+						}
+						if prog > 0 {
+							curProgress = prog
+						} else if curProgress < 95 {
+							curProgress += 8
+						}
+						if st == "SUCCEEDED" && vURL != "" {
+							h.updateTaskStatus(task.TaskID, "SUCCEEDED", 100, vURL, "")
+							return
+						}
+						if st == "FAILED" {
+							h.updateTaskStatus(task.TaskID, "FAILED", 0, "", "通义万相视频生成失败")
+							return
+						}
+						h.updateTaskStatus(task.TaskID, "RUNNING", curProgress, "", "")
+					}
+				}
 			}
 		}
 	}
@@ -568,6 +734,7 @@ func (h *VideoHandler) updateTaskStatus(taskID, status string, progress int, vid
 	task.Progress = progress
 	if videoURL != "" {
 		task.VideoURL = videoURL
+		task.LocalURL = "/v1/videos/files/" + task.TaskID
 	}
 	if errorMsg != "" {
 		task.ErrorMsg = errorMsg
@@ -650,11 +817,64 @@ func (h *VideoHandler) getJimengProvider() *provider.JimengProvider {
 	return nil
 }
 
-// StreamVideoFile 本地流媒体中继与服务: GET /v1/videos/files/:id
-func (h *VideoHandler) StreamVideoFile(c *gin.Context) {
-	id := c.Param("id")
+func (h *VideoHandler) getDashScopeProvider() *provider.DashScopeProvider {
+	if h.registry == nil {
+		return nil
+	}
+	if p, ok := h.registry.Get("dashscope"); ok {
+		if casted, ok := p.(*provider.DashScopeProvider); ok {
+			return casted
+		}
+	}
+	return nil
+}
 
-	// 1. 直接检查 data/videos/{id}.mp4
+func (h *VideoHandler) hasActiveCredentials(providerName string) bool {
+	if h.registry == nil {
+		return false
+	}
+	p, ok := h.registry.Get(providerName)
+	if !ok || p == nil {
+		return false
+	}
+	return p.Stats().Active > 0
+}
+
+func writeVideoCORSHeaders(c *gin.Context) {
+	c.Header("Access-Control-Allow-Origin", "*")
+	c.Header("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+	c.Header("Cross-Origin-Resource-Policy", "cross-origin")
+}
+
+func serveVideoBytes(c *gin.Context, data []byte) {
+	c.Header("Content-Type", "video/mp4")
+	c.Header("Content-Length", fmt.Sprintf("%d", len(data)))
+	c.Header("Cache-Control", "public, max-age=604800")
+	if c.Request.Method == http.MethodHead {
+		c.Status(http.StatusOK)
+		return
+	}
+	c.Data(http.StatusOK, "video/mp4", data)
+}
+
+// StreamVideoFile 本地流媒体中继与同源缓存服务: GET /v1/videos/files/:id 及 /storage/videos/:id
+func (h *VideoHandler) StreamVideoFile(c *gin.Context) {
+	writeVideoCORSHeaders(c)
+	id := strings.TrimSuffix(strings.TrimSpace(c.Param("id")), ".mp4")
+	if id == "" || strings.Contains(id, "..") || strings.ContainsAny(id, "/\\") {
+		c.Status(http.StatusBadRequest)
+		return
+	}
+
+	// 1. 优先从统一媒体存储引擎读取 videos/{id}.mp4（内存/本地通用，消除 CORS 污染）
+	if mse, ok := h.storageEngine.(storage.MediaStorageEngine); ok && mse != nil {
+		if data, err := mse.Read(c.Request.Context(), "videos/"+id+".mp4"); err == nil && len(data) > 0 {
+			serveVideoBytes(c, data)
+			return
+		}
+	}
+
+	// 2. 检查传统磁盘目录 data/videos/{id}.mp4
 	directFile := filepath.Join("data", "videos", id+".mp4")
 	if _, err := os.Stat(directFile); err == nil {
 		c.File(directFile)
@@ -665,12 +885,32 @@ func (h *VideoHandler) StreamVideoFile(c *gin.Context) {
 	task, exists := h.tasks[id]
 	h.mu.RUnlock()
 
-	// 2. 如果任务存在且其 VideoURL 指向另一个本地视频文件
+	if !exists {
+		if gormDB := db.GetDB(); gormDB != nil {
+			var rec db.VideoTaskRecord
+			if err := gormDB.Where("task_id = ? OR id = ?", id, id).First(&rec).Error; err == nil {
+				task = &VideoTask{
+					TaskID:   rec.TaskID,
+					VideoURL: rec.VideoURL,
+					Status:   rec.Status,
+				}
+				exists = true
+			}
+		}
+	}
+
+	// 3. 若任务存在且 VideoURL 指向内部任务或远程地址，拉取并透明缓存为同源字节流
 	if exists && task != nil && task.VideoURL != "" {
 		if strings.Contains(task.VideoURL, "/v1/videos/files/") {
 			parts := strings.Split(task.VideoURL, "/v1/videos/files/")
 			if len(parts) == 2 {
-				subID := parts[1]
+				subID := strings.TrimSuffix(parts[1], ".mp4")
+				if mse, ok := h.storageEngine.(storage.MediaStorageEngine); ok && mse != nil {
+					if data, err := mse.Read(c.Request.Context(), "videos/"+subID+".mp4"); err == nil && len(data) > 0 {
+						serveVideoBytes(c, data)
+						return
+					}
+				}
 				subFile := filepath.Join("data", "videos", subID+".mp4")
 				if _, err := os.Stat(subFile); err == nil {
 					c.File(subFile)
@@ -678,6 +918,35 @@ func (h *VideoHandler) StreamVideoFile(c *gin.Context) {
 				}
 			}
 		}
+
+		if strings.HasPrefix(task.VideoURL, "http://") || strings.HasPrefix(task.VideoURL, "https://") {
+			fetchCtx, cancel := context.WithTimeout(c.Request.Context(), 60*time.Second)
+			defer cancel()
+			req, err := http.NewRequestWithContext(fetchCtx, http.MethodGet, task.VideoURL, nil)
+			if err == nil {
+				client := &http.Client{Timeout: 60 * time.Second}
+				resp, respErr := client.Do(req)
+				if respErr == nil {
+					defer resp.Body.Close()
+					if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+						data, readErr := io.ReadAll(io.LimitReader(resp.Body, 256<<20))
+						if readErr == nil && len(data) > 0 {
+							if mse, ok := h.storageEngine.(storage.MediaStorageEngine); ok && mse != nil {
+								_, _, _ = mse.SaveInCategory(context.Background(), "videos", id, data, "video/mp4")
+							}
+							h.mu.Lock()
+							if h.tasks[id] != nil {
+								h.tasks[id].LocalURL = "/v1/videos/files/" + id
+							}
+							h.mu.Unlock()
+							serveVideoBytes(c, data)
+							return
+						}
+					}
+				}
+			}
+		}
+
 		c.Redirect(http.StatusFound, task.VideoURL)
 		return
 	}

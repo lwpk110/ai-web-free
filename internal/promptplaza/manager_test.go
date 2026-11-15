@@ -288,6 +288,46 @@ func TestExpandIdeaAIAndFallback(t *testing.T) {
 	}
 }
 
+func TestExpandVideoAIAndFallback(t *testing.T) {
+	mgr := NewManager(Options{})
+	if _, err := mgr.ExpandVideo(context.Background(), VideoExpandRequest{Prompt: "   "}); err == nil {
+		t.Fatal("expected error for blank video prompt")
+	}
+
+	// Fallback expand with camera style + I2V
+	fb, err := mgr.ExpandVideo(context.Background(), VideoExpandRequest{
+		Prompt:      "雨夜霓虹武士",
+		Action:      "expand",
+		CameraStyle: "360° Orbit Shot",
+		Duration:    8,
+		HasImage:    true,
+	})
+	if err != nil {
+		t.Fatalf("fallback video expand failed: %v", err)
+	}
+	if fb.Source != "smart_fallback" || fb.Action != "expand" || !strings.Contains(fb.PromptEN, "360-degree") {
+		t.Fatalf("unexpected fallback video expand response: %+v", fb)
+	}
+
+	// AI pool polish path
+	mgrAI := NewManager(Options{
+		ChatExecutor: func(ctx context.Context, sys, user string, webSearch bool) (string, error) {
+			return `{"title_zh":"霓虹武士环绕","camera_move":"360° Orbit Shot / 360度环绕","prompt_zh":"360度环绕运镜，未来武士立于霓虹雨夜天台，雨水沿刀锋滑落","prompt_en":"360-degree orbital tracking shot around a futuristic samurai on a neon-drenched rooftop in heavy rain"}`, nil
+		},
+	})
+	res, err := mgrAI.ExpandVideo(context.Background(), VideoExpandRequest{
+		Prompt:   "未来武士在雨夜天台",
+		Action:   "polish",
+		Duration: 5,
+	})
+	if err != nil {
+		t.Fatalf("AI video polish failed: %v", err)
+	}
+	if res.Source != "ai_pool" || res.Action != "polish" || res.TitleZH != "霓虹武士环绕" {
+		t.Fatalf("unexpected AI video polish result: %+v", res)
+	}
+}
+
 func TestSyncAllSourcesFailureRetainsSeeds(t *testing.T) {
 	failSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "upstream down", http.StatusBadGateway)

@@ -96,6 +96,9 @@ func TestInitDBFileFallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InitDB file path failed: %v", err)
 	}
+	if sqlDB, err := db.DB(); err == nil {
+		defer sqlDB.Close()
+	}
 
 	var count int64
 	if err := db.Model(&GalleryWork{}).Count(&count).Error; err != nil {

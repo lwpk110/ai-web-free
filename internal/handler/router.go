@@ -10,6 +10,7 @@ import (
 	"ai-web-free/internal/audit"
 	"ai-web-free/internal/chatgpt"
 	"ai-web-free/internal/config"
+	"ai-web-free/internal/opslog"
 	"ai-web-free/internal/promptplaza"
 	"ai-web-free/internal/provider"
 	"ai-web-free/internal/proxy"
@@ -39,6 +40,7 @@ type RouterDeps struct {
 	Config        *config.Config
 	KamiWorker    *provider.KamiRenewWorker
 	AuditLog      *audit.RingBuffer
+	OpsLog        *opslog.Buffer
 	PromptPlaza   *promptplaza.Manager
 	DB            *gorm.DB
 	StorageEngine storage.StorageEngine
@@ -60,11 +62,17 @@ func RegisterRouterWithDeps(deps RouterDeps) *gin.Engine {
 	registry := deps.Registry
 	cfg := deps.Config
 
+	opsLogBuf := deps.OpsLog
+	if opsLogBuf == nil {
+		opsLogBuf = opslog.Global()
+	}
+
 	rt := &GatewayRuntime{
 		AccountPool:   accountPool,
 		ProxyPool:     proxyPool,
 		KamiWorker:    deps.KamiWorker,
 		AuditLog:      deps.AuditLog,
+		OpsLog:        opsLogBuf,
 		PromptPlaza:   deps.PromptPlaza,
 		Config:        cfg,
 		DB:            deps.DB,
@@ -104,6 +112,8 @@ func RegisterRouterWithDeps(deps RouterDeps) *gin.Engine {
 	audioHandler.SetRegistry(registry)
 	imageHandler.SetRegistry(registry)
 	videoHandler := NewVideoHandler(registry, deps.AuditLog)
+	videoHandler.SetStorageEngine(rt.StorageEngine)
+	dramaHandler := NewDramaHandler(rt.DB, accountPool, registry, rt.StorageEngine)
 
 	// 初始化基础前置参数（DPL、BasicCookies 等）
 	proxyUrl := cfg.ProxyURL
@@ -115,6 +125,24 @@ func RegisterRouterWithDeps(deps RouterDeps) *gin.Engine {
 
 	router := gin.Default()
 	router.Use(middlewares.Cors)
+	router.Use(func(c *gin.Context) {
+		c.Next()
+		status := c.Writer.Status()
+		if status >= 500 || len(c.Errors) > 0 {
+			level := "error"
+			if status < 500 {
+				level = "warn"
+			}
+			detail := c.Errors.String()
+			opsLogBuf.Record(opslog.Entry{
+				Source:  "backend",
+				Level:   level,
+				Module:  "http",
+				Message: c.Request.Method + " " + c.Request.URL.Path + " -> " + http.StatusText(status),
+				Detail:  detail,
+			})
+		}
+	})
 
 	// ─── 内嵌 Thesys OpenUI React 构建产物 (web/dist) ─────────────
 	distFS, err := fs.Sub(web.StaticFS, "dist")
@@ -162,6 +190,9 @@ func RegisterRouterWithDeps(deps RouterDeps) *gin.Engine {
 		adminGroup.GET("/diagnostics", adminHandler.Diagnostics)
 		adminGroup.POST("/diagnostics/repair", adminHandler.ExecuteDiagnosticRepair)
 		adminGroup.GET("/logs", adminHandler.ListLogs)
+		adminGroup.GET("/ops-logs", adminHandler.ListOpsLogs)
+		adminGroup.POST("/ops-logs/frontend", adminHandler.IngestFrontendLogs)
+		adminGroup.DELETE("/ops-logs", adminHandler.ClearOpsLogs)
 		adminGroup.GET("/proxies", adminHandler.ListProxies)
 		adminGroup.POST("/proxies/probe", adminHandler.ProbeProxies)
 		adminGroup.POST("/proxies", adminHandler.UpdateProxies)
@@ -180,6 +211,7 @@ func RegisterRouterWithDeps(deps RouterDeps) *gin.Engine {
 		adminGroup.GET("/prompts", adminHandler.ListPrompts)
 		adminGroup.POST("/prompts/sync", adminHandler.SyncPrompts)
 		adminGroup.POST("/prompts/expand", adminHandler.ExpandPrompt)
+		adminGroup.POST("/prompts/video-expand", adminHandler.ExpandVideoPrompt)
 
 		// 图像工坊作品画廊
 		adminGroup.GET("/gallery", galleryHandler.ListWorks)
@@ -216,12 +248,24 @@ func RegisterRouterWithDeps(deps RouterDeps) *gin.Engine {
 
 		// 多模态音频与视频任务运维
 		adminGroup.GET("/multimodal/video-tasks", videoHandler.ListTasks)
+		adminGroup.DELETE("/multimodal/video-tasks/:id", videoHandler.DeleteTask)
+		adminGroup.DELETE("/multimodal/video-tasks", videoHandler.ClearTasks)
 		adminGroup.GET("/multimodal/audio-history", audioHandler.ListAudioHistory)
 		adminGroup.GET("/providers/channels", adminHandler.ListChannels)
+
+		// 短剧工坊无限画布：能力矩阵、工程持久化与同源媒体缓存
+		adminGroup.GET("/drama/capabilities", dramaHandler.Capabilities)
+		adminGroup.GET("/drama/projects", dramaHandler.ListProjects)
+		adminGroup.POST("/drama/projects", dramaHandler.SaveProject)
+		adminGroup.GET("/drama/projects/:id", dramaHandler.GetProject)
+		adminGroup.PUT("/drama/projects/:id", dramaHandler.SaveProject)
+		adminGroup.DELETE("/drama/projects/:id", dramaHandler.DeleteProject)
+		adminGroup.POST("/drama/media/cache", dramaHandler.CacheMedia)
 	}
 
-	// 静态生图资源强缓存分发
+	// 静态生图/音频资源强缓存分发
 	router.GET("/storage/images/:filename", galleryHandler.ServeStaticImage)
+	router.GET("/storage/audio/:filename", dramaHandler.ServeCachedAudio)
 
 	router.POST("/auth/session", authHandler.Session)
 	router.POST("/auth/refresh", authHandler.Refresh)

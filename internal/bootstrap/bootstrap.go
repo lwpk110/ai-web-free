@@ -17,6 +17,7 @@ import (
 	"ai-web-free/internal/config"
 	"ai-web-free/internal/db"
 	"ai-web-free/internal/handler"
+	"ai-web-free/internal/opslog"
 	"ai-web-free/internal/promptplaza"
 	"ai-web-free/internal/provider"
 	"ai-web-free/internal/proxy"
@@ -37,6 +38,9 @@ type App struct {
 
 // Init 完成所有初始化逻辑，返回 App 实例
 func Init() (*App, error) {
+	opsLog := opslog.Global()
+	opsLog.InstallStdLogHook()
+
 	gin.SetMode(gin.ReleaseMode)
 	_ = godotenv.Load(".env")
 	browserfp.Init()
@@ -266,6 +270,7 @@ func Init() (*App, error) {
 		Config:        &cfg,
 		KamiWorker:    kamiWorker,
 		AuditLog:      auditLog,
+		OpsLog:        opsLog,
 		PromptPlaza:   plazaMgr,
 		DB:            database,
 		StorageEngine: storageEngine,

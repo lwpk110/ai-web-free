@@ -5,10 +5,13 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -100,26 +103,116 @@ print(json.dumps(result))
 	return cookies, nil
 }
 
-func main() {
-	cookies, err := getDecryptedCookies()
+func getCookieFromLocalGateway() (string, string) {
+	body := strings.NewReader(`{"action":"get_cookie"}`)
+	req, err := http.NewRequest(http.MethodPost, "http://127.0.0.1:18080/admin/api/v1/providers/meta_muse/accounts/muse_acct_1/action", body)
 	if err != nil {
-		log.Fatalf("getDecryptedCookies: %v", err)
+		return "", ""
 	}
-	fmt.Printf("Successfully decrypted %d cookies from Chrome keyring\n", len(cookies))
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", ""
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	var parsed struct {
+		Result struct {
+			Cookie string `json:"cookie"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return "", ""
+	}
+	// 同时查询账号绑定的代理
+	var proxy string
+	if accResp, err := client.Get("http://127.0.0.1:18080/admin/api/v1/providers/meta_muse/accounts"); err == nil {
+		defer accResp.Body.Close()
+		var accList struct {
+			Accounts []struct {
+				ID    string `json:"id"`
+				Proxy string `json:"proxy"`
+			} `json:"accounts"`
+		}
+		if json.NewDecoder(accResp.Body).Decode(&accList) == nil {
+			for _, a := range accList.Accounts {
+				if a.ID == "muse_acct_1" {
+					proxy = a.Proxy
+					break
+				}
+			}
+		}
+	}
+	return parsed.Result.Cookie, proxy
+}
 
-	proxyURL := os.Getenv("ALL_PROXY")
+func resolveDemoChromePath() string {
+	if p := os.Getenv("CHROME_PATH"); p != "" {
+		return p
+	}
+	if runtime.GOOS == "windows" {
+		for _, p := range []string{
+			`C:\Program Files\Google\Chrome\Application\chrome.exe`,
+			`C:\Program Files (x86)\Google\Chrome\Application\chrome.exe`,
+		} {
+			if _, err := os.Stat(p); err == nil {
+				return p
+			}
+		}
+	}
+	return "/usr/bin/google-chrome"
+}
+
+func main() {
+	var cookies []map[string]string
+	var gwProxy string
+
+	if envCookie := strings.TrimSpace(os.Getenv("MUSE_COOKIE")); envCookie != "" {
+		for _, part := range strings.Split(envCookie, ";") {
+			kv := strings.SplitN(strings.TrimSpace(part), "=", 2)
+			if len(kv) == 2 && kv[0] != "" {
+				cookies = append(cookies, map[string]string{"name": strings.TrimSpace(kv[0]), "value": strings.TrimSpace(kv[1]), "path": "/"})
+			}
+		}
+	} else if c, err := getDecryptedCookies(); err == nil && len(c) > 0 {
+		cookies = c
+	} else {
+		gwCookie, p := getCookieFromLocalGateway()
+		gwProxy = p
+		for _, part := range strings.Split(gwCookie, ";") {
+			kv := strings.SplitN(strings.TrimSpace(part), "=", 2)
+			if len(kv) == 2 && kv[0] != "" {
+				cookies = append(cookies, map[string]string{"name": strings.TrimSpace(kv[0]), "value": strings.TrimSpace(kv[1]), "path": "/"})
+			}
+		}
+	}
+
+	if len(cookies) == 0 {
+		log.Fatalf("no muse cookies available (checked Linux keyring, MUSE_COOKIE, and local gateway)")
+	}
+	fmt.Printf("Loaded %d cookies\n", len(cookies))
+
+	proxyURL := os.Getenv("MUSE_PROXY")
+	if proxyURL == "" {
+		proxyURL = gwProxy
+	}
+	if proxyURL == "" {
+		proxyURL = os.Getenv("ALL_PROXY")
+	}
 	if proxyURL == "" {
 		proxyURL = os.Getenv("HTTP_PROXY")
 	}
 
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
-		chromedp.ExecPath("/usr/bin/google-chrome"),
+		chromedp.ExecPath(resolveDemoChromePath()),
 		chromedp.NoFirstRun,
 		chromedp.NoDefaultBrowserCheck,
 		chromedp.Flag("incognito", true),
 		chromedp.Flag("disable-blink-features", "AutomationControlled"),
 		chromedp.Flag("no-sandbox", true),
 		chromedp.Flag("disable-dev-shm-usage", true),
+		chromedp.Flag("lang", "zh-CN"),
 		chromedp.Flag("headless", "new"),
 		chromedp.WindowSize(1440, 900),
 	)
@@ -142,18 +235,28 @@ func main() {
 
 	// 2. 注入所有真实 Session Cookies
 	fmt.Println("Step 2: Injecting cookies...")
+	isSecure := true
 	for _, c := range cookies {
-		domain := c["domain"]
+		name := c["name"]
 		path := c["path"]
 		if path == "" {
 			path = "/"
 		}
-		_, _ = chromedp.Call(ctx, network.SetCookie, network.SetCookieParams{
-			Name:   c["name"],
+		params := network.SetCookieParams{
+			Name:   name,
 			Value:  c["value"],
-			Domain: domain,
+			URL:    "https://muse.ai/",
 			Path:   path,
-		})
+			Secure: &isSecure,
+		}
+		if !strings.HasPrefix(name, "__Host-") && name != "hatch_native_auth_device" {
+			domain := c["domain"]
+			if domain == "" {
+				domain = ".muse.ai"
+			}
+			params.Domain = domain
+		}
+		_, _ = chromedp.Call(ctx, network.SetCookie, params)
 	}
 
 	// 3. 重新导航到主页

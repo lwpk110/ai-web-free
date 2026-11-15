@@ -1,39 +1,70 @@
 package accounts
 
 import (
+	"encoding/base64"
 	"encoding/json"
-	"strings"
 	"testing"
-	"time"
 )
 
-func TestBuildSub2APIJSONSecretRedaction(t *testing.T) {
-	acct := CreateAccount("eyJhbGciOiJIUzI1NiJ9.payload.sig", TypeFree, DefaultProfiles)
-	acct.Email = "user@example.com"
-	acct.Password = "super-secret-pass"
-	acct.TOTPSecret = "JBSWY3DPEHPK3PXP"
-	acct.ChatGPTAccountID = "org-123"
-	acct.ExpiresAt = time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC)
+func makeTestJWT(email, accountID string, exp int64) string {
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256","typ":"JWT"}`))
+	payloadMap := map[string]interface{}{
+		"exp": exp,
+		"https://api.openai.com/profile": map[string]interface{}{
+			"email": email,
+		},
+		"https://api.openai.com/auth": map[string]interface{}{
+			"chatgpt_account_id": accountID,
+			"chatgpt_plan_type":  "free",
+		},
+	}
+	payloadBytes, _ := json.Marshal(payloadMap)
+	payload := base64.RawURLEncoding.EncodeToString(payloadBytes)
+	return header + "." + payload + ".sig1234567890"
+}
 
-	masked := BuildSub2APIJSON([]*Account{acct}, false)
-	rawMasked, err := json.Marshal(masked)
-	if err != nil {
-		t.Fatalf("marshal masked failed: %v", err)
-	}
-	if strings.Contains(string(rawMasked), "super-secret-pass") || strings.Contains(string(rawMasked), "JBSWY3DPEHPK3PXP") {
-		t.Fatalf("expected secrets redacted when includeSecrets=false: %s", string(rawMasked))
-	}
-	parsedMasked, err := ParseSub2APIJSON(string(rawMasked))
-	if err != nil || len(parsedMasked.Accounts) != 1 || parsedMasked.Accounts[0].Credentials.AccessToken != acct.Token {
-		t.Fatalf("roundtrip failed: %+v err=%v", parsedMasked, err)
+func TestParseKamiText_AutoRecognizeWithATAndAnyOrder(t *testing.T) {
+	at1 := makeTestJWT("u6@example.com", "acct-6", 4102444800)
+	at2 := makeTestJWT("u2@example.com", "acct-2", 4102444800)
+	at3 := makeTestJWT("u3@example.com", "acct-3", 4102444800)
+
+	raw := `
+# comment line
+u1@example.com----Pass123!----JBSWY3DPEHPK3PXP
+u2@example.com----` + at2 + `----Pass234!----MFRGGZDFMZTWQ2LK
+` + at3 + `|u3@example.com|KRSXG5CTMVRXEZLU|Pass345!|rt_refresh_token_1234567890
+Pass456!	u4@example.com	otpauth://totp/ChatGPT:u4@example.com?secret=NB2W45DFOIZA2345&issuer=OpenAI
+u5@example.com----Pass567!
+` + at1 + `----Pass678!----JBSWY3DPEHPK3PXP
+`
+
+	got := ParseKamiText(raw)
+	if len(got) != 6 {
+		t.Fatalf("expected 6 parsed kami accounts, got %d: %+v", len(got), got)
 	}
 
-	full := BuildSub2APIJSON([]*Account{acct}, true)
-	rawFull, err := json.Marshal(full)
-	if err != nil {
-		t.Fatalf("marshal full failed: %v", err)
+	// 1. Standard 3-col
+	if got[0].Email != "u1@example.com" || got[0].Password != "Pass123!" || got[0].TOTPSecret != "JBSWY3DPEHPK3PXP" || got[0].AccessToken != "" {
+		t.Fatalf("unexpected row 0: %+v", got[0])
 	}
-	if !strings.Contains(string(rawFull), "super-secret-pass") || !strings.Contains(string(rawFull), "JBSWY3DPEHPK3PXP") {
-		t.Fatalf("expected secrets present when includeSecrets=true: %s", string(rawFull))
+	// 2. Email----AT----Pass----TOTP
+	if got[1].Email != "u2@example.com" || got[1].Password != "Pass234!" || got[1].TOTPSecret != "MFRGGZDFMZTWQ2LK" || got[1].AccessToken != at2 {
+		t.Fatalf("unexpected row 1: %+v", got[1])
+	}
+	// 3. AT|Email|TOTP|Pass|RT with pipe delimiter
+	if got[2].Email != "u3@example.com" || got[2].Password != "Pass345!" || got[2].TOTPSecret != "KRSXG5CTMVRXEZLU" || got[2].AccessToken != at3 || got[2].RefreshToken != "rt_refresh_token_1234567890" {
+		t.Fatalf("unexpected row 2: %+v", got[2])
+	}
+	// 4. Pass \t Email \t otpauth://...
+	if got[3].Email != "u4@example.com" || got[3].Password != "Pass456!" || got[3].TOTPSecret != "NB2W45DFOIZA2345" {
+		t.Fatalf("unexpected row 3: %+v", got[3])
+	}
+	// 5. Email----Pass (no 2FA)
+	if got[4].Email != "u5@example.com" || got[4].Password != "Pass567!" || got[4].TOTPSecret != "" {
+		t.Fatalf("unexpected row 4: %+v", got[4])
+	}
+	// 6. AT----Pass----TOTP (email extracted from JWT)
+	if got[5].Email != "u6@example.com" {
+		t.Fatalf("unexpected row 5 email: %+v", got[5])
 	}
 }

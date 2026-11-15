@@ -539,3 +539,169 @@ func (p *DashScopeProvider) SynthesizeSpeech(ctx context.Context, text, voice st
 	p.reportStatus(keyIdx, true, false)
 	return audioBytes, nil
 }
+
+// SubmitVideoTask 提交阿里云百炼通义万相异步视频生成任务（支持文生视频与首帧图生视频）
+func (p *DashScopeProvider) SubmitVideoTask(ctx context.Context, model, prompt, imageURL string, duration int) (string, error) {
+	k, keyIdx, err := p.nextKey()
+	if err != nil {
+		return "", err
+	}
+
+	targetModel := strings.TrimSpace(model)
+	targetModel = strings.TrimPrefix(targetModel, "dashscope/")
+	lower := strings.ToLower(targetModel)
+	if lower == "" || lower == "wan-video-v1" || lower == "wan-video" || lower == "wanx-video" {
+		if strings.TrimSpace(imageURL) != "" {
+			targetModel = "wanx2.1-i2v-turbo"
+		} else {
+			targetModel = "wanx2.1-t2v-turbo"
+		}
+	}
+
+	input := map[string]interface{}{
+		"prompt": prompt,
+	}
+	if img := strings.TrimSpace(imageURL); img != "" {
+		input["img_url"] = img
+	}
+
+	params := map[string]interface{}{
+		"prompt_extend": true,
+	}
+	if duration > 0 {
+		params["duration"] = duration
+	}
+
+	reqBody := map[string]interface{}{
+		"model":      targetModel,
+		"input":      input,
+		"parameters": params,
+	}
+	bodyBytes, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", err
+	}
+
+	reqURL := p.baseURL + "/services/aigc/video-generation/video-synthesis"
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return "", err
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+k.Key)
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("X-DashScope-Async", "enable")
+	if k.WorkspaceID != "" {
+		httpReq.Header.Set("X-DashScope-WorkSpace", k.WorkspaceID)
+	}
+
+	resp, err := p.client.Do(httpReq)
+	if err != nil {
+		p.reportStatus(keyIdx, false, false)
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	respData, err := io.ReadAll(resp.Body)
+	if err != nil {
+		p.reportStatus(keyIdx, false, false)
+		return "", err
+	}
+
+	var submitResp struct {
+		Output struct {
+			TaskID     string `json:"task_id"`
+			TaskStatus string `json:"task_status"`
+		} `json:"output"`
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(respData, &submitResp); err != nil {
+		p.reportStatus(keyIdx, false, false)
+		return "", fmt.Errorf("dashscope video submit decode error (status %d): %w", resp.StatusCode, err)
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 || submitResp.Output.TaskID == "" {
+		isExhausted := strings.Contains(submitResp.Code, "Quota") || strings.Contains(submitResp.Message, "Arrears")
+		p.reportStatus(keyIdx, false, isExhausted)
+		return "", fmt.Errorf("dashscope video submit error (status %d, code=%s): %s", resp.StatusCode, submitResp.Code, submitResp.Message)
+	}
+
+	p.reportStatus(keyIdx, true, false)
+	return submitResp.Output.TaskID, nil
+}
+
+// QueryVideoTask 轮询阿里云百炼通义万相异步视频生成任务状态与成片 URL
+func (p *DashScopeProvider) QueryVideoTask(ctx context.Context, taskID string) (string, string, int, error) {
+	k, keyIdx, err := p.nextKey()
+	if err != nil {
+		return "", "", 0, err
+	}
+
+	pollURL := fmt.Sprintf("%s/tasks/%s", p.baseURL, strings.TrimSpace(taskID))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, pollURL, nil)
+	if err != nil {
+		return "", "", 0, err
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+k.Key)
+	if k.WorkspaceID != "" {
+		httpReq.Header.Set("X-DashScope-WorkSpace", k.WorkspaceID)
+	}
+
+	resp, err := p.client.Do(httpReq)
+	if err != nil {
+		p.reportStatus(keyIdx, false, false)
+		return "", "", 0, err
+	}
+	defer resp.Body.Close()
+
+	respData, err := io.ReadAll(resp.Body)
+	if err != nil {
+		p.reportStatus(keyIdx, false, false)
+		return "", "", 0, err
+	}
+
+	var taskResp struct {
+		Output struct {
+			TaskStatus string `json:"task_status"`
+			VideoURL   string `json:"video_url"`
+			URL        string `json:"url"`
+			Message    string `json:"message"`
+		} `json:"output"`
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(respData, &taskResp); err != nil {
+		p.reportStatus(keyIdx, false, false)
+		return "", "", 0, fmt.Errorf("dashscope video query decode error (status %d): %w", resp.StatusCode, err)
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		p.reportStatus(keyIdx, false, false)
+		return "FAILED", "", 0, fmt.Errorf("dashscope video query error (status %d, code=%s): %s", resp.StatusCode, taskResp.Code, taskResp.Message)
+	}
+
+	p.reportStatus(keyIdx, true, false)
+	status := strings.ToUpper(strings.TrimSpace(taskResp.Output.TaskStatus))
+	videoURL := strings.TrimSpace(taskResp.Output.VideoURL)
+	if videoURL == "" {
+		videoURL = strings.TrimSpace(taskResp.Output.URL)
+	}
+
+	switch status {
+	case "SUCCEEDED":
+		return "SUCCEEDED", videoURL, 100, nil
+	case "FAILED", "CANCELED":
+		msg := taskResp.Output.Message
+		if msg == "" {
+			msg = taskResp.Message
+		}
+		if msg != "" {
+			return "FAILED", "", 0, fmt.Errorf("dashscope video task failed: %s", msg)
+		}
+		return "FAILED", "", 0, nil
+	case "RUNNING":
+		return "RUNNING", "", 55, nil
+	default:
+		return "PENDING", "", 20, nil
+	}
+}

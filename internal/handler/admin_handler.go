@@ -15,6 +15,7 @@ import (
 	"ai-web-free/internal/chatgpt"
 	"ai-web-free/internal/config"
 	"ai-web-free/internal/db"
+	"ai-web-free/internal/opslog"
 	"ai-web-free/internal/provider"
 	"ai-web-free/internal/proxy"
 	"ai-web-free/middlewares"
@@ -56,6 +57,13 @@ func (h *AdminHandler) auditLog() *audit.RingBuffer {
 		return h.runtime.AuditLog
 	}
 	return nil
+}
+
+func (h *AdminHandler) opsLog() *opslog.Buffer {
+	if h.runtime != nil && h.runtime.OpsLog != nil {
+		return h.runtime.OpsLog
+	}
+	return opslog.Global()
 }
 
 func (h *AdminHandler) kamiWorker() *provider.KamiRenewWorker {
@@ -409,6 +417,7 @@ func (h *AdminHandler) AccountAction(c *gin.Context) {
 	var body struct {
 		Action   string `json:"action"`
 		Headless *bool  `json:"headless"`
+		Cookie   string `json:"cookie"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil || body.Action == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "缺少 action 参数"}})
@@ -421,9 +430,18 @@ func (h *AdminHandler) AccountAction(c *gin.Context) {
 	type actionWithOpts interface {
 		ExecuteAccountActionWithOpts(id, action string, headless bool) (map[string]interface{}, error)
 	}
+	type cookieUpdater interface {
+		UpdateAccountCookie(id, cookie string) (map[string]interface{}, error)
+	}
 	var result map[string]interface{}
 	var err error
-	if runner, ok := p.(actionWithOpts); ok {
+	if body.Action == "update_cookie" {
+		if updater, ok := p.(cookieUpdater); ok {
+			result, err = updater.UpdateAccountCookie(accountID, body.Cookie)
+		} else {
+			err = fmt.Errorf("供应商 %s 不支持在线编辑 Cookie", providerID)
+		}
+	} else if runner, ok := p.(actionWithOpts); ok {
 		result, err = runner.ExecuteAccountActionWithOpts(accountID, body.Action, headless)
 	} else {
 		result, err = p.ExecuteAccountAction(accountID, body.Action)
@@ -578,9 +596,11 @@ func (h *AdminHandler) CancelKamiLogin(c *gin.Context) {
 		return
 	}
 	var body struct {
-		TaskID    string `json:"task_id"`
-		AccountID string `json:"account_id"`
-		CancelAll bool   `json:"cancel_all"`
+		TaskID     string   `json:"task_id"`
+		AccountID  string   `json:"account_id"`
+		AccountIDs []string `json:"account_ids"`
+		CancelAll  bool     `json:"cancel_all"`
+		Queue      string   `json:"queue"`
 	}
 	if c.Request.ContentLength > 0 {
 		if err := c.ShouldBindJSON(&body); err != nil {
@@ -589,12 +609,100 @@ func (h *AdminHandler) CancelKamiLogin(c *gin.Context) {
 		}
 	}
 
-	task, count, err := cg.CancelKamiLogin(body.TaskID, body.AccountID, body.CancelAll)
-	if err != nil && !body.CancelAll && strings.TrimSpace(body.AccountID) != "" {
-		if kw := cg.KamiWorker(); kw != nil && kw.CancelQueued(strings.TrimSpace(body.AccountID)) {
+	queueKind := strings.ToLower(strings.TrimSpace(body.Queue))
+	accountID := strings.TrimSpace(body.AccountID)
+	targetIDs := make([]string, 0, len(body.AccountIDs)+1)
+	if accountID != "" {
+		targetIDs = append(targetIDs, accountID)
+	}
+	for _, id := range body.AccountIDs {
+		if trimmed := strings.TrimSpace(id); trimmed != "" {
+			targetIDs = append(targetIDs, trimmed)
+		}
+	}
+	kw := cg.KamiWorker()
+
+	cancelRenewQueue := func() (int, bool) {
+		if kw == nil {
+			return 0, false
+		}
+		if body.CancelAll {
+			n := kw.CancelAllQueued()
+			return n, n > 0
+		}
+		if len(targetIDs) > 0 {
+			n := kw.CancelQueuedBatch(targetIDs)
+			return n, n > 0
+		}
+		return 0, false
+	}
+
+	if queueKind == "renew" || queueKind == "worker" {
+		if cancelled, ok := cancelRenewQueue(); ok {
+			if al := h.auditLog(); al != nil {
+				al.RecordEvent("/admin/api/v1/providers/"+providerID+"/accounts/kami-login/cancel", accountID, "", "kami_renew_cancelled", fmt.Sprintf("已取消 %d 个自动续期排队", cancelled))
+			}
 			c.JSON(http.StatusOK, gin.H{
 				"provider":  providerID,
-				"cancelled": 1,
+				"cancelled": cancelled,
+				"task":      cg.ActiveKamiLoginTask(),
+				"stats":     p.Stats(),
+			})
+			return
+		}
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "当前自动续期队列中没有可取消的排队账号"}})
+		return
+	}
+
+	if !body.CancelAll && len(body.AccountIDs) > 0 {
+		var totalCancelled int
+		var latestTask *provider.KamiLoginTask
+		var lastErr error
+		if queueKind != "renew" {
+			if task, count, err := cg.CancelKamiLoginBatch(body.TaskID, targetIDs); err == nil {
+				totalCancelled += count
+				latestTask = task
+			} else {
+				lastErr = err
+			}
+		}
+		if queueKind != "login" {
+			if cancelled, ok := cancelRenewQueue(); ok {
+				totalCancelled += cancelled
+				if al := h.auditLog(); al != nil {
+					al.RecordEvent("/admin/api/v1/providers/"+providerID+"/accounts/kami-login/cancel", "", "", "kami_renew_cancelled", fmt.Sprintf("已批量取消 %d 个自动续期排队", cancelled))
+				}
+			}
+		}
+		if totalCancelled > 0 {
+			if latestTask == nil {
+				latestTask = cg.ActiveKamiLoginTask()
+			}
+			c.JSON(http.StatusOK, gin.H{
+				"provider":  providerID,
+				"cancelled": totalCancelled,
+				"task":      latestTask,
+				"stats":     p.Stats(),
+			})
+			return
+		}
+		msg := "所选账号中没有处于等待队列中的账号"
+		if lastErr != nil {
+			msg = lastErr.Error()
+		}
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": msg}})
+		return
+	}
+
+	task, count, err := cg.CancelKamiLogin(body.TaskID, accountID, body.CancelAll)
+	if err != nil && queueKind != "login" && (!body.CancelAll || strings.TrimSpace(body.TaskID) == "") {
+		if cancelled, ok := cancelRenewQueue(); ok {
+			if al := h.auditLog(); al != nil {
+				al.RecordEvent("/admin/api/v1/providers/"+providerID+"/accounts/kami-login/cancel", accountID, "", "kami_renew_cancelled", fmt.Sprintf("已取消 %d 个自动续期排队", cancelled))
+			}
+			c.JSON(http.StatusOK, gin.H{
+				"provider":  providerID,
+				"cancelled": cancelled,
 				"task":      cg.ActiveKamiLoginTask(),
 				"stats":     p.Stats(),
 			})
@@ -823,6 +931,61 @@ func (h *AdminHandler) ListLogs(c *gin.Context) {
 		"summary": summary,
 		"entries": entries,
 	})
+}
+
+// ListOpsLogs 返回后台与前端运行期运维日志及统计摘要。
+func (h *AdminHandler) ListOpsLogs(c *gin.Context) {
+	source := c.DefaultQuery("source", "all")
+	level := c.DefaultQuery("level", "all")
+	search := c.Query("q")
+	limit := 200
+	if rawLimit := strings.TrimSpace(c.Query("limit")); rawLimit != "" {
+		if n, err := strconv.Atoi(rawLimit); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	entries, summary := h.opsLog().Query(opslog.QueryOptions{
+		Source: source,
+		Level:  level,
+		Search: search,
+		Limit:  limit,
+	})
+	c.JSON(http.StatusOK, gin.H{
+		"summary": summary,
+		"entries": entries,
+	})
+}
+
+// IngestFrontendLogs 接收前端主动上报的控制台/网络/渲染错误日志。
+func (h *AdminHandler) IngestFrontendLogs(c *gin.Context) {
+	var req struct {
+		Entries []opslog.Entry `json:"entries"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "无效的日志格式"}})
+		return
+	}
+	if len(req.Entries) > 50 {
+		req.Entries = req.Entries[:50]
+	}
+	buf := h.opsLog()
+	recorded := 0
+	for _, item := range req.Entries {
+		if strings.TrimSpace(item.Message) == "" {
+			continue
+		}
+		item.Source = "frontend"
+		item.ID = ""
+		buf.Record(item)
+		recorded++
+	}
+	c.JSON(http.StatusOK, gin.H{"recorded": recorded})
+}
+
+// ClearOpsLogs 清空当前内存中的前后端运维日志缓冲。
+func (h *AdminHandler) ClearOpsLogs(c *gin.Context) {
+	h.opsLog().Clear()
+	c.JSON(http.StatusOK, gin.H{"cleared": true})
 }
 
 // ExportAccounts 导出指定供应商账号池（支持 sub2api_json / access_tokens / kami，默认脱敏密钥）。

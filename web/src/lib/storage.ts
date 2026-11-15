@@ -58,6 +58,7 @@ export type CopilotSkill =
   | "fix"
   | "openui"
   | "image"
+  | "audio"
   | "chat";
 
 export interface StoredChatMessage {

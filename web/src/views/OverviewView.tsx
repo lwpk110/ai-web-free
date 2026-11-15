@@ -10,6 +10,7 @@ import {
   Zap,
 } from "lucide-react";
 import {
+  cancelKamiLogin,
   fetchLogs,
   fetchOverview,
   fetchProxies,
@@ -104,6 +105,8 @@ export const OverviewView: React.FC<{
   const [proxyNodes, setProxyNodes] = useState<ProxyNodeStatus[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [queueNotice, setQueueNotice] = useState<string | null>(null);
+  const [cancellingQueue, setCancellingQueue] = useState(false);
   const [copiedEndpoint, setCopiedEndpoint] = useState(false);
   const [selectedLog, setSelectedLog] = useState<AuditEntry | null>(null);
   const {
@@ -220,6 +223,30 @@ export const OverviewView: React.FC<{
     }
   };
 
+  const handleCancelQueue = async (target: "login" | "renew") => {
+    setCancellingQueue(true);
+    setError(null);
+    setQueueNotice(null);
+    try {
+      const res = await cancelKamiLogin(
+        "chatgpt",
+        target === "login"
+          ? { task_id: loginTask?.id, cancel_all: true, queue: "login" }
+          : { cancel_all: true, queue: "renew" }
+      );
+      setQueueNotice(
+        target === "login"
+          ? `已取消剩余 ${res.cancelled} 个重登排队账号`
+          : `已取消剩余 ${res.cancelled} 个自动续期排队账号`
+      );
+      await load();
+    } catch (e: any) {
+      setError(e?.message || "取消排队失败");
+    } finally {
+      setCancellingQueue(false);
+    }
+  };
+
   return (
     <div className="space-y-5">
       {/* Header */}
@@ -266,6 +293,14 @@ export const OverviewView: React.FC<{
           type="error"
           text={error}
           onClose={() => setError(null)}
+        />
+      )}
+
+      {queueNotice && (
+        <NoticeBanner
+          type="info"
+          text={queueNotice}
+          onClose={() => setQueueNotice(null)}
         />
       )}
 
@@ -479,16 +514,39 @@ export const OverviewView: React.FC<{
               </>
             )}
           </div>
-          <div className="z-text-muted truncate font-mono-num">
-            {loginTask
-              ? loginTask.current_email
-                ? `${loginTask.current_email} · ${loginTask.current_phase_label || loginTask.current_phase || "执行中"}`
-                : loginTask.current_phase_label || "等待队列执行"
-              : probeTask
-                ? "正在并发探测号池健康度..."
-                : worker?.running && worker.running_email
-                  ? `${worker.running_email}${worker.running_phase_label ? ` · ${worker.running_phase_label}` : ""}`
-                  : "剩余 ≤ 24h 自动触发无头续期"}
+          <div className="flex items-center justify-between gap-2">
+            <div className="z-text-muted truncate font-mono-num">
+              {loginTask
+                ? loginTask.current_email
+                  ? `${loginTask.current_email} · ${loginTask.current_phase_label || loginTask.current_phase || "执行中"}`
+                  : loginTask.current_phase_label || "等待队列执行"
+                : probeTask
+                  ? "正在并发探测号池健康度..."
+                  : worker?.running && worker.running_email
+                    ? `${worker.running_email}${worker.running_phase_label ? ` · ${worker.running_phase_label}` : ""}`
+                    : "剩余 ≤ 24h 自动触发无头续期"}
+            </div>
+            {loginTask && (loginTask.queued_account_ids?.length ?? 0) > 0 ? (
+              <button
+                type="button"
+                disabled={cancellingQueue}
+                onClick={() => handleCancelQueue("login")}
+                className="shrink-0 px-2 py-0.5 rounded-lg border z-border hover:underline cursor-pointer disabled:opacity-50"
+                style={{ color: "var(--pill-danger-text)" }}
+              >
+                {cancellingQueue ? "取消中..." : "取消排队"}
+              </button>
+            ) : !loginTask && !probeTask && (worker?.queue_length ?? 0) > 0 ? (
+              <button
+                type="button"
+                disabled={cancellingQueue}
+                onClick={() => handleCancelQueue("renew")}
+                className="shrink-0 px-2 py-0.5 rounded-lg border z-border hover:underline cursor-pointer disabled:opacity-50"
+                style={{ color: "var(--pill-danger-text)" }}
+              >
+                {cancellingQueue ? "取消中..." : "取消排队"}
+              </button>
+            ) : null}
           </div>
         </div>
       </div>

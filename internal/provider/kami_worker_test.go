@@ -170,3 +170,65 @@ func TestKamiRenewWorkerCancelQueuedAndPhaseSync(t *testing.T) {
 		t.Fatalf("expected acct1 completed renew action summary, stats=%+v sum=%q", w.Stats(), acct1.LastActionSummary)
 	}
 }
+
+func TestKamiRenewWorkerCancelAllQueued(t *testing.T) {
+	pool := accounts.NewPool(nil)
+	makeAcct := func(id, email string) *accounts.Account {
+		a := accounts.CreateAccount("", accounts.TypeFree, accounts.DefaultProfiles)
+		a.ID = id
+		a.Email = email
+		a.Password = "p"
+		a.TOTPSecret = "SECRET"
+		a.Status = accounts.StatusExpired
+		pool.AddAccount(a)
+		return a
+	}
+
+	a1 := makeAcct("kw-all-1", "kwall1@example.com")
+	a2 := makeAcct("kw-all-2", "kwall2@example.com")
+	a3 := makeAcct("kw-all-3", "kwall3@example.com")
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	w := NewKamiRenewWorker(pool, "", true, nil, nil)
+	w.SetLoginExecutor(func(acct *accounts.Account, _ string, _ bool) KamiLoginOutcome {
+		close(started)
+		<-release
+		return KamiLoginOutcome{Email: acct.Email, OK: true, AccessToken: "kw-tok-all"}
+	})
+	w.Start()
+	defer w.Stop()
+
+	if !w.Enqueue(a1, "test") || !w.Enqueue(a2, "test") || !w.Enqueue(a3, "test") {
+		t.Fatalf("expected all 3 accounts to enqueue")
+	}
+	<-started
+
+	if st := w.Stats(); st.QueueLength != 2 {
+		t.Fatalf("expected queue length 2 while kw-all-1 running, got %+v", st)
+	}
+	if n := w.CancelAllQueued(); n != 2 {
+		t.Fatalf("expected CancelAllQueued to cancel 2 accounts, got %d", n)
+	}
+	if st := w.Stats(); st.QueueLength != 0 {
+		t.Fatalf("expected queue length 0 after CancelAllQueued, got %+v", st)
+	}
+	for _, email := range []string{"kwall2@example.com", "kwall3@example.com"} {
+		snap := pool.ListSnapshots("", "", email)
+		if len(snap) != 1 || snap[0].ActiveAction != "" || snap[0].RenewState != "idle" {
+			t.Fatalf("expected %s state cleared after CancelAllQueued, got %+v", email, snap)
+		}
+	}
+
+	close(release)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if !w.Stats().Running && w.Stats().TotalSucceeded == 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if w.Stats().TotalSucceeded != 1 {
+		t.Fatalf("expected only running account to complete, got %+v", w.Stats())
+	}
+}

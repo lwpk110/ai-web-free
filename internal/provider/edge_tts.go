@@ -216,7 +216,7 @@ func (p *EdgeTTSProvider) Synthesize(ctx context.Context, text, voice string, sp
 		voice, rateStr, escapedText)
 
 	dialer := websocket.Dialer{
-		HandshakeTimeout: 15 * time.Second,
+		HandshakeTimeout: 8 * time.Second,
 		Proxy:            fhttp.ProxyFromEnvironment,
 	}
 
@@ -229,6 +229,8 @@ func (p *EdgeTTSProvider) Synthesize(ctx context.Context, text, voice string, sp
 		return nil, fmt.Errorf("dial edge tts wss failed: %w", err)
 	}
 	defer conn.Close()
+	stopCancel := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stopCancel()
 
 	// 1. 发送 Speech.Config
 	configMsg := fmt.Sprintf("X-Timestamp:%s\r\nContent-Type:application/json; charset=utf-8\r\nPath:speech.config\r\n\r\n{\"context\":{\"synthesis\":{\"audio\":{\"metadataoptions\":{\"sentenceBoundaryEnabled\":\"false\",\"wordBoundaryEnabled\":\"false\"},\"outputFormat\":\"audio-24khz-48kbitrate-mono-mp3\"}}}}",
@@ -243,6 +245,9 @@ func (p *EdgeTTSProvider) Synthesize(ctx context.Context, text, voice string, sp
 	if err := conn.WriteMessage(websocket.TextMessage, []byte(ssmlMsg)); err != nil {
 		return nil, err
 	}
+	if err := conn.SetReadDeadline(time.Now().Add(15 * time.Second)); err != nil {
+		return nil, err
+	}
 
 	// 3. 读取流并组装音频字节
 	var audioBuf []byte
@@ -255,6 +260,9 @@ func (p *EdgeTTSProvider) Synthesize(ctx context.Context, text, voice string, sp
 
 		messageType, pData, err := conn.ReadMessage()
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			break
 		}
 
@@ -296,4 +304,30 @@ func GetEdgeTTSVoiceDescriptors() []VoiceDescriptor {
 		})
 	}
 	return out
+}
+
+// MapEdgeVoiceToJianying returns the closest available distinct fallback voice for an Edge voice.
+func MapEdgeVoiceToJianying(voice string) string {
+	switch strings.ToLower(strings.TrimSpace(voice)) {
+	case "zh-cn-xiaoxiaoneural":
+		return "zh_female_shuangkuai"
+	case "zh-cn-yunxineural":
+		return "zh_male_chunhou"
+	case "zh-cn-yunyangneural":
+		return "zh_male_chenwen"
+	case "zh-cn-yunxianeural":
+		return "zh_female_tianmei"
+	case "zh-cn-yunjianneural":
+		return "zh_male_yangguang"
+	case "zh-cn-liaoning-xiaobeineural":
+		return "zh_female_sichuan"
+	case "zh-hk-hiugaaineural":
+		return "zh_female_yueyu"
+	case "zh-tw-hsiaochenneural":
+		return "zh_female_taiwan"
+	case "en-us-jennyneural":
+		return "en_female_emotional"
+	default:
+		return MapOpenAIVoiceToJianying(voice)
+	}
 }

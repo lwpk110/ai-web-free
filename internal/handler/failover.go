@@ -15,6 +15,7 @@ import (
 	"ai-web-free/internal/audit"
 	"ai-web-free/internal/chatgpt"
 	"ai-web-free/internal/config"
+	"ai-web-free/internal/opslog"
 	"ai-web-free/internal/promptplaza"
 	"ai-web-free/internal/provider"
 	"ai-web-free/internal/proxy"
@@ -32,6 +33,7 @@ type GatewayRuntime struct {
 	ProxyPool     *proxy.Pool
 	KamiWorker    *provider.KamiRenewWorker
 	AuditLog      *audit.RingBuffer
+	OpsLog        *opslog.Buffer
 	PromptPlaza   *promptplaza.Manager
 	Config        *config.Config
 	DB            *gorm.DB

@@ -126,6 +126,26 @@ type ExpandResponse struct {
 	Source           string           `json:"source"`
 }
 
+// VideoExpandRequest 定义视频工坊 AI 扩写/润色请求体。
+type VideoExpandRequest struct {
+	Prompt      string `json:"prompt"`
+	Action      string `json:"action,omitempty"`       // "expand" | "polish"
+	CameraStyle string `json:"camera_style,omitempty"` // 选中的运镜风格关键词
+	Model       string `json:"model,omitempty"`        // 目标视频模型
+	Duration    int    `json:"duration,omitempty"`     // 目标视频时长（秒）
+	HasImage    bool   `json:"has_image,omitempty"`    // 是否已上传首帧参考图（图生视频）
+}
+
+// VideoExpandResponse 定义视频工坊 AI 扩写/润色响应体。
+type VideoExpandResponse struct {
+	TitleZH    string `json:"title_zh"`
+	CameraMove string `json:"camera_move"`
+	PromptZH   string `json:"prompt_zh"`
+	PromptEN   string `json:"prompt_en"`
+	Action     string `json:"action"`
+	Source     string `json:"source"`
+}
+
 // ProxyFunc 返回可供爬虫使用的代理地址（空字符串表示直连）。
 type ProxyFunc func() string
 

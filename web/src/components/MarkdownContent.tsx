@@ -1,4 +1,55 @@
-import React from "react";
+import React, { useState } from "react";
+
+function MarkdownImageCard({ src, alt }: { src: string; alt: string }) {
+  const [loaded, setLoaded] = useState(false);
+  const [failed, setFailed] = useState(false);
+
+  return (
+    <span className="block my-2.5 w-full max-w-xs sm:max-w-sm overflow-hidden rounded-2xl border z-border shadow-sm group bg-[var(--bg-surface)] relative">
+      {!loaded && !failed && (
+        <span className="flex items-center justify-center w-full aspect-square bg-gradient-to-br from-indigo-500/10 via-[var(--bg-muted)] to-purple-500/10 animate-pulse text-xs z-text-muted">
+          正在加载缩略图...
+        </span>
+      )}
+      {failed ? (
+        <span className="flex flex-col items-center justify-center gap-1.5 w-full py-8 px-4 bg-[var(--bg-muted)] text-xs z-text-muted text-center">
+          <span>缩略图加载失败</span>
+          <a
+            href={src}
+            target="_blank"
+            rel="noreferrer"
+            className="text-indigo-500 hover:underline"
+          >
+            点击直接打开原图
+          </a>
+        </span>
+      ) : (
+        <img
+          src={src}
+          alt={alt || "AI 生成图片"}
+          loading="lazy"
+          onLoad={() => setLoaded(true)}
+          onError={() => setFailed(true)}
+          className={`w-full h-auto max-h-72 object-contain bg-black/5 dark:bg-white/5 cursor-zoom-in transition-transform duration-200 group-hover:scale-[1.01] ${
+            loaded ? "block" : "hidden"
+          }`}
+          onClick={() => window.open(src, "_blank", "noopener,noreferrer")}
+          title="点击在新标签页查看高清原图"
+        />
+      )}
+      {loaded && !failed && (
+        <span className="pointer-events-none absolute top-2 right-2 px-2 py-0.5 rounded-full text-[10px] font-medium bg-black/55 text-white opacity-0 group-hover:opacity-100 transition-opacity">
+          查看原图
+        </span>
+      )}
+      {alt && (
+        <span className="block px-3 py-1.5 text-[11px] z-text-muted bg-[var(--bg-surface)] border-t z-border truncate">
+          {alt}
+        </span>
+      )}
+    </span>
+  );
+}
 
 export type HybridSegment =
   | { type: "markdown"; text: string }
@@ -237,6 +288,9 @@ const BLOCK_WIDGET_TAGS = new Set([
   "box",
   "card",
   "grid",
+  "grid-item",
+  "carousel",
+  "carousel-item",
   "stack",
   "callout",
   "alert",
@@ -298,6 +352,10 @@ const INLINE_WIDGET_TAGS = new Set([
   "th",
   "td",
   "a",
+  "asyncimage",
+  "image",
+  "img",
+  "audio",
 ]);
 
 const KNOWN_WIDGET_TAGS = new Set([
@@ -305,7 +363,16 @@ const KNOWN_WIDGET_TAGS = new Set([
   ...INLINE_WIDGET_TAGS,
 ]);
 
-const VOID_WIDGET_TAGS = new Set(["br", "hr", "divider", "spacer"]);
+const VOID_WIDGET_TAGS = new Set([
+  "br",
+  "hr",
+  "divider",
+  "spacer",
+  "asyncimage",
+  "image",
+  "img",
+  "audio",
+]);
 
 const FLEX_CONTAINER_TAGS = new Set([
   "row",
@@ -314,6 +381,9 @@ const FLEX_CONTAINER_TAGS = new Set([
   "box",
   "card",
   "grid",
+  "grid-item",
+  "carousel",
+  "carousel-item",
   "stack",
 ]);
 
@@ -1149,10 +1219,102 @@ function renderWidgetAst(
               gridTemplateColumns:
                 colsRaw > 0
                   ? `repeat(${colsRaw}, minmax(0, 1fr))`
-                  : "repeat(auto-fit, minmax(160px, 1fr))",
+                  : "repeat(auto-fit, minmax(180px, 1fr))",
             }}
           >
             {renderedChildren}
+          </div>
+        );
+      }
+
+      if (tag === "grid-item" || tag === "carousel-item") {
+        return (
+          <div
+            key={key}
+            className={`md-widget-box md-widget-grid-item${
+              tag === "carousel-item" ? " md-widget-carousel-item" : ""
+            }`}
+          >
+            {renderedChildren}
+          </div>
+        );
+      }
+
+      if (tag === "carousel") {
+        return (
+          <div key={key} className="md-widget-carousel">
+            {renderedChildren}
+          </div>
+        );
+      }
+
+      if (tag === "audio") {
+        const src = resolveAttrString(attrs, "src", "url") || "";
+        if (!/^(https?:\/\/|blob:|data:audio\/|\/)/i.test(src)) {
+          return null;
+        }
+        return (
+          <audio
+            key={key}
+            controls
+            src={src}
+            className="w-full max-w-md my-1 rounded-lg"
+          />
+        );
+      }
+
+      if (tag === "asyncimage" || tag === "image" || tag === "img") {
+        const src = resolveAttrString(attrs, "src", "url");
+        const query = resolveAttrString(attrs, "query", "prompt");
+        const alt = resolveAttrString(attrs, "alt", "title") || query || "视觉参考图";
+        const aspectRatio = resolveAttrString(attrs, "aspectRatio", "aspect_ratio");
+        const width = resolveSpacing(attrs.width ?? attrs.w);
+
+        if (src && /^(https?:\/\/|data:image\/|\/|#)/i.test(src)) {
+          return (
+            <img
+              key={key}
+              src={src}
+              alt={alt}
+              className="md-widget-image"
+              style={{
+                width: width || "100%",
+                aspectRatio: aspectRatio ? aspectRatio.replace(":", " / ") : undefined,
+              }}
+            />
+          );
+        }
+
+        return (
+          <div
+            key={key}
+            className="md-widget-async-image"
+            style={{ width: width || "100%" }}
+          >
+            <div className="md-widget-async-image-header">
+              <span className="md-widget-async-image-label">
+                <svg
+                  width="12"
+                  height="12"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden="true"
+                >
+                  <rect width="18" height="18" x="3" y="3" rx="2" ry="2" />
+                  <circle cx="9" cy="9" r="2" />
+                  <path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21" />
+                </svg>
+                <span>视觉参考</span>
+              </span>
+              {aspectRatio && (
+                <span className="md-widget-async-image-ratio">{aspectRatio}</span>
+              )}
+            </div>
+            {query && <div className="md-widget-async-image-query">{query}</div>}
           </div>
         );
       }
@@ -1228,7 +1390,50 @@ function parseAndRenderWidgetMarkup(
 ): React.ReactNode[] {
   const tokens = tokenizeWidgetMarkup(markup);
   const tree = buildWidgetTree(tokens);
-  return renderWidgetAst(tree, keyPrefix);
+  const hasTopLevelGridItems = tree.some(
+    (n) => n.kind === "element" && n.tag === "grid-item"
+  );
+  if (!hasTopLevelGridItems) {
+    return renderWidgetAst(tree, keyPrefix);
+  }
+
+  // 将连续的顶层 <grid-item> 自动归组到响应式网格容器中
+  const grouped: React.ReactNode[] = [];
+  let gridBuf: WidgetAstNode[] = [];
+  const flushGrid = (idx: number) => {
+    if (gridBuf.length === 0) return;
+    grouped.push(
+      <div
+        key={`${keyPrefix}-autogrid-${idx}`}
+        className="md-widget-grid"
+        style={{
+          display: "grid",
+          gap: "0.75rem",
+          gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))",
+        }}
+      >
+        {renderWidgetAst(gridBuf, `${keyPrefix}-ag-${idx}`)}
+      </div>
+    );
+    gridBuf = [];
+  };
+
+  tree.forEach((node, idx) => {
+    if (node.kind === "element" && node.tag === "grid-item") {
+      gridBuf.push(node);
+    } else if (
+      gridBuf.length > 0 &&
+      node.kind === "text" &&
+      !node.text.trim()
+    ) {
+      // 忽略相邻 <grid-item> 之间的纯空白文本节点
+    } else {
+      flushGrid(idx);
+      grouped.push(...renderWidgetAst([node], `${keyPrefix}-n-${idx}`));
+    }
+  });
+  flushGrid(tree.length);
+  return grouped;
 }
 
 function renderInlineMarkdown(
@@ -1307,26 +1512,7 @@ function renderInlineMarkdown(
         const [, alt, src] = imgMatch;
         const safe = /^(https?:\/\/|data:image\/|\/storage\/)/i.test(src);
         if (safe) {
-          nodes.push(
-            <span
-              key={key}
-              className="block my-3 max-w-lg overflow-hidden rounded-2xl border z-border shadow-sm group bg-[var(--bg-surface)] relative"
-            >
-              <img
-                src={src}
-                alt={alt || "AI 生成图片"}
-                loading="lazy"
-                className="w-full h-auto max-h-[520px] object-contain bg-black/5 dark:bg-white/5 cursor-zoom-in transition-transform duration-200 hover:scale-[1.01]"
-                onClick={() => window.open(src, "_blank")}
-                title="点击在新窗口查看高清原图"
-              />
-              {alt && (
-                <span className="block px-3 py-1.5 text-[11px] z-text-muted bg-[var(--bg-surface)] border-t z-border truncate">
-                  {alt}
-                </span>
-              )}
-            </span>
-          );
+          nodes.push(<MarkdownImageCard key={key} src={src} alt={alt} />);
         } else {
           nodes.push(tok);
         }
@@ -1337,7 +1523,7 @@ function renderInlineMarkdown(
       const linkMatch = /^\[([^\]\n]+)\]\(([^)\s]+)\)$/.exec(tok);
       if (linkMatch) {
         const [, label, href] = linkMatch;
-        const safe = /^(https?:\/\/|#\/)/i.test(href);
+        const safe = /^(https?:\/\/|#\/|\/storage\/)/i.test(href);
         if (safe) {
           nodes.push(
             <a
@@ -1562,17 +1748,37 @@ function collectWidgetBlockLines(
 
     if (j > startIndex) {
       if (!curTrim) {
-        if (depth <= 0) break;
+        if (depth <= 0) {
+          let nextNonEmpty = j + 1;
+          while (nextNonEmpty < lines.length && !lines[nextNonEmpty].trim()) {
+            nextNonEmpty++;
+          }
+          if (
+            nextNonEmpty < lines.length &&
+            /^<(?:grid-item|carousel-item)(?:\s|>)/i.test(lines[nextNonEmpty].trim())
+          ) {
+            j = nextNonEmpty;
+            continue;
+          }
+          break;
+        }
         let look = j + 1;
         while (look < lines.length && !lines[look].trim()) look++;
         if (look >= lines.length || isMarkdownBlockBoundary(lines, look)) {
           break;
         }
-        const lookTrim = lines[look].trim();
-        if (
-          !hasValidWidgetTagInText(lookTrim) &&
-          !isOrphanClosingWidgetLine(lookTrim)
-        ) {
+        // 仅当后续直至下一个 Markdown 块边界前都不存在任何闭合/widget 标签时才提前结束
+        let hasClosingOrWidgetAhead = false;
+        for (let scan = look; scan < lines.length; scan++) {
+          const scanTrim = lines[scan].trim();
+          if (!scanTrim) continue;
+          if (isMarkdownBlockBoundary(lines, scan)) break;
+          if (hasValidWidgetTagInText(scanTrim) || isOrphanClosingWidgetLine(scanTrim)) {
+            hasClosingOrWidgetAhead = true;
+            break;
+          }
+        }
+        if (!hasClosingOrWidgetAhead) {
           break;
         }
         j++;
@@ -1583,7 +1789,7 @@ function collectWidgetBlockLines(
         break;
       }
 
-      if (depth <= 0) {
+      if (depth <= 0 && !/^<(?:grid-item|carousel-item)(?:\s|>)/i.test(curTrim)) {
         break;
       }
     }
@@ -1598,6 +1804,16 @@ function collectWidgetBlockLines(
     }
     j++;
     if (depth <= 0) {
+      let nextNonEmpty = j;
+      while (nextNonEmpty < lines.length && !lines[nextNonEmpty].trim()) {
+        nextNonEmpty++;
+      }
+      if (
+        nextNonEmpty < lines.length &&
+        /^<(?:grid-item|carousel-item)(?:\s|>)/i.test(lines[nextNonEmpty].trim())
+      ) {
+        continue;
+      }
       break;
     }
   }

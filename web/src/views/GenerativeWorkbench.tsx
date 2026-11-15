@@ -5,6 +5,7 @@ import {
   Activity,
   Check,
   ChevronDown,
+  Clapperboard,
   Code2,
   Copy,
   Download,
@@ -42,6 +43,7 @@ import {
   getOpenUISystemPrompt,
 } from "../lib/openui-library";
 import {
+  editImageWithReferences,
   exportServerConversationMarkdown,
   fetchDiagnostics,
   fetchServerChatPresets,
@@ -49,11 +51,29 @@ import {
   importServerConversations,
   searchServerChat,
   streamChatCompletion,
+  synthesizeSpeech,
   type DiagnosticsReport,
   type ServerChatPreset,
   type ServerSearchHit,
 } from "../api/client";
+import {
+  CHAT_REMIX_EVENT,
+  consumePendingChatRemix,
+  type PendingChatRemix,
+} from "../lib/chatRemixBridge";
+import { dispatchDramaCanvas } from "../lib/dramaCanvasBridge";
 import { FALLBACK_CATALOG_IDS, useModelsCatalog } from "../lib/models";
+import {
+  DEFAULT_IMAGE_MODELS,
+  DEFAULT_TTS_MODELS,
+  extractPromptFallback,
+  extractSpeechFallback,
+  isImageModelId,
+  isTtsModelId,
+  parseImageCommand,
+  resolveSemanticModelRoute,
+  type SemanticRouteLLMResult,
+} from "../lib/model-router";
 import {
   base64ToBlob,
   createUnifiedConversation,
@@ -97,6 +117,24 @@ const FALLBACK_CHAT_MODELS = FALLBACK_CATALOG_IDS.filter(
     !id.includes("transcribe") &&
     !id.includes("whisper")
 );
+
+function formatSingleLinePrompt(
+  text: string,
+  maxLen: number,
+  stripBrackets = false
+): string {
+  let normalized = text.replace(/\s+/g, " ").trim();
+  if (stripBrackets) {
+    normalized = normalized.replace(/[[\]]/g, "");
+  }
+  if (!normalized) {
+    return "";
+  }
+  if (normalized.length <= maxLen) {
+    return normalized;
+  }
+  return `${normalized.slice(0, maxLen).trimEnd()}...`;
+}
 
 function getStoredChatModel(): string {
   try {
@@ -162,85 +200,6 @@ const SLASH_SKILLS: SkillDefinition[] = [
   },
 ];
 
-const DEFAULT_IMAGE_MODELS = [
-  "gpt-image-2.5-sunburst",
-  "gpt-image-2.5-flare",
-  "gpt-image-2.6",
-  "gpt-image-2.5",
-  "gpt-image-2",
-  "gpt-image-1",
-];
-
-export interface ParsedImageCommand {
-  isImageCommand: boolean;
-  prompt: string;
-  model: string;
-  isAuto: boolean;
-}
-
-export function parseImageCommand(
-  rawText: string,
-  candidateImageModels: string[]
-): ParsedImageCommand {
-  const trimmed = rawText.trim();
-  if (trimmed !== "/image" && !trimmed.startsWith("/image ") && !trimmed.startsWith("/image\t")) {
-    return { isImageCommand: false, prompt: "", model: "", isAuto: false };
-  }
-
-  const pool =
-    candidateImageModels && candidateImageModels.length > 0
-      ? candidateImageModels
-      : DEFAULT_IMAGE_MODELS;
-
-  const pickRandomModel = () =>
-    pool[Math.floor(Math.random() * pool.length)] || DEFAULT_IMAGE_MODELS[0];
-
-  const rest = trimmed.slice(6).trim();
-  if (!rest) {
-    return {
-      isImageCommand: true,
-      prompt: "超写实电影级商业摄影，精致的光影构图，8k 高清画质",
-      model: pickRandomModel(),
-      isAuto: true,
-    };
-  }
-
-  const parts = rest.split(/\s+/);
-  const firstWord = parts[0];
-  const remainder = rest.slice(firstWord.length).trim();
-
-  // 1. 显式 auto 模式
-  if (firstWord.toLowerCase() === "auto") {
-    return {
-      isImageCommand: true,
-      prompt: remainder || "超写实电影级商业摄影，精致的光影构图，8k 高清画质",
-      model: pickRandomModel(),
-      isAuto: true,
-    };
-  }
-
-  // 2. 如果首个词匹配已知图像模型名 (如 gpt-image-2.5-sunburst)
-  const matched = pool.find(
-    (m) => m.toLowerCase() === firstWord.toLowerCase()
-  );
-  if (matched && remainder) {
-    return {
-      isImageCommand: true,
-      prompt: remainder,
-      model: matched,
-      isAuto: false,
-    };
-  }
-
-  // 3. 否则整个 rest 都是 prompt，缺省进入 auto 模式自动/随机选择图像模型
-  return {
-    isImageCommand: true,
-    prompt: rest,
-    model: pickRandomModel(),
-    isAuto: true,
-  };
-}
-
 const STARTER_PROMPTS = [
   {
     icon: Activity,
@@ -271,6 +230,206 @@ const OPS_INTENT_RE =
   /(诊断|熔断|封禁|停用|风控|拦截|403|401|429|号池|代理|报错|异常|不可用|失败|为什么挂|挂了|续期|卡密|测活|修复|自愈|健康|banned|expired|failover|waf|cloudflare|sentinel|turnstile|proxy|pool|health)/i;
 const IMAGE_INTENT_RE = /(生图卡|image\s*studio|画一张|生成图片|文生图|生图工作台)/i;
 const OPENUI_INTENT_RE = /(openui|交互卡片|交互式|仪表盘|看板|可视化|饼图|柱状图|折线图)/i;
+
+async function classifySemanticRouteWithLLM(params: {
+  promptText: string;
+  history: StoredChatMessage[];
+  chatModel: string;
+  chatModels: string[];
+  imageModels: string[];
+  audioModels: string[];
+  apiKey?: string;
+  signal?: AbortSignal;
+}): Promise<SemanticRouteLLMResult | null> {
+  const {
+    promptText,
+    history,
+    chatModel,
+    chatModels,
+    imageModels,
+    audioModels,
+    apiKey,
+    signal,
+  } = params;
+
+  const routeAbort = new AbortController();
+  const timeoutId = window.setTimeout(() => routeAbort.abort(), 12000);
+  const onParentAbort = () => routeAbort.abort();
+  signal?.addEventListener("abort", onParentAbort, { once: true });
+
+  const recentContext = history.slice(-6).map((m) => ({
+    role: m.role,
+    content: m.content.slice(0, 500),
+  }));
+
+  try {
+    const raw = await streamChatCompletion({
+      messages: [
+        {
+          role: "system",
+          content: [
+            "You are an intent & modality router. Decide which modality handles the user's latest request given the conversation history.",
+            'Modalities: "image" (generate/draw/redraw/modify an image, portrait, concept art, poster, etc. Note: asking only to write/refine a text prompt without generating an image is "chat"), "audio" (read aloud, TTS, voiceover), "research" (deep research/report), or "chat" (normal Q&A, coding, ops diagnostics, prompt writing).',
+            `Available image models: ${imageModels.slice(0, 8).join(", ")}`,
+            `Available audio models: ${audioModels.slice(0, 6).join(", ")}`,
+            `Available chat models: ${chatModels.slice(0, 10).join(", ")}`,
+            'Reply with ONLY a single-line valid JSON object (no markdown fences): {"modality":"chat|image|audio|research","targetModel":"","needsContextExtraction":false,"imagePrompt":"","reason":"short Chinese reason"}',
+            'If modality is "image", fill "imagePrompt" with a complete, self-contained image generation prompt combining the conversation history and the user\'s latest request/reference.',
+          ].join("\n"),
+        },
+        ...recentContext,
+        {
+          role: "user",
+          content: promptText,
+        },
+      ],
+      model: chatModel,
+      openuiMode: false,
+      apiKey,
+      signal: routeAbort.signal,
+      onDelta: () => {},
+    });
+
+    const trimmed = raw
+      .trim()
+      .replace(/^```(?:json)?\s*\n?/i, "")
+      .replace(/\n?```$/, "")
+      .trim();
+    const jsonMatch = /\{[\s\S]*\}/.exec(trimmed);
+    if (!jsonMatch) return null;
+    const parsed = JSON.parse(jsonMatch[0]) as SemanticRouteLLMResult;
+    if (
+      parsed &&
+      (parsed.modality === "chat" ||
+        parsed.modality === "image" ||
+        parsed.modality === "audio" ||
+        parsed.modality === "research")
+    ) {
+      return parsed;
+    }
+    return null;
+  } catch {
+    return null;
+  } finally {
+    window.clearTimeout(timeoutId);
+    signal?.removeEventListener("abort", onParentAbort);
+  }
+}
+
+async function extractImagePromptFromContext(params: {
+  userRequest: string;
+  history: StoredChatMessage[];
+  chatModel: string;
+  apiKey?: string;
+  signal?: AbortSignal;
+}): Promise<string> {
+  const { userRequest, history, chatModel, apiKey, signal } = params;
+  const recent = history.slice(-8).map((m) => ({
+    role: m.role,
+    content: m.content.slice(0, 2000),
+  }));
+
+  try {
+    const extracted = await streamChatCompletion({
+      messages: [
+        {
+          role: "system",
+          content:
+            "You are an image prompt extractor. Read the conversation history and the user's latest image-generation request, and output ONLY the final, self-contained image generation prompt (preserving all visual subject, clothing, hair, lighting, composition, style, and aspect-ratio details from the latest prompt in context). Output ONLY the prompt text itself—no explanations, no markdown code fences, no quotes, and no refusals.",
+        },
+        ...recent,
+        {
+          role: "user",
+          content: `User request: ${userRequest}\n\nOutput ONLY the final self-contained image generation prompt:`,
+        },
+      ],
+      model: chatModel,
+      openuiMode: false,
+      apiKey,
+      signal,
+      onDelta: () => {
+        // 静默提取提示词
+      },
+    });
+
+    const cleaned = extracted
+      .trim()
+      .replace(/^```[a-zA-Z]*\s*\n?/, "")
+      .replace(/\n?```$/, "")
+      .replace(/^["'“”]+|["'“”]+$/g, "")
+      .trim();
+
+    if (cleaned && cleaned.length >= 8) {
+      return cleaned;
+    }
+  } catch {
+    // 提取失败时回退到本地历史摘要
+  }
+
+  return extractPromptFallback(history, userRequest);
+}
+
+async function extractSpeechTextFromContext(params: {
+  userRequest: string;
+  history: StoredChatMessage[];
+  chatModel: string;
+  apiKey?: string;
+  signal?: AbortSignal;
+}): Promise<string> {
+  const { userRequest, history, chatModel, apiKey, signal } = params;
+  const recent = history.slice(-6).map((m) => ({
+    role: m.role,
+    content: m.content.slice(0, 2000),
+  }));
+
+  try {
+    const extracted = await streamChatCompletion({
+      messages: [
+        {
+          role: "system",
+          content:
+            "You are a text-to-speech script extractor. Read the conversation history and the user's latest request, and output ONLY the exact plain-text passage to be read aloud (without markdown syntax, URLs, code blocks, or commentary). Output ONLY the text to speak.",
+        },
+        ...recent,
+        {
+          role: "user",
+          content: `User request: ${userRequest}\n\nOutput ONLY the plain text to read aloud:`,
+        },
+      ],
+      model: chatModel,
+      openuiMode: false,
+      apiKey,
+      signal,
+      onDelta: () => {
+        // 静默提取朗读文本
+      },
+    });
+
+    const cleaned = extracted.trim();
+    if (cleaned && cleaned.length >= 2) {
+      return cleaned.slice(0, 2000);
+    }
+  } catch {
+    // 回退到本地正文提取
+  }
+
+  return extractSpeechFallback(history, userRequest);
+}
+
+function blobToDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      if (typeof reader.result === "string") {
+        resolve(reader.result);
+      } else {
+        reject(new Error("音频编码失败"));
+      }
+    };
+    reader.onerror = () => reject(new Error("音频读取失败"));
+    reader.readAsDataURL(blob);
+  });
+}
 
 function buildOfflineFallbackContent(
   report: DiagnosticsReport,
@@ -382,8 +541,16 @@ export interface GenerativeWorkbenchProps {
 }
 
 export function GenerativeWorkbench({ themeMode = "dark" }: GenerativeWorkbenchProps): React.ReactElement {
-  const { catalog, imageModels } = useModelsCatalog();
+  const { catalog, imageModels, audioModels } = useModelsCatalog();
   const [model, setModel] = useState<string>(getStoredChatModel);
+  const [autoSwitchEnabled, setAutoSwitchEnabled] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem("ai_web_free_auto_switch_model");
+      return saved === null ? true : saved === "true";
+    } catch {
+      return true;
+    }
+  });
   const [apiKey, setApiKey] = useState<string>("");
   const [input, setInput] = useState<string>("");
   const [messages, setMessages] = useState<StoredChatMessage[]>([]);
@@ -412,6 +579,38 @@ export function GenerativeWorkbench({ themeMode = "dark" }: GenerativeWorkbenchP
   // ─── 重新生成菜单 ──────────────────────────────────────────────────────
   const [retryDropdownMsgId, setRetryDropdownMsgId] = useState<string | null>(null);
 
+  // ─── Chat Remix 参考图状态 ───────────────────────────────────────────────
+  const [pendingRemixImage, setPendingRemixImage] = useState<PendingChatRemix | null>(null);
+  const [remixMode, setRemixMode] = useState<"edit" | "chat">("edit");
+
+  useEffect(() => {
+    const applyRemix = (item: PendingChatRemix) => {
+      setPendingRemixImage(item);
+      setRemixMode("edit");
+      setInput((prev) =>
+        prev.trim()
+          ? prev
+          : `基于这张图进行修改：保持主体构图不变，`,
+      );
+      setTimeout(() => textareaRef.current?.focus(), 60);
+    };
+
+    const initial = consumePendingChatRemix();
+    if (initial) {
+      applyRemix(initial);
+    }
+
+    const onRemixEvent = (e: Event) => {
+      const detail = (e as CustomEvent<PendingChatRemix>).detail;
+      if (detail?.imageUrl) {
+        consumePendingChatRemix();
+        applyRemix(detail);
+      }
+    };
+    window.addEventListener(CHAT_REMIX_EVENT, onRemixEvent);
+    return () => window.removeEventListener(CHAT_REMIX_EVENT, onRemixEvent);
+  }, []);
+
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -436,6 +635,25 @@ export function GenerativeWorkbench({ themeMode = "dark" }: GenerativeWorkbenchP
     const list = imageModels.map((m) => m.id);
     return list.length > 0 ? list : DEFAULT_IMAGE_MODELS;
   }, [imageModels]);
+
+  const availableAudioModels = useMemo(() => {
+    const list = audioModels
+      .map((m) => m.id)
+      .filter((id) => isTtsModelId(id, DEFAULT_TTS_MODELS));
+    return list.length > 0 ? list : DEFAULT_TTS_MODELS;
+  }, [audioModels]);
+
+  const toggleAutoSwitch = () => {
+    setAutoSwitchEnabled((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem("ai_web_free_auto_switch_model", String(next));
+      } catch {
+        // ignore
+      }
+      return next;
+    });
+  };
 
   // 1. 初始化加载预设与会话列表
   useEffect(() => {
@@ -524,10 +742,11 @@ export function GenerativeWorkbench({ themeMode = "dark" }: GenerativeWorkbenchP
     })();
   }, []);
 
-  // 2. 消息变更时自动写回当前会话
+  // 2. 消息变更时自动写回当前会话（跳过流式/路由/生图进行中的临时占位消息）
   useEffect(() => {
     if (!initialLoadDoneRef.current || !activeConvId) return;
     if (messages.length === 0) return;
+    if (messages.some((m) => m.isStreaming)) return;
     const t = window.setTimeout(() => {
       void saveUnifiedConversationMessages(activeConvId, messages);
       setConversations((prev) =>
@@ -849,9 +1068,15 @@ export function GenerativeWorkbench({ themeMode = "dark" }: GenerativeWorkbenchP
   };
 
   // 核心发送函数
-  const handleSendMessage = async (overridePrompt?: string, targetModel = model) => {
-    const promptText = (overridePrompt !== undefined ? overridePrompt : input).trim();
+  const handleSendMessage = async (
+    overridePrompt?: string,
+    targetModel = model,
+    baseMessages?: StoredChatMessage[],
+    hasExplicitModelOverride = false
+  ) => {
+    let promptText = (overridePrompt !== undefined ? overridePrompt : input).trim();
     if (!promptText || isSending) return;
+    const historyMessages = baseMessages ?? messages;
 
     if (!overridePrompt) {
       setInput("");
@@ -885,7 +1110,7 @@ export function GenerativeWorkbench({ themeMode = "dark" }: GenerativeWorkbenchP
         currentConv.title === "新对话" ||
         currentConv.title === "平台运维与诊断" ||
         currentConv.title.endsWith("对话")) &&
-      messages.filter((m) => m.role === "user").length <= 1
+      historyMessages.filter((m) => m.role === "user").length <= 1
     ) {
       const smartTitle = generateSmartTitle(promptText);
       void updateUnifiedConversation(currentConv.id, { title: smartTitle });
@@ -894,9 +1119,205 @@ export function GenerativeWorkbench({ themeMode = "dark" }: GenerativeWorkbenchP
       );
     }
 
-    // ─── 专用图像模型指令调度 (/image [模型] 提示词，缺省 auto 模式) ───────────
-    const imgCmd = parseImageCommand(promptText, availableImageModels);
-    if (imgCmd.isImageCommand) {
+    // ─── Chat Remix 参考图直连处理 ──────────────────────────────────────────
+    const activeRemix = pendingRemixImage;
+    if (activeRemix) {
+      setPendingRemixImage(null);
+      if (remixMode === "edit") {
+        const chosenImageModel =
+          activeRemix.model && availableImageModels.includes(activeRemix.model)
+            ? activeRemix.model
+            : availableImageModels[0] || "gpt-image-2.5-sunburst";
+        const userMessageId = "user-" + Date.now();
+        const assistantId = "assistant-" + (Date.now() + 1);
+        const userDisplayContent = `![Remix 参考图](${activeRemix.imageUrl})\n\n${promptText}`;
+
+        const nextUserMsg: StoredChatMessage = {
+          id: userMessageId,
+          conversationId: currentConvId,
+          role: "user",
+          content: userDisplayContent,
+          openuiMode: false,
+          skill: "image",
+          timestamp: Date.now(),
+        };
+        const nextAssistantMsg: StoredChatMessage = {
+          id: assistantId,
+          conversationId: currentConvId,
+          role: "assistant",
+          content: `🎨 正在基于参考图调用 \`${chosenImageModel}\` 执行 Chat Remix 重绘...`,
+          model: chosenImageModel,
+          openuiMode: false,
+          skill: "image",
+          isStreaming: true,
+          timestamp: Date.now(),
+        };
+
+        const updated = [...historyMessages, nextUserMsg, nextAssistantMsg];
+        setMessages(updated);
+        setIsSending(true);
+        const startTime = Date.now();
+
+        try {
+          const imgResp = await fetch(activeRemix.imageUrl);
+          const imgBlob = await imgResp.blob();
+          const ext = imgBlob.type.includes("jpeg") ? "jpg" : "png";
+          const refFile = new File([imgBlob], `remix-ref.${ext}`, {
+            type: imgBlob.type || "image/png",
+          });
+
+          const res = await editImageWithReferences({
+            prompt: promptText,
+            model: chosenImageModel,
+            size: activeRemix.size || "1024x1024",
+            files: [refFile],
+            apiKey: apiKey.trim() || undefined,
+          });
+
+          const elapsedMs = Date.now() - startTime;
+          const item = res.data?.[0];
+          let imgUrl = item?.url || (item?.b64_json ? `data:image/png;base64,${item.b64_json}` : "");
+          if (!imgUrl) {
+            throw new Error("服务端 Chat Remix 未返回有效图像地址");
+          }
+
+          let finalPersistentUrl = imgUrl;
+          try {
+            const localBlob = item?.b64_json ? base64ToBlob(item.b64_json) || undefined : undefined;
+            const persistedAsset = await saveUnifiedImage(
+              {
+                id: `img-remix-${Date.now()}`,
+                blob: localBlob,
+                remoteUrl: item?.url,
+                prompt: promptText,
+                model: chosenImageModel,
+                size: activeRemix.size || "1024x1024",
+                quality: "hd",
+                mode: "edits",
+                latencyMs: elapsedMs,
+                createdAt: new Date().toLocaleTimeString("zh-CN", { hour12: false }),
+                timestamp: Date.now(),
+              },
+              item?.b64_json,
+            );
+            if (persistedAsset?.url) {
+              finalPersistentUrl = persistedAsset.url;
+            }
+          } catch {
+            // ignore gallery persistence failure
+          }
+
+          const safeImageUrl = finalPersistentUrl.trim();
+          const successMarkdown = [
+            `![Chat Remix 结果](${safeImageUrl})`,
+            "",
+            `✨ **Chat Remix 重绘完成** · \`${chosenImageModel}\` · ${elapsedMs}ms`,
+            `- [在新标签页查看高清原图](${safeImageUrl}) · [前往生图工坊/创作画廊管理](#/image)`,
+          ].join("\n");
+
+          const completedAssistantMsg: StoredChatMessage = {
+            ...nextAssistantMsg,
+            content: successMarkdown,
+            isStreaming: false,
+            latencyMs: elapsedMs,
+          };
+          const finalMessages = [...historyMessages, nextUserMsg, completedAssistantMsg];
+          setMessages(finalMessages);
+          void saveUnifiedConversationMessages(currentConvId, finalMessages);
+        } catch (err: any) {
+          const failedAssistantMsg: StoredChatMessage = {
+            ...nextAssistantMsg,
+            content: `❌ **Chat Remix 重绘失败**\n\n> ${err?.message || String(err)}`,
+            isStreaming: false,
+          };
+          setMessages([...historyMessages, nextUserMsg, failedAssistantMsg]);
+        } finally {
+          setIsSending(false);
+        }
+        return;
+      }
+      // remixMode === "chat": 将参考图上下文附带到文本对话中
+      promptText = `![参考图](${activeRemix.imageUrl})\n\n[原始提示词] ${activeRemix.prompt || "无"}\n\n${promptText}`;
+    }
+
+    // ─── 统一自然语言语义路由（生图 / 语音 / 深度研究 / 显式点名模型） ──────────
+    const routeController = new AbortController();
+    abortRef.current = routeController;
+    const routingMsgId = "routing-" + Date.now();
+    const needsSemanticCheck =
+      autoSwitchEnabled &&
+      !promptText.trim().startsWith("/") &&
+      !hasExplicitModelOverride &&
+      !isImageModelId(targetModel, availableImageModels) &&
+      !isTtsModelId(targetModel, availableAudioModels);
+
+    if (needsSemanticCheck) {
+      const pendingUserMsg: StoredChatMessage = {
+        id: "user-" + Date.now(),
+        conversationId: currentConvId,
+        role: "user",
+        content: promptText,
+        openuiMode: false,
+        timestamp: Date.now(),
+      };
+      const pendingRouteMsg: StoredChatMessage = {
+        id: routingMsgId,
+        conversationId: currentConvId,
+        role: "assistant",
+        content: "🧭 正在理解您的自然语言意图...",
+        model: targetModel,
+        openuiMode: false,
+        isStreaming: true,
+        timestamp: Date.now(),
+      };
+      setMessages([...historyMessages, pendingUserMsg, pendingRouteMsg]);
+      setIsSending(true);
+    }
+
+    const routerChatModel =
+      isImageModelId(targetModel, availableImageModels) ||
+      isTtsModelId(targetModel, availableAudioModels)
+        ? availableModels[0] || "gpt-5-6"
+        : targetModel;
+
+    const route = await resolveSemanticModelRoute({
+      promptText,
+      selectedModel: targetModel,
+      hasExplicitModelOverride,
+      autoSwitchEnabled,
+      history: historyMessages,
+      availableChatModels: availableModels,
+      availableImageModels,
+      availableAudioModels,
+      classifyWithLLM: ({
+        promptText: q,
+        history: h,
+        chatModels,
+        imageModels,
+        audioModels,
+      }) =>
+        classifySemanticRouteWithLLM({
+          promptText: q,
+          history: h,
+          chatModel: routerChatModel,
+          chatModels,
+          imageModels,
+          audioModels,
+          apiKey: apiKey.trim() || undefined,
+          signal: routeController.signal,
+        }),
+    });
+
+    if (routeController.signal.aborted) {
+      setIsSending(false);
+      abortRef.current = null;
+      return;
+    }
+
+    const effectiveChatModel = route.targetModel;
+
+    if (route.modality === "image") {
+      const chosenImageModel = route.targetModel;
       const userMessageId = "user-" + Date.now();
       const assistantId = "assistant-" + (Date.now() + 1);
 
@@ -910,27 +1331,71 @@ export function GenerativeWorkbench({ themeMode = "dark" }: GenerativeWorkbenchP
         timestamp: Date.now(),
       };
 
+      const initialContent = route.needsContextExtraction
+        ? `🧠 正在结合上下文提炼画面描述，并切换至 \`${chosenImageModel}\`...`
+        : `🎨 正在调用 \`${chosenImageModel}\`${
+            route.isAutoImage
+              ? " *(auto 模式)*"
+              : route.switched
+                ? ` *(${route.reason || "自动切换"})*`
+                : ""
+          } 绘制图像...`;
+
       const nextAssistantMsg: StoredChatMessage = {
         id: assistantId,
         conversationId: currentConvId,
         role: "assistant",
-        content: `🎨 **正在调用图像模型** \`${imgCmd.model}\`${imgCmd.isAuto ? " *(auto 模式自动挑选)*" : ""} 为您生成图片...\n\n> **提示词**：${imgCmd.prompt}`,
-        model: imgCmd.model,
+        content: initialContent,
+        model: chosenImageModel,
         openuiMode: false,
         skill: "image",
         isStreaming: true,
         timestamp: Date.now(),
       };
 
-      const updated = [...messages, nextUserMsg, nextAssistantMsg];
+      const updated = [...historyMessages, nextUserMsg, nextAssistantMsg];
       setMessages(updated);
       setIsSending(true);
 
       const startTime = Date.now();
+      const controller = new AbortController();
+      abortRef.current = controller;
+
       try {
+        let finalImagePrompt = route.extractedPrompt || route.cleanedPrompt;
+
+        if (!route.extractedPrompt && route.needsContextExtraction) {
+          const extractionChatModel =
+            isImageModelId(model, availableImageModels) ||
+            isTtsModelId(model, availableAudioModels)
+              ? availableModels[0] || "gpt-5-6"
+              : model;
+          finalImagePrompt = await extractImagePromptFromContext({
+            userRequest: promptText,
+            history: historyMessages,
+            chatModel: extractionChatModel,
+            apiKey: apiKey.trim() || undefined,
+            signal: controller.signal,
+          });
+
+          const extractedPreview = formatSingleLinePrompt(finalImagePrompt, 48);
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === assistantId
+                ? {
+                    ...m,
+                    content: `🎨 正在使用 \`${chosenImageModel}\` 绘制图像${
+                      extractedPreview ? ` · ${extractedPreview}` : "..."
+                    }`,
+                  }
+                : m
+            )
+          );
+        }
+
         const res = await generateImage({
-          prompt: imgCmd.prompt,
-          model: imgCmd.model,
+          prompt: finalImagePrompt,
+          model: chosenImageModel,
           size: "1024x1024",
           quality: "hd",
           apiKey: apiKey.trim() || undefined,
@@ -949,7 +1414,6 @@ export function GenerativeWorkbench({ themeMode = "dark" }: GenerativeWorkbenchP
           throw new Error("服务端生图未返回有效图像地址");
         }
 
-        // ─── 自动将对话生成的图像沉淀入「创作资产/画廊」持久化 ─────────────
         const assetId = `img-chat-${Date.now()}`;
         let localBlob: Blob | undefined;
         if (item?.b64_json) {
@@ -960,9 +1424,9 @@ export function GenerativeWorkbench({ themeMode = "dark" }: GenerativeWorkbenchP
           id: assetId,
           blob: localBlob,
           remoteUrl: item?.url,
-          prompt: imgCmd.prompt,
+          prompt: finalImagePrompt,
           revisedPrompt: item?.revised_prompt,
-          model: imgCmd.model,
+          model: chosenImageModel,
           size: "1024x1024",
           quality: "hd",
           mode: "generations",
@@ -981,36 +1445,44 @@ export function GenerativeWorkbench({ themeMode = "dark" }: GenerativeWorkbenchP
           console.warn("Auto save to gallery asset failed:", saveAssetErr);
         }
 
+        const modelTagSuffix = route.isAutoImage
+          ? " *(auto 模式自动挑选)*"
+          : route.switched
+            ? ` *(${route.reason || "自动切换"})*`
+            : "";
+
+        const safeImageUrl = finalPersistentUrl.trim();
+        const imageAlt =
+          formatSingleLinePrompt(finalImagePrompt, 60, true) || "AI 生成图片";
+
         const successMarkdown = [
-          `![${imgCmd.prompt}](${finalPersistentUrl})`,
+          `![${imageAlt}](${safeImageUrl})`,
           "",
-          `✨ **图像生成成功并已归档至创作资产** (${elapsedMs}ms)`,
-          `- **所用模型**：\`${imgCmd.model}\`${imgCmd.isAuto ? " *(auto 模式自动挑选)*" : ""}`,
-          `- **生图提示词**：${imgCmd.prompt}`,
-          `- **快捷操作**：[在新标签页查看高清原图](${finalPersistentUrl}) · [前往生图工坊/创作画廊管理](#/image)`,
+          `✨ **图像生成完成** · \`${chosenImageModel}\`${modelTagSuffix} · ${elapsedMs}ms`,
+          `- [在新标签页查看高清原图](${safeImageUrl}) · [前往生图工坊/创作画廊管理](#/image)`,
         ].join("\n");
 
         const completedAssistantMsg: StoredChatMessage = {
           ...nextAssistantMsg,
           content: successMarkdown,
+          model: chosenImageModel,
           isStreaming: false,
           latencyMs: elapsedMs,
         };
 
-        const finalMessages = [...messages, nextUserMsg, completedAssistantMsg];
+        const finalMessages = [...historyMessages, nextUserMsg, completedAssistantMsg];
         setMessages(finalMessages);
         if (currentConvId) {
           void saveUnifiedConversationMessages(currentConvId, finalMessages);
           void updateUnifiedConversation(currentConvId, {
             messageCount: finalMessages.length,
-            model: imgCmd.model,
           });
         }
       } catch (err: any) {
         const elapsedMs = Date.now() - startTime;
         const errMsg = err?.message || "图像生成请求异常";
         const failMarkdown = [
-          `❌ **图像生成失败** (${imgCmd.model})`,
+          `❌ **图像生成失败** (${chosenImageModel})`,
           `> 错误信息：${errMsg}`,
           "",
           "提示：您可以点击消息下方的 **重试** 再次尝试，或点击 **换模型** 切换其他图像模型重新生成。",
@@ -1019,16 +1491,139 @@ export function GenerativeWorkbench({ themeMode = "dark" }: GenerativeWorkbenchP
         const failedAssistantMsg: StoredChatMessage = {
           ...nextAssistantMsg,
           content: failMarkdown,
+          model: chosenImageModel,
           isStreaming: false,
           latencyMs: elapsedMs,
         };
 
-        const finalMessages = [...messages, nextUserMsg, failedAssistantMsg];
+        const finalMessages = [...historyMessages, nextUserMsg, failedAssistantMsg];
         setMessages(finalMessages);
         if (currentConvId) {
           void saveUnifiedConversationMessages(currentConvId, finalMessages);
         }
       } finally {
+        abortRef.current = null;
+        setIsSending(false);
+      }
+      return;
+    }
+
+    if (route.modality === "audio") {
+      const chosenAudioModel = route.targetModel;
+      const userMessageId = "user-" + Date.now();
+      const assistantId = "assistant-" + (Date.now() + 1);
+
+      const nextUserMsg: StoredChatMessage = {
+        id: userMessageId,
+        conversationId: currentConvId,
+        role: "user",
+        content: promptText,
+        openuiMode: false,
+        skill: "audio",
+        timestamp: Date.now(),
+      };
+
+      const initialContent = route.needsContextExtraction
+        ? `🎙️ **检测到${route.reason || "语音合成意图"}，正在结合上下文提取文本并切换至语音模型** \`${chosenAudioModel}\`...`
+        : `🎙️ **正在调用语音模型** \`${chosenAudioModel}\`${
+            route.switched ? ` *(${route.reason || "自动切换"})*` : ""
+          } 合成音频...`;
+
+      const nextAssistantMsg: StoredChatMessage = {
+        id: assistantId,
+        conversationId: currentConvId,
+        role: "assistant",
+        content: initialContent,
+        model: chosenAudioModel,
+        openuiMode: false,
+        skill: "audio",
+        isStreaming: true,
+        timestamp: Date.now(),
+      };
+
+      const updated = [...historyMessages, nextUserMsg, nextAssistantMsg];
+      setMessages(updated);
+      setIsSending(true);
+
+      const startTime = Date.now();
+      const controller = new AbortController();
+      abortRef.current = controller;
+
+      try {
+        let speechText = route.cleanedPrompt;
+        if (route.needsContextExtraction) {
+          const extractionChatModel =
+            isImageModelId(model, availableImageModels) ||
+            isTtsModelId(model, availableAudioModels)
+              ? availableModels[0] || "gpt-5-6"
+              : model;
+          speechText = await extractSpeechTextFromContext({
+            userRequest: promptText,
+            history: historyMessages,
+            chatModel: extractionChatModel,
+            apiKey: apiKey.trim() || undefined,
+            signal: controller.signal,
+          });
+        }
+
+        const audioBlob = await synthesizeSpeech(
+          speechText,
+          "zh_female_shuangkuai",
+          1.0,
+          chosenAudioModel
+        );
+        const audioDataUrl = await blobToDataUrl(audioBlob);
+        const elapsedMs = Date.now() - startTime;
+
+        const successMarkdown = [
+          `<audio src="${audioDataUrl}" />`,
+          "",
+          `🔊 **语音合成成功** (${elapsedMs}ms)`,
+          `- **所用模型**：\`${chosenAudioModel}\`${route.switched ? ` *(${route.reason || "自动切换"})*` : ""}`,
+          `- **朗读正文**：${speechText.length > 180 ? `${speechText.slice(0, 180)}...` : speechText}`,
+        ].join("\n");
+
+        const completedAssistantMsg: StoredChatMessage = {
+          ...nextAssistantMsg,
+          content: successMarkdown,
+          model: chosenAudioModel,
+          isStreaming: false,
+          latencyMs: elapsedMs,
+        };
+
+        const finalMessages = [...historyMessages, nextUserMsg, completedAssistantMsg];
+        setMessages(finalMessages);
+        if (currentConvId) {
+          void saveUnifiedConversationMessages(currentConvId, finalMessages);
+          void updateUnifiedConversation(currentConvId, {
+            messageCount: finalMessages.length,
+          });
+        }
+      } catch (err: any) {
+        const elapsedMs = Date.now() - startTime;
+        const errMsg = err?.message || "语音合成请求异常";
+        const failMarkdown = [
+          `❌ **语音合成失败** (${chosenAudioModel})`,
+          `> 错误信息：${errMsg}`,
+          "",
+          "提示：您可以点击消息下方的 **重试** 或 **换模型** 切换其他语音/对话模型。",
+        ].join("\n");
+
+        const failedAssistantMsg: StoredChatMessage = {
+          ...nextAssistantMsg,
+          content: failMarkdown,
+          model: chosenAudioModel,
+          isStreaming: false,
+          latencyMs: elapsedMs,
+        };
+
+        const finalMessages = [...historyMessages, nextUserMsg, failedAssistantMsg];
+        setMessages(finalMessages);
+        if (currentConvId) {
+          void saveUnifiedConversationMessages(currentConvId, finalMessages);
+        }
+      } finally {
+        abortRef.current = null;
         setIsSending(false);
       }
       return;
@@ -1073,14 +1668,14 @@ export function GenerativeWorkbench({ themeMode = "dark" }: GenerativeWorkbenchP
       conversationId: currentConvId,
       role: "assistant",
       content: "",
-      model: targetModel,
+      model: effectiveChatModel,
       openuiMode: sendOpenUIHeader,
       skill: effectiveSkill,
       isStreaming: true,
       timestamp: Date.now(),
     };
 
-    const updatedMessages = [...messages, nextUserMsg, nextAssistantMsg];
+    const updatedMessages = [...historyMessages, nextUserMsg, nextAssistantMsg];
     setMessages(updatedMessages);
     setIsSending(true);
 
@@ -1107,7 +1702,7 @@ export function GenerativeWorkbench({ themeMode = "dark" }: GenerativeWorkbenchP
 
       const userPayload = buildUserPayloadForSkill(promptText, effectiveSkill, liveDiag);
 
-      const historyWindow = messages.slice(-10).map((m) => ({
+      const historyWindow = historyMessages.slice(-10).map((m) => ({
         role: m.role,
         content: m.content,
       }));
@@ -1120,7 +1715,7 @@ export function GenerativeWorkbench({ themeMode = "dark" }: GenerativeWorkbenchP
 
       const finalText = await streamChatCompletion({
         messages: apiMessages,
-        model: targetModel,
+        model: effectiveChatModel,
         openuiMode: sendOpenUIHeader,
         apiKey: apiKey.trim() || undefined,
         signal: controller.signal,
@@ -1158,29 +1753,31 @@ export function GenerativeWorkbench({ themeMode = "dark" }: GenerativeWorkbenchP
         finalRenderedText = `${finalText.trimEnd()}\n\n${diagCardBlock}`;
       }
 
-      setMessages((prev) => {
-        const nextList = prev.map((m) =>
-          m.id === assistantId
-            ? {
-                ...m,
-                content: finalRenderedText,
-                model: targetModel,
-                latencyMs,
-                openuiMode: containsOpenUIDSL(finalRenderedText),
-                isStreaming: false,
-              }
-            : m
-        );
-        // 关键：立即同步写回服务端与本地持久化，确保跨浏览器刷新实时可见
-        if (currentConvId) {
-          void saveUnifiedConversationMessages(currentConvId, nextList);
-          void updateUnifiedConversation(currentConvId, {
-            messageCount: nextList.length,
-            model: targetModel,
-          });
-        }
-        return nextList;
-      });
+      if (!finalRenderedText.trim()) {
+        finalRenderedText =
+          "> ⚠️ 模型本次未返回有效内容，请点击下方 **重试** 或 **换模型** 再试。";
+      }
+
+      const completedAssistantMsg: StoredChatMessage = {
+        ...nextAssistantMsg,
+        content: finalRenderedText,
+        model: effectiveChatModel,
+        latencyMs,
+        openuiMode: containsOpenUIDSL(finalRenderedText),
+        isStreaming: false,
+      };
+      const finalMessages = [...historyMessages, nextUserMsg, completedAssistantMsg];
+
+      // 关键：在 React setState 之外立即同步写回服务端与本地持久化，
+      // 防止用户在等待期间切换页面导致组件卸载、setMessages updater 未执行而丢失回复。
+      if (currentConvId) {
+        void saveUnifiedConversationMessages(currentConvId, finalMessages);
+        void updateUnifiedConversation(currentConvId, {
+          messageCount: finalMessages.length,
+          model: effectiveChatModel,
+        });
+      }
+      setMessages(finalMessages);
     } catch (err: unknown) {
       if (err instanceof DOMException && err.name === "AbortError") {
         setMessages((prev) => {
@@ -1247,22 +1844,35 @@ export function GenerativeWorkbench({ themeMode = "dark" }: GenerativeWorkbenchP
     if (idx === -1) return;
 
     let targetPrompt = "";
+    let userMsgIndex = -1;
     for (let i = idx - 1; i >= 0; i--) {
       if (messages[i].role === "user") {
         targetPrompt = messages[i].content;
+        userMsgIndex = i;
         break;
       }
     }
-    if (!targetPrompt) return;
+    if (!targetPrompt || userMsgIndex === -1) return;
 
-    if (overrideModel && (targetPrompt === "/image" || targetPrompt.startsWith("/image "))) {
+    if (
+      overrideModel &&
+      (targetPrompt === "/image" || targetPrompt.startsWith("/image "))
+    ) {
       const parsed = parseImageCommand(targetPrompt, availableImageModels);
-      targetPrompt = `/image ${overrideModel} ${parsed.prompt}`;
+      targetPrompt = isImageModelId(overrideModel, availableImageModels)
+        ? `/image ${overrideModel} ${parsed.prompt}`
+        : parsed.prompt;
     }
 
-    setMessages(messages.slice(0, idx));
+    const historyBeforeUser = messages.slice(0, userMsgIndex);
+    setMessages(historyBeforeUser);
     setRetryDropdownMsgId(null);
-    void handleSendMessage(targetPrompt, overrideModel || model);
+    void handleSendMessage(
+      targetPrompt,
+      overrideModel || model,
+      historyBeforeUser,
+      Boolean(overrideModel)
+    );
   };
 
   const toggleSource = (id: string) => {
@@ -1583,7 +2193,7 @@ export function GenerativeWorkbench({ themeMode = "dark" }: GenerativeWorkbenchP
               </select>
             </div>
 
-            {/* 模型选择器 */}
+            {/* 模型选择器（支持对话 / 图像 / 语音全模型随时切换） */}
             <div className="flex items-center gap-1 p-input rounded-xl px-2.5 py-1 text-xs">
               <select
                 value={model}
@@ -1598,13 +2208,47 @@ export function GenerativeWorkbench({ themeMode = "dark" }: GenerativeWorkbenchP
                 }}
                 className="bg-transparent z-text focus:outline-none cursor-pointer font-mono-num"
               >
-                {availableModels.map((m) => (
-                  <option key={m} value={m} className="bg-[var(--bg-surface)] text-[var(--text-primary)]">
-                    {m}
-                  </option>
-                ))}
+                <optgroup label="对话模型" className="bg-[var(--bg-surface)] text-[var(--text-primary)]">
+                  {availableModels.map((m) => (
+                    <option key={m} value={m} className="bg-[var(--bg-surface)] text-[var(--text-primary)]">
+                      {m}
+                    </option>
+                  ))}
+                </optgroup>
+                <optgroup label="图像模型" className="bg-[var(--bg-surface)] text-[var(--text-primary)]">
+                  {availableImageModels.map((m) => (
+                    <option key={m} value={m} className="bg-[var(--bg-surface)] text-[var(--text-primary)]">
+                      {m}
+                    </option>
+                  ))}
+                </optgroup>
+                <optgroup label="语音合成模型" className="bg-[var(--bg-surface)] text-[var(--text-primary)]">
+                  {availableAudioModels.map((m) => (
+                    <option key={m} value={m} className="bg-[var(--bg-surface)] text-[var(--text-primary)]">
+                      {m}
+                    </option>
+                  ))}
+                </optgroup>
               </select>
             </div>
+
+            {/* 上下文自动切模开关 */}
+            <button
+              onClick={toggleAutoSwitch}
+              className={`hidden sm:flex items-center gap-1 px-2.5 py-1 rounded-xl border text-xs transition cursor-pointer ${
+                autoSwitchEnabled
+                  ? "border-indigo-500/40 bg-indigo-500/10 text-indigo-500 font-medium"
+                  : "z-border z-surface z-text-muted hover:z-text"
+              }`}
+              title={
+                autoSwitchEnabled
+                  ? "已开启：根据上下文意图自动切换图像 / 语音 / 研究 / 指定模型（点击关闭）"
+                  : "已关闭：严格使用顶部选定模型（点击开启自动切模）"
+              }
+            >
+              <Sparkles size={12} />
+              <span>自动切模</span>
+            </button>
 
             {/* 导出菜单 */}
             <button
@@ -1703,7 +2347,25 @@ export function GenerativeWorkbench({ themeMode = "dark" }: GenerativeWorkbenchP
                   )}
 
                   {/* OpenUI DSL 混合渲染 */}
-                  {msg.openuiMode ? (
+                  {msg.skill === "image" && msg.isStreaming ? (
+                    <div className="space-y-3">
+                      <div className="flex items-center gap-2 text-xs z-text-sec">
+                        <Sparkles size={14} className="text-indigo-500 animate-spin" />
+                        <span className="font-medium z-text">
+                          {msg.content.replace(/[`*🧠🎨]/g, "").trim() || "正在绘制图像..."}
+                        </span>
+                      </div>
+                      <div className="w-60 sm:w-72 aspect-square rounded-2xl border z-border bg-gradient-to-br from-indigo-500/10 via-[var(--bg-muted)] to-purple-500/10 animate-pulse flex flex-col items-center justify-center gap-2.5 p-4 text-center">
+                        <div className="w-10 h-10 rounded-xl bg-indigo-500/15 text-indigo-500 flex items-center justify-center">
+                          <ImagePlus size={20} className="animate-bounce" />
+                        </div>
+                        <div className="text-xs font-medium z-text">正在构图渲染缩略图</div>
+                        <div className="text-[11px] z-text-muted font-mono-num">
+                          {msg.model || "image-model"}
+                        </div>
+                      </div>
+                    </div>
+                  ) : msg.openuiMode ? (
                     <div className="space-y-3">
                       {splitHybridSegments(msg.content).map((seg, idx) => {
                         if (seg.type === "markdown") {
@@ -1803,19 +2465,43 @@ export function GenerativeWorkbench({ themeMode = "dark" }: GenerativeWorkbenchP
                           </button>
 
                           {retryDropdownMsgId === msg.id && (
-                            <div className="absolute left-0 bottom-6 z-20 w-48 p-card rounded-xl shadow-xl py-1 text-xs border z-border max-h-56 overflow-y-auto">
-                              {(msg.skill === "image" ? availableImageModels : availableModels).map((m) => (
-                                <button
-                                  key={m}
-                                  onClick={() => handleRegenerate(msg.id, m)}
-                                  className={`w-full text-left px-3 py-1.5 hover:bg-[var(--bg-surface-hover)] font-mono-num truncate cursor-pointer ${
-                                    msg.model === m
-                                      ? "text-indigo-500 font-semibold"
-                                      : "z-text"
-                                  }`}
-                                >
-                                  {m}
-                                </button>
+                            <div className="absolute left-0 bottom-6 z-20 w-52 p-card rounded-xl shadow-xl py-1 text-xs border z-border max-h-64 overflow-y-auto">
+                              {(msg.skill === "image"
+                                ? [
+                                    { label: "图像模型", list: availableImageModels },
+                                    { label: "对话模型", list: availableModels },
+                                    { label: "语音模型", list: availableAudioModels },
+                                  ]
+                                : msg.skill === "audio"
+                                  ? [
+                                      { label: "语音模型", list: availableAudioModels },
+                                      { label: "对话模型", list: availableModels },
+                                      { label: "图像模型", list: availableImageModels },
+                                    ]
+                                  : [
+                                      { label: "对话模型", list: availableModels },
+                                      { label: "图像模型", list: availableImageModels },
+                                      { label: "语音模型", list: availableAudioModels },
+                                    ]
+                              ).map((group) => (
+                                <div key={group.label}>
+                                  <div className="px-3 py-1 text-[10px] font-semibold uppercase tracking-wider z-text-muted border-t first:border-t-0 z-border">
+                                    {group.label}
+                                  </div>
+                                  {group.list.map((m) => (
+                                    <button
+                                      key={m}
+                                      onClick={() => handleRegenerate(msg.id, m)}
+                                      className={`w-full text-left px-3 py-1.5 hover:bg-[var(--bg-surface-hover)] font-mono-num truncate cursor-pointer ${
+                                        msg.model === m
+                                          ? "text-indigo-500 font-semibold"
+                                          : "z-text"
+                                      }`}
+                                    >
+                                      {m}
+                                    </button>
+                                  ))}
+                                </div>
                               ))}
                             </div>
                           )}
@@ -1831,6 +2517,26 @@ export function GenerativeWorkbench({ themeMode = "dark" }: GenerativeWorkbenchP
                         >
                           <Code2 size={13} />
                           <span>{msg.showSource ? "显示组件" : "源码"}</span>
+                        </button>
+                      )}
+
+                      {/* 发送到短剧画布作为剧本灵感或分镜台词 */}
+                      {!msg.isStreaming && msg.content.trim() && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            dispatchDramaCanvas({
+                              type: "script",
+                              title: msg.content.trim().split("\n")[0].slice(0, 22) || "对话工坊剧本",
+                              text: msg.content,
+                              sourceView: "chat",
+                            })
+                          }
+                          className="flex items-center gap-1 text-amber-600 dark:text-amber-400 hover:bg-amber-500/10 p-1 px-1.5 rounded-lg transition cursor-pointer"
+                          title="将此段对话直接推送到短剧无限画布剧本节点"
+                        >
+                          <Clapperboard size={13} />
+                          <span>发往短剧画布</span>
                         </button>
                       )}
                     </div>
@@ -1904,6 +2610,59 @@ export function GenerativeWorkbench({ themeMode = "dark" }: GenerativeWorkbenchP
                   </button>
                 );
               })}
+            </div>
+          )}
+
+          {/* Chat Remix 参考图悬浮条 */}
+          {pendingRemixImage && (
+            <div className="mb-2 p-2.5 rounded-xl border border-indigo-500/30 bg-indigo-500/10 flex items-center gap-3 text-xs">
+              <img
+                src={pendingRemixImage.imageUrl}
+                alt="Remix 参考图"
+                className="w-12 h-12 rounded-lg object-cover border z-border shrink-0 bg-black/10"
+              />
+              <div className="flex-1 min-w-0 space-y-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-semibold text-indigo-600 dark:text-indigo-400">
+                    Chat Remix 参考图已就绪
+                  </span>
+                  <div className="inline-flex rounded-md border z-border overflow-hidden text-[11px]">
+                    <button
+                      type="button"
+                      onClick={() => setRemixMode("edit")}
+                      className={`px-2 py-0.5 transition cursor-pointer ${
+                        remixMode === "edit"
+                          ? "bg-indigo-600 text-white font-medium"
+                          : "z-surface z-text-muted hover:z-text"
+                      }`}
+                    >
+                      🎨 图生图重绘
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setRemixMode("chat")}
+                      className={`px-2 py-0.5 transition cursor-pointer ${
+                        remixMode === "chat"
+                          ? "bg-indigo-600 text-white font-medium"
+                          : "z-surface z-text-muted hover:z-text"
+                      }`}
+                    >
+                      💬 对话讨论
+                    </button>
+                  </div>
+                </div>
+                <p className="z-text-muted truncate" title={pendingRemixImage.prompt}>
+                  原 Prompt：{pendingRemixImage.prompt || "（无）"}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPendingRemixImage(null)}
+                className="p-1 rounded-lg hover:bg-black/10 z-text-muted hover:z-text cursor-pointer"
+                title="移除 Remix 参考图"
+              >
+                <X size={14} />
+              </button>
             </div>
           )}
 

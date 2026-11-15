@@ -25,11 +25,17 @@ import {
   Layers,
   History,
   Copy,
+  Clapperboard,
   ExternalLink,
+  X,
 } from "lucide-react";
+import { PromptChatAssistant } from "../components/PromptChatAssistant";
+import { dispatchDramaCanvas } from "../lib/dramaCanvasBridge";
 
 export function TTSStudio(): React.JSX.Element {
   const [voices, setVoices] = useState<VoiceDescriptor[]>([]);
+  const [loadingVoices, setLoadingVoices] = useState(false);
+  const [voiceLoadError, setVoiceLoadError] = useState<string | null>(null);
   const [selectedVoice, setSelectedVoice] = useState<string>("zh-CN-XiaoxiaoNeural");
   const [inputText, setInputText] = useState<string>(
     "注意看，眼前这个女人叫小美，就在刚刚，她发现了整个控制台里隐藏的秘密...",
@@ -40,7 +46,9 @@ export function TTSStudio(): React.JSX.Element {
 
   const [synthesizing, setSynthesizing] = useState<boolean>(false);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
+  const audioUrlRef = useRef<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const generationControllerRef = useRef<AbortController | null>(null);
 
   // 历史配音列表
   const [historyList, setHistoryList] = useState<AudioHistoryItem[]>([]);
@@ -49,6 +57,9 @@ export function TTSStudio(): React.JSX.Element {
   // 音色试听状态
   const [auditioningVoice, setAuditioningVoice] = useState<string | null>(null);
   const auditionAudioRef = useRef<HTMLAudioElement | null>(null);
+  const auditionControllerRef = useRef<AbortController | null>(null);
+  const auditionUrlRef = useRef<string | null>(null);
+  const [visibleVoiceLimit, setVisibleVoiceLimit] = useState(24);
 
   // 声音设计弹窗状态
   const [showDesignModal, setShowDesignModal] = useState<boolean>(false);
@@ -73,7 +84,16 @@ export function TTSStudio(): React.JSX.Element {
     loadHistory();
   }, []);
 
+  useEffect(() => () => {
+    generationControllerRef.current?.abort();
+    auditionControllerRef.current?.abort();
+    if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current);
+    if (auditionUrlRef.current) URL.revokeObjectURL(auditionUrlRef.current);
+  }, []);
+
   const loadVoices = async () => {
+    setLoadingVoices(true);
+    setVoiceLoadError(null);
     try {
       const res = await fetchVoices();
       const list = res.voices || [];
@@ -82,7 +102,9 @@ export function TTSStudio(): React.JSX.Element {
         setSelectedVoice(list[0].id);
       }
     } catch (err: any) {
-      console.error("Load voices failed", err);
+      setVoiceLoadError(err.message || "音色列表加载失败，请检查网关连接后重试。");
+    } finally {
+      setLoadingVoices(false);
     }
   };
 
@@ -97,14 +119,17 @@ export function TTSStudio(): React.JSX.Element {
 
   const handleSynthesize = async () => {
     if (!inputText.trim()) return;
+    generationControllerRef.current?.abort();
+    const controller = new AbortController();
+    generationControllerRef.current = controller;
     setSynthesizing(true);
     setErrorMsg(null);
     try {
-      const blob = await synthesizeSpeech(inputText, selectedVoice, speed);
+      const blob = await synthesizeSpeech(inputText, selectedVoice, speed, "tts-1", controller.signal);
+      if (controller.signal.aborted) return;
       const url = URL.createObjectURL(blob);
-      if (audioUrl) {
-        URL.revokeObjectURL(audioUrl);
-      }
+      if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current);
+      audioUrlRef.current = url;
       setAudioUrl(url);
       setIsPlaying(true);
       setTimeout(() => {
@@ -114,35 +139,53 @@ export function TTSStudio(): React.JSX.Element {
       }, 100);
       loadHistory();
     } catch (err: any) {
-      setErrorMsg(err.message || "语音合成失败");
+      if (err.name !== "AbortError") setErrorMsg(err.message || "语音合成失败");
     } finally {
-      setSynthesizing(false);
+      if (generationControllerRef.current === controller) {
+        generationControllerRef.current = null;
+        setSynthesizing(false);
+      }
     }
   };
+
+  const cancelSynthesis = () => generationControllerRef.current?.abort();
 
   // 一键试听指定音色的 sampleText
   const handleAudition = async (v: VoiceDescriptor, e: React.MouseEvent) => {
     e.stopPropagation();
     if (auditioningVoice === v.id) {
+      auditionControllerRef.current?.abort();
       if (auditionAudioRef.current) {
         auditionAudioRef.current.pause();
+        auditionAudioRef.current.removeAttribute("src");
+        auditionAudioRef.current.load();
       }
+      if (auditionUrlRef.current) URL.revokeObjectURL(auditionUrlRef.current);
+      auditionUrlRef.current = null;
+      auditionControllerRef.current = null;
       setAuditioningVoice(null);
       return;
     }
 
+    auditionControllerRef.current?.abort();
+    if (auditionUrlRef.current) URL.revokeObjectURL(auditionUrlRef.current);
+    auditionAudioRef.current?.pause();
+    const controller = new AbortController();
+    auditionControllerRef.current = controller;
     setAuditioningVoice(v.id);
     try {
       const sampleText = v.sample_text || `你好，我是${v.name}，很高兴为你提供智能语音合成。`;
-      const blob = await synthesizeSpeech(sampleText, v.id, 1.0);
+      const blob = await synthesizeSpeech(sampleText, v.id, 1.0, "tts-1", controller.signal);
+      if (controller.signal.aborted) return;
       const sampleUrl = URL.createObjectURL(blob);
+      auditionUrlRef.current = sampleUrl;
       if (auditionAudioRef.current) {
         auditionAudioRef.current.src = sampleUrl;
-        auditionAudioRef.current.play().catch(() => {});
+        await auditionAudioRef.current.play();
       }
     } catch (err: any) {
-      setErrorMsg(`试听失败: ${err.message || "音色服务异常"}`);
-      setAuditioningVoice(null);
+      if (err.name !== "AbortError") setErrorMsg(`试听失败: ${err.message || "音色服务异常"}`);
+      if (auditionControllerRef.current === controller) setAuditioningVoice(null);
     }
   };
 
@@ -197,7 +240,7 @@ export function TTSStudio(): React.JSX.Element {
     }
   };
 
-  const categories = ["全部", "影视解说", "特色搞怪", "地域方言", "自然情感", "外语英语"];
+  const categories = ["全部", "影视解说", "特色搞怪", "地域方言", "情感生活", "自然情感", "外语英语"];
 
   const filteredVoices = voices.filter((v) => {
     if (activeCategory !== "全部" && v.category !== activeCategory) {
@@ -213,6 +256,7 @@ export function TTSStudio(): React.JSX.Element {
     }
     return true;
   });
+  const visibleVoices = filteredVoices.slice(0, visibleVoiceLimit);
 
   const presetLines = [
     {
@@ -263,7 +307,7 @@ export function TTSStudio(): React.JSX.Element {
               微软 Edge-TTS (免密无限制)
             </span>
             <span className="px-2.5 py-0.5 text-xs font-medium rounded-full bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20">
-              剪映 200+ 热门爆款音色
+              剪映音色库
             </span>
           </div>
           <p className="text-sm z-text-muted mt-1">
@@ -291,9 +335,10 @@ export function TTSStudio(): React.JSX.Element {
               loadVoices();
               loadHistory();
             }}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md border z-border hover:bg-muted/50 transition-colors z-text-muted"
+            disabled={loadingVoices}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md border z-border hover:bg-muted/50 transition-colors z-text-muted disabled:opacity-50"
           >
-            <RefreshCw className="w-3.5 h-3.5" />
+            <RefreshCw className={`w-3.5 h-3.5 ${loadingVoices ? "animate-spin" : ""}`} />
             刷新
           </button>
         </div>
@@ -332,12 +377,27 @@ export function TTSStudio(): React.JSX.Element {
         {/* 左侧：输入与播放控制区 */}
         <div className="lg:col-span-5 space-y-4">
           <div className="p-card rounded-xl border z-border p-4 shadow-sm space-y-3">
-            <div className="flex items-center justify-between text-xs z-text-muted">
+            <div className="flex flex-wrap items-center justify-between gap-2 text-xs z-text-muted">
               <span className="font-semibold z-text flex items-center gap-1.5">
                 <Sliders className="w-4 h-4 text-primary" />
                 配音文本输入
               </span>
-              <span>{inputText.length} 字符（支持标点智能切片流式拼接）</span>
+              <div className="flex items-center gap-2">
+                <span>{inputText.length} 字符</span>
+                {inputText && (
+                  <button type="button" onClick={() => setInputText("")} title="清空文案" className="p-1 rounded hover:bg-muted z-text-muted">
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
+                <PromptChatAssistant
+                  studio="配音工坊"
+                  targetLabel="配音文案"
+                  targetKey="tts:script"
+                  value={inputText}
+                  onApply={setInputText}
+                  context={`当前音色：${selectedVoice}；语速：${speed}x`}
+                />
+              </div>
             </div>
 
             <textarea
@@ -347,7 +407,6 @@ export function TTSStudio(): React.JSX.Element {
               rows={7}
               className="w-full text-xs rounded-lg border z-border p-input p-3 focus:outline-none focus:ring-1 focus:ring-primary resize-none font-sans leading-relaxed z-text"
             />
-
             <div className="space-y-2 pt-2 border-t z-border">
               <div className="flex items-center justify-between text-xs">
                 <span className="z-text-muted">语速调节 ({speed}x)</span>
@@ -364,41 +423,74 @@ export function TTSStudio(): React.JSX.Element {
               />
             </div>
 
+            <div className="flex gap-2">
             <button
               onClick={handleSynthesize}
               disabled={synthesizing || !inputText.trim()}
-              className="w-full py-2.5 px-4 rounded-lg bg-primary text-primary-foreground font-medium text-sm hover:bg-primary/90 transition-all flex items-center justify-center gap-2 shadow disabled:opacity-50 disabled:cursor-not-allowed"
+              className="flex-1 py-2.5 px-4 rounded-lg bg-primary text-primary-foreground font-medium text-sm hover:bg-primary/90 transition-all flex items-center justify-center gap-2 shadow disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {synthesizing ? (
-                <>
-                  <RefreshCw className="w-4 h-4 animate-spin" />
-                  正在调用 Edge-TTS / 剪映并发切片合成...
-                </>
+                <><RefreshCw className="w-4 h-4 animate-spin" />正在合成...</>
               ) : (
-                <>
-                  <Volume2 className="w-4 h-4" />
-                  立即生成配音音频
-                </>
+                <><Volume2 className="w-4 h-4" />生成配音</>
               )}
             </button>
+            {synthesizing && (
+              <button type="button" onClick={cancelSynthesis} className="px-3 rounded-lg border z-border text-xs z-text-muted hover:bg-muted/50">
+                取消
+              </button>
+            )}
+            </div>
           </div>
 
           {/* 音频试听播放卡片 */}
           {audioUrl && (
             <div className="p-card rounded-xl border border-primary/30 p-4 shadow-sm space-y-3 bg-primary/5">
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between gap-2">
                 <span className="text-xs font-medium text-primary flex items-center gap-1.5">
                   <AudioWaveform className="w-4 h-4" />
                   当前合成音频就绪
                 </span>
-                <a
-                  href={audioUrl}
-                  download={`tts_${selectedVoice}_${Date.now()}.mp3`}
-                  className="flex items-center gap-1 text-xs text-primary hover:underline font-medium"
-                >
-                  <Download className="w-3.5 h-3.5" />
-                  下载 MP3
-                </a>
+                <div className="flex items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      let stableAudioUrl = audioUrl;
+                      if (stableAudioUrl.startsWith("blob:")) {
+                        try {
+                          const blob = await fetch(stableAudioUrl).then((r) => r.blob());
+                          stableAudioUrl = await new Promise<string>((resolve) => {
+                            const reader = new FileReader();
+                            reader.onloadend = () => resolve(typeof reader.result === "string" ? reader.result : audioUrl);
+                            reader.readAsDataURL(blob);
+                          });
+                        } catch {
+                          /* retain */
+                        }
+                      }
+                      dispatchDramaCanvas({
+                        type: "audio",
+                        title: inputText.slice(0, 18) || "配音工坊音频",
+                        text: inputText,
+                        audioUrl: stableAudioUrl,
+                        voiceId: selectedVoice,
+                        sourceView: "tts",
+                      });
+                    }}
+                    className="flex items-center gap-1 text-xs text-amber-600 dark:text-amber-400 hover:underline font-medium"
+                  >
+                    <Clapperboard className="w-3.5 h-3.5" />
+                    发送到短剧画布
+                  </button>
+                  <a
+                    href={audioUrl}
+                    download={`tts_${selectedVoice}_${Date.now()}.mp3`}
+                    className="flex items-center gap-1 text-xs text-primary hover:underline font-medium"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    下载 MP3
+                  </a>
+                </div>
               </div>
               <audio
                 ref={audioRef}
@@ -516,9 +608,24 @@ export function TTSStudio(): React.JSX.Element {
               ))}
             </div>
 
+            {voiceLoadError && (
+              <div role="alert" className="flex items-center justify-between gap-3 rounded-md border border-destructive/20 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+                <span>音色列表加载失败：{voiceLoadError}</span>
+                <button type="button" onClick={loadVoices} disabled={loadingVoices} className="shrink-0 underline disabled:opacity-50">
+                  重试
+                </button>
+              </div>
+            )}
+            {loadingVoices && voices.length === 0 && (
+              <p className="py-6 text-center text-xs z-text-muted">正在加载音色...</p>
+            )}
+            {!loadingVoices && !voiceLoadError && filteredVoices.length === 0 && (
+              <p className="py-6 text-center text-xs z-text-muted">没有匹配的音色</p>
+            )}
+
             {/* 音色卡片列表 */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 max-h-[500px] overflow-y-auto pr-1">
-              {filteredVoices.map((v) => {
+              {visibleVoices.map((v) => {
                 const isSelected = selectedVoice === v.id;
                 const isAuditioning = auditioningVoice === v.id;
                 return (
@@ -530,6 +637,7 @@ export function TTSStudio(): React.JSX.Element {
                         ? "border-primary bg-primary/5 ring-1 ring-primary shadow-sm"
                         : "z-border hover:border-primary/40 hover:bg-muted/30"
                     }`}
+                    style={{ contentVisibility: "auto", containIntrinsicSize: "150px" }}
                   >
                     <div>
                       <div className="flex items-start justify-between gap-2">
@@ -601,6 +709,11 @@ export function TTSStudio(): React.JSX.Element {
                 );
               })}
             </div>
+            {visibleVoices.length < filteredVoices.length && (
+              <button type="button" onClick={() => setVisibleVoiceLimit((limit) => limit + 24)} className="w-full py-2 text-xs z-text-muted hover:z-text border z-border rounded-md">
+                加载更多音色（{filteredVoices.length - visibleVoices.length}）
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -624,7 +737,17 @@ export function TTSStudio(): React.JSX.Element {
             </p>
 
             <div className="space-y-1.5">
-              <label className="text-xs font-medium z-text">音色特征 Prompt 描述</label>
+              <div className="flex items-center justify-between gap-2">
+                <label className="text-xs font-medium z-text">音色特征 Prompt 描述</label>
+                <PromptChatAssistant
+                  studio="声音设计"
+                  targetLabel="音色描述"
+                  targetKey="tts:voice-design"
+                  value={designPrompt}
+                  onApply={setDesignPrompt}
+                  context="请润色对音色的自然语言描述，突出性别、年龄感、音域、音色质感、语速和情绪。"
+                />
+              </div>
               <textarea
                 value={designPrompt}
                 onChange={(e) => setDesignPrompt(e.target.value)}

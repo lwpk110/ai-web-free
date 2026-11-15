@@ -153,3 +153,19 @@ type ProviderAccountRecord struct {
 	CreatedAt   time.Time `gorm:"index" json:"created_at"`
 	UpdatedAt   time.Time `gorm:"index" json:"updated_at"`
 }
+
+// DramaProjectRecord 短剧工坊无限画布多工程持久化模型
+type DramaProjectRecord struct {
+	ID            string    `gorm:"primaryKey;size:64" json:"id"`
+	Title         string    `gorm:"size:255;index" json:"title"`
+	Genre         string    `gorm:"size:64" json:"genre"`
+	AspectRatio   string    `gorm:"size:16;default:'9:16'" json:"aspect_ratio"`
+	StylePreset   string    `gorm:"size:64" json:"style_preset"`
+	RoutingPolicy string    `gorm:"size:32;default:'free_first'" json:"routing_policy"`
+	Outline       string    `gorm:"type:text" json:"outline"`
+	GraphJSON     string    `gorm:"type:text" json:"graph_json"`
+	Status        string    `gorm:"size:32;default:'draft'" json:"status"`
+	ShotCount     int       `gorm:"default:0" json:"shot_count"`
+	CreatedAt     time.Time `gorm:"index" json:"created_at"`
+	UpdatedAt     time.Time `gorm:"index" json:"updated_at"`
+}

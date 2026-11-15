@@ -17,6 +17,7 @@ import {
   KeyRound,
   ExternalLink,
   Sparkles,
+  Pencil,
 } from "lucide-react";
 import {
   cancelKamiLogin,
@@ -53,7 +54,7 @@ import { seedModelsCatalogFromSlugs } from "../lib/models";
 const IMPORT_PLACEHOLDERS: Record<string, string> = {
   cookie:
     "每行一个账号凭据，支持纯 Cookie 内容：\ndatr=...; hatch_sess=...; ps_l=0\n\n或附带账号标识（邮箱/备注）：\nuser@example.com----datr=...; hatch_sess=...\n\n导入后将直接激活号池并持久化。",
-  kami: "每行一条账号密码，格式: 手机号或邮箱----密码\n例如: user@example.com----MyPassword123\n支持在号池中一键启动无头浏览器自动化登录并提取 Cookie",
+  kami: "每行一条卡密，支持 ---- / | / 空格 / Tab 分隔，自动识别 邮箱、密码、2FA密钥、Access Token (eyJ...) 与 Refresh Token (rt_...)，不限字段顺序\n例如: user@example.com----MyPassword123----JBSWY3DPEHPK3PXP\n或带 at: user@example.com----eyJhbGci...----MyPassword123----JBSWY3DPEHPK3PXP",
   sub2api_json:
     '粘贴 Sub2API 标准导出 JSON（包含 "type": "sub2api-data" 与 "accounts" 数组）',
   access_token: "每行一条 Access Token (eyJ...)，可选携带 account_id",
@@ -109,6 +110,8 @@ export const PoolConsole: React.FC<{
   const [probingAll, setProbingAll] = useState(false);
   const [loggingInKami, setLoggingInKami] = useState(false);
   const [cancellingQueue, setCancellingQueue] = useState(false);
+  const [cancellingRenewQueue, setCancellingRenewQueue] = useState(false);
+  const [cancellingSelected, setCancellingSelected] = useState(false);
   const [loginTask, setLoginTask] = useState<KamiLoginTask | null>(null);
   const [probeTask, setProbeTask] = useState<ProbeTask | null>(null);
   const [expandLoginDetails, setExpandLoginDetails] = useState(false);
@@ -137,6 +140,11 @@ export const PoolConsole: React.FC<{
   const [oauthCookieInput, setOauthCookieInput] = useState("");
   const [oauthSubmitting, setOauthSubmitting] = useState(false);
   const [extractingChrome, setExtractingChrome] = useState(false);
+  const [browserLoggingIn, setBrowserLoggingIn] = useState(false);
+  const [editingCookieAccount, setEditingCookieAccount] = useState<AccountView | null>(null);
+  const [editCookieValue, setEditCookieValue] = useState("");
+  const [loadingEditCookie, setLoadingEditCookie] = useState(false);
+  const [savingEditCookie, setSavingEditCookie] = useState(false);
   const [importFormat, setImportFormat] = useState("kami");
   const [importText, setImportText] = useState("");
   const [generateCount, setGenerateCount] = useState(10);
@@ -528,11 +536,23 @@ export const PoolConsole: React.FC<{
 
   const handleCancelQueuedAccount = async (acc: AccountView) => {
     setActionLoadingKey(`${acc.id}:cancel`);
+    const isRenewQueued =
+      acc.active_action === "renew" ||
+      (!acc.active_action && acc.renew_state === "queued");
     try {
-      const res = await cancelKamiLogin(activeProvider, {
-        task_id: acc.action_task_id || loginTask?.id,
-        account_id: acc.id,
-      });
+      const res = await cancelKamiLogin(
+        activeProvider,
+        isRenewQueued
+          ? {
+              account_id: acc.id,
+              queue: "renew",
+            }
+          : {
+              task_id: acc.action_task_id || loginTask?.id,
+              account_id: acc.id,
+              queue: "login",
+            }
+      );
       if (res.task !== undefined) {
         setLoginTask(res.task || null);
       }
@@ -548,6 +568,29 @@ export const PoolConsole: React.FC<{
       });
     } finally {
       setActionLoadingKey(null);
+    }
+  };
+
+  const handleCancelRenewQueue = async () => {
+    if (!workerStats || workerStats.queue_length <= 0) return;
+    setCancellingRenewQueue(true);
+    try {
+      const res = await cancelKamiLogin(activeProvider, {
+        cancel_all: true,
+        queue: "renew",
+      });
+      setNotice({
+        type: "info",
+        text: `已取消剩余 ${res.cancelled} 个自动续期排队账号`,
+      });
+      await loadData(true);
+    } catch (e: any) {
+      setNotice({
+        type: "error",
+        text: `取消自动续期排队失败: ${e?.message || "未知错误"}`,
+      });
+    } finally {
+      setCancellingRenewQueue(false);
     }
   };
 
@@ -600,6 +643,22 @@ export const PoolConsole: React.FC<{
     (acc) => acc.has_kami_credentials && acc.status !== "disabled"
   );
   const selectedCount = selectedAccountIds.size;
+  const selectedQueuedAccounts = useMemo(
+    () =>
+      accounts.filter((acc) => {
+        if (!selectedAccountIds.has(acc.id)) return false;
+        const isQueued =
+          acc.action_phase === "queued" ||
+          (!acc.active_action && acc.renew_state === "queued");
+        return (
+          isQueued &&
+          (acc.active_action === "login" ||
+            acc.active_action === "renew" ||
+            acc.renew_state === "queued")
+        );
+      }),
+    [accounts, selectedAccountIds]
+  );
   const loginTaskActive = Boolean(
     loginTask && (loginTask.status === "queued" || loginTask.status === "running")
   );
@@ -680,6 +739,32 @@ export const PoolConsole: React.FC<{
     }
   };
 
+  const handleCancelSelectedQueued = async () => {
+    if (!selectedQueuedAccounts.length) return;
+    setCancellingSelected(true);
+    try {
+      const res = await cancelKamiLogin(activeProvider, {
+        account_ids: selectedQueuedAccounts.map((acc) => acc.id),
+      });
+      if (res.task !== undefined) {
+        setLoginTask(res.task || null);
+      }
+      setSelectedAccountIds(new Set());
+      setNotice({
+        type: "info",
+        text: `已批量取消 ${res.cancelled} 个账号的排队等待`,
+      });
+      await loadData(true);
+    } catch (e: any) {
+      setNotice({
+        type: "error",
+        text: `批量取消排队失败: ${e?.message || "未知错误"}`,
+      });
+    } finally {
+      setCancellingSelected(false);
+    }
+  };
+
   const handleBulkProxyUpdate = async () => {
     const ids = [...selectedAccountIds];
     if (!ids.length) return;
@@ -750,6 +835,13 @@ export const PoolConsole: React.FC<{
       setNotice({ type: "error", text: "请粘贴登录成功后的完整 Cookie 内容" });
       return;
     }
+    if (activeProvider === "meta_muse" && !trimmed.includes("hatch_sess=")) {
+      setNotice({
+        type: "error",
+        text: "Cookie 缺少核心 HttpOnly 鉴权字段 hatch_sess（在 Console 执行 document.cookie 会丢失该字段）。请使用「启动授权浏览器登录」、Cookie-Editor 导出 Header String，或从 F12 -> Network 请求头复制完整 Cookie。",
+      });
+      return;
+    }
     setOauthSubmitting(true);
     try {
       const payload = oauthTargetEmail ? `${oauthTargetEmail}----${trimmed}` : trimmed;
@@ -784,23 +876,118 @@ export const PoolConsole: React.FC<{
       const res = await executeAccountAction("meta_muse", "current", "extract_chrome");
       if (res.result?.ok && res.result.cookie) {
         setOauthCookieInput(res.result.cookie);
+        try {
+          await navigator.clipboard.writeText(res.result.cookie);
+        } catch {
+          // 剪贴板权限受限时忽略，输入框已自动填入
+        }
         setNotice({
           type: "success",
-          text: `🎉 成功从本机 Chrome 提取到 ${res.result.count || ""} 个 Cookie，已自动填入！点击下方确认即可激活。`,
+          text: `🎉 成功从本机 Chrome 提取到 ${res.result.count || ""} 个真实 Cookie，已自动填入并复制到剪贴板！点击下方确认即可激活。`,
         });
       } else {
         setNotice({
           type: "error",
-          text: res.result?.error || "未在本地 Chrome 中找到已登录的 muse.ai 凭据，请在网页中手动复制",
+          text: res.result?.error || "未在本地 Chrome 中找到已登录的 muse.ai 凭据，请使用「启动授权浏览器」或从 Network 请求头复制 Cookie",
         });
       }
     } catch (e: any) {
       setNotice({
         type: "error",
-        text: `读取本地 Chrome 失败: ${e?.message || "请在网页上手动复制"}`,
+        text: `读取本地 Chrome 失败: ${e?.message || "请使用「启动授权浏览器」或从 Network 请求头手动复制"}`,
       });
     } finally {
       setExtractingChrome(false);
+    }
+  };
+
+  const handleBrowserLoginMuseCookie = async () => {
+    setBrowserLoggingIn(true);
+    setNotice({
+      type: "info",
+      text: "正在启动内置授权浏览器并打开 muse.ai，请在弹出的浏览器窗口中完成登录...",
+    });
+    try {
+      const res = await executeAccountAction("meta_muse", "current", "browser_login");
+      if (res.result?.ok && res.result.cookie) {
+        setOauthCookieInput(res.result.cookie);
+        try {
+          await navigator.clipboard.writeText(res.result.cookie);
+        } catch {
+          // 剪贴板权限受限时忽略
+        }
+        setNotice({
+          type: "success",
+          text: `🎉 已通过授权浏览器捕获 ${res.result.count || ""} 个真实会话 Cookie（含 HttpOnly），已自动填入并复制到剪贴板！`,
+        });
+      } else {
+        setNotice({
+          type: "error",
+          text: res.result?.error || "浏览器授权登录未获取到 Cookie，请重试或手动从 F12 Network 复制",
+        });
+      }
+    } catch (e: any) {
+      setNotice({
+        type: "error",
+        text: `启动授权浏览器失败: ${e?.message || "请手动从 F12 Network 复制 Cookie"}`,
+      });
+    } finally {
+      setBrowserLoggingIn(false);
+    }
+  };
+
+  const handleOpenEditCookie = async (acc: AccountView) => {
+    setEditingCookieAccount(acc);
+    setEditCookieValue("");
+    setLoadingEditCookie(true);
+    try {
+      const res = await executeAccountAction(activeProvider, acc.id, "get_cookie");
+      if (res.result?.cookie) {
+        setEditCookieValue(res.result.cookie);
+      }
+    } catch (e: any) {
+      setNotice({
+        type: "error",
+        text: `读取当前 Cookie 失败: ${e?.message || "请直接粘贴新的完整 Cookie"}`,
+      });
+    } finally {
+      setLoadingEditCookie(false);
+    }
+  };
+
+  const handleSaveEditCookie = async () => {
+    if (!editingCookieAccount) return;
+    const trimmed = editCookieValue.trim();
+    if (!trimmed) {
+      setNotice({ type: "error", text: "Cookie 内容不能为空" });
+      return;
+    }
+    if (activeProvider === "meta_muse" && !trimmed.includes("hatch_sess=")) {
+      setNotice({
+        type: "error",
+        text: "Cookie 缺少核心 HttpOnly 鉴权字段 hatch_sess（在 Console 执行 document.cookie 会丢失该字段）。请从 F12 -> Network 请求头或 Cookie-Editor 导出完整 Cookie。",
+      });
+      return;
+    }
+    setSavingEditCookie(true);
+    try {
+      const res = await executeAccountAction(activeProvider, editingCookieAccount.id, "update_cookie", {
+        cookie: trimmed,
+      });
+      setEditingCookieAccount(null);
+      setEditCookieValue("");
+      setNotice({
+        type: "success",
+        text: res.result?.message || `已更新 ${editingCookieAccount.email || editingCookieAccount.id} 的 Cookie 凭据`,
+      });
+      await loadData();
+    } catch (e: any) {
+      setNotice({
+        type: "error",
+        text: `保存 Cookie 失败: ${e?.message || "未知错误"}`,
+      });
+    } finally {
+      setSavingEditCookie(false);
     }
   };
 
@@ -1018,6 +1205,18 @@ export const PoolConsole: React.FC<{
                 ? ` · ${workerStats.running_email}${workerStats.running_phase_label ? ` (${workerStats.running_phase_label})` : ""}`
                 : ""}
             </span>
+            {workerStats.queue_length > 0 && (
+              <button
+                type="button"
+                disabled={cancellingRenewQueue}
+                onClick={handleCancelRenewQueue}
+                className="ml-1 px-1.5 py-0.5 rounded border z-border hover:underline cursor-pointer disabled:opacity-50"
+                style={{ color: "var(--pill-danger-text)" }}
+                title="取消自动续期等待队列中的所有账号"
+              >
+                {cancellingRenewQueue ? "取消中..." : "取消排队"}
+              </button>
+            )}
           </div>
         )}
       </div>
@@ -1468,6 +1667,21 @@ export const PoolConsole: React.FC<{
             <div className="flex flex-wrap items-center justify-between gap-2.5 p-card rounded-xl px-3 py-2.5 text-xs">
               <span className="z-text-muted">已选择 {selectedCount} 个账号</span>
               <div className="flex flex-wrap items-center gap-2">
+                {selectedQueuedAccounts.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={handleCancelSelectedQueued}
+                    disabled={cancellingSelected || loggingInKami || updatingProxy}
+                    className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl border z-border z-surface z-ghost-btn font-medium cursor-pointer disabled:opacity-50"
+                    style={{ color: "var(--pill-danger-text)" }}
+                  >
+                    <span>
+                      {cancellingSelected
+                        ? "取消中..."
+                        : `批量取消排队 (${selectedQueuedAccounts.length})`}
+                    </span>
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => setShowBulkEdit(true)}
@@ -1751,6 +1965,17 @@ export const PoolConsole: React.FC<{
                                     ? "同步中"
                                     : "从本机同步"}
                                 </span>
+                              </button>
+                            )}
+                            {(acc.type === "cookie" || activeProvider === "meta_muse") && (
+                              <button
+                                type="button"
+                                onClick={() => handleOpenEditCookie(acc)}
+                                className="hover:underline cursor-pointer font-medium text-emerald-600 dark:text-emerald-400 inline-flex items-center gap-0.5 text-xs"
+                                title="查看并手动编辑该账号的 Cookie 凭据"
+                              >
+                                <Pencil size={11} />
+                                <span>编辑 Cookie</span>
                               </button>
                             )}
                             {activeProvider === "meta_muse" && (
@@ -2188,13 +2413,13 @@ export const PoolConsole: React.FC<{
               <div className="p-3 rounded-xl border z-border bg-muted/30 space-y-2">
                 <div className="flex flex-wrap items-center justify-between gap-1.5 font-medium z-text">
                   <span>步骤 2：获取已登录会话 Cookie</span>
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2.5">
                     <button
                       type="button"
-                      disabled={extractingChrome}
+                      disabled={extractingChrome || browserLoggingIn}
                       onClick={handleExtractLocalChromeCookie}
                       className="inline-flex items-center gap-1 text-[11px] text-emerald-600 dark:text-emerald-400 font-medium hover:underline cursor-pointer disabled:opacity-60"
-                      title="尝试直接从本机 Chrome 数据库解密提取 muse.ai 的 Cookie"
+                      title="直接从本机 Chrome / Edge 数据库解密提取真实的 muse.ai Cookie 并填入下方"
                     >
                       {extractingChrome ? (
                         <Loader2 size={11} className="animate-spin" />
@@ -2205,19 +2430,22 @@ export const PoolConsole: React.FC<{
                     </button>
                     <button
                       type="button"
-                      onClick={() => {
-                        navigator.clipboard.writeText("copy(document.cookie)");
-                        setNotice({ type: "info", text: "已复制提取代码: copy(document.cookie)，可在官方页 F12 Console 运行" });
-                      }}
-                      className="inline-flex items-center gap-1 text-[11px] text-primary hover:underline cursor-pointer"
+                      disabled={extractingChrome || browserLoggingIn}
+                      onClick={handleBrowserLoginMuseCookie}
+                      className="inline-flex items-center gap-1 text-[11px] text-primary font-medium hover:underline cursor-pointer disabled:opacity-60"
+                      title="弹出受控浏览器窗口登录 muse.ai，登录完成后自动捕获完整真实 Cookie（含 HttpOnly）"
                     >
-                      <Copy size={11} />
-                      <span>复制 F12 提取代码</span>
+                      {browserLoggingIn ? (
+                        <Loader2 size={11} className="animate-spin" />
+                      ) : (
+                        <LogIn size={11} />
+                      )}
+                      <span>{browserLoggingIn ? "等待浏览器登录..." : "启动授权浏览器登录"}</span>
                     </button>
                   </div>
                 </div>
                 <p className="z-text-muted">
-                  若您已在本机 Chrome 登录，可直接点击「从本机 Chrome 一键提取」；也可在官方页面按 <kbd className="px-1 py-0.5 rounded bg-muted font-mono">F12</kbd> 打开控制台（Console），粘贴执行 <code className="px-1 py-0.5 rounded bg-muted font-mono">copy(document.cookie)</code> 复制后填入下方。
+                  <strong className="z-text">请勿在 Console 执行 document.cookie</strong>（核心鉴权字段 <code className="px-1 py-0.5 rounded bg-muted font-mono">hatch_sess</code>、<code className="px-1 py-0.5 rounded bg-muted font-mono">hatch_gw</code> 受 <code className="px-1 py-0.5 rounded bg-muted font-mono">HttpOnly</code> 保护，JS 无法读取）。推荐使用「启动授权浏览器登录」自动捕获完整 Cookie；若手动获取，请在 <code className="px-1 py-0.5 rounded bg-muted font-mono">F12 → Network</code> 筛选 <code className="px-1 py-0.5 rounded bg-muted font-mono">Fetch/XHR</code> 或 <code className="px-1 py-0.5 rounded bg-muted font-mono">Doc</code>，刷新后点击任意 <code className="px-1 py-0.5 rounded bg-muted font-mono">muse.ai</code> 请求并复制 Request Headers 中的 <code className="px-1 py-0.5 rounded bg-muted font-mono">Cookie:</code> 整行值（或用 Cookie-Editor 插件 Export → Header String，完整长度约 7,000~8,000 字符）。
                 </p>
               </div>
 
@@ -2244,7 +2472,7 @@ export const PoolConsole: React.FC<{
                   rows={4}
                   value={oauthCookieInput}
                   onChange={(e) => setOauthCookieInput(e.target.value)}
-                  placeholder="粘贴完整的 Cookie 字符串，例如：c_user=...; xs=...; datr=...;"
+                  placeholder="粘贴包含 hatch_sess 的完整 Cookie（约 7,000~8,000 字符），例如：hatch_sess=...; hatch_gw=...; hatch_vml=...; __Host-hatch_one_tap=...;"
                   className="w-full p-2.5 rounded-xl p-code-box font-mono-num text-xs resize-y focus:outline-none"
                 />
               </div>
@@ -2274,6 +2502,111 @@ export const PoolConsole: React.FC<{
                   <>
                     <Check size={12} />
                     <span>确认授权并激活</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 手动编辑 Cookie 弹窗 */}
+      {editingCookieAccount && (
+        <div
+          className="fixed inset-0 z-50 bg-black/55 backdrop-blur-xs flex items-center justify-center p-4"
+          onClick={() => !savingEditCookie && setEditingCookieAccount(null)}
+        >
+          <div
+            className="p-surface z-text rounded-2xl max-w-xl w-full p-5 shadow-2xl space-y-4 text-xs"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between pb-3 border-b z-border">
+              <div>
+                <h3 className="text-sm font-semibold flex items-center gap-2">
+                  <Pencil size={14} className="text-emerald-500" />
+                  <span>编辑 Cookie 凭据</span>
+                </h3>
+                <p className="text-[11px] z-text-muted mt-0.5 font-mono-num">
+                  账号：{editingCookieAccount.email || editingCookieAccount.id}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => !savingEditCookie && setEditingCookieAccount(null)}
+                className="p-1.5 rounded-lg z-ghost-btn cursor-pointer"
+                aria-label="关闭"
+              >
+                <X size={14} />
+              </button>
+            </div>
+
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <label className="font-medium z-text-sec">
+                  完整 Cookie 字符串
+                </label>
+                <div className="flex items-center gap-2 text-[11px]">
+                  <span className="font-mono-num z-text-muted">
+                    长度：{editCookieValue.trim().length} 字符
+                  </span>
+                  {activeProvider === "meta_muse" && (
+                    <span
+                      className={`px-1.5 py-0.5 rounded font-medium ${
+                        editCookieValue.includes("hatch_sess=")
+                          ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
+                          : "bg-amber-500/15 text-amber-600 dark:text-amber-400"
+                      }`}
+                    >
+                      {editCookieValue.includes("hatch_sess=")
+                        ? "已包含 hatch_sess"
+                        : "缺少 hatch_sess"}
+                    </span>
+                  )}
+                </div>
+              </div>
+              {loadingEditCookie ? (
+                <div className="flex items-center justify-center py-10 z-text-muted gap-2">
+                  <Loader2 size={14} className="animate-spin" />
+                  <span>正在加载当前 Cookie...</span>
+                </div>
+              ) : (
+                <textarea
+                  rows={7}
+                  value={editCookieValue}
+                  onChange={(e) => setEditCookieValue(e.target.value)}
+                  placeholder="粘贴或修改完整的 Cookie 字符串（例如：hatch_sess=...; hatch_gw=...;）"
+                  className="w-full p-2.5 rounded-xl p-code-box font-mono-num text-xs resize-y focus:outline-none"
+                />
+              )}
+              <p className="text-[11px] z-text-muted">
+                保存后会立即更新该账号凭据并将其状态重置为 <code className="px-1 py-0.5 rounded bg-muted font-mono">active</code>。
+              </p>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t z-border">
+              <button
+                type="button"
+                onClick={() => setEditingCookieAccount(null)}
+                disabled={savingEditCookie}
+                className="px-3.5 py-1.5 rounded-xl border z-border z-surface z-ghost-btn text-xs cursor-pointer"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={handleSaveEditCookie}
+                disabled={savingEditCookie || loadingEditCookie || !editCookieValue.trim()}
+                className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-xl z-primary-btn text-xs font-medium cursor-pointer disabled:opacity-50"
+              >
+                {savingEditCookie ? (
+                  <>
+                    <Loader2 size={12} className="animate-spin" />
+                    <span>保存中...</span>
+                  </>
+                ) : (
+                  <>
+                    <Check size={12} />
+                    <span>保存并激活</span>
                   </>
                 )}
               </button>

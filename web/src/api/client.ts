@@ -96,6 +96,7 @@ export interface VideoTask {
   status: "PENDING" | "RUNNING" | "SUCCEEDED" | "FAILED";
   progress: number;
   video_url?: string;
+  local_url?: string;
   error_msg?: string;
   created_at: string;
   completed_at?: string;
@@ -388,13 +389,16 @@ export type AccountActionType =
   | "totp"
   | "sync_chrome"
   | "extract_chrome"
+  | "browser_login"
+  | "get_cookie"
+  | "update_cookie"
   | "login";
 
 export async function executeAccountAction(
   provider: string,
   accountId: string,
   action: AccountActionType,
-  options?: { headless?: boolean }
+  options?: { headless?: boolean; cookie?: string }
 ): Promise<{
   provider: string;
   stats: PoolStats;
@@ -422,6 +426,9 @@ export async function executeAccountAction(
   const payload: Record<string, unknown> = { action };
   if (typeof options?.headless === "boolean") {
     payload.headless = options.headless;
+  }
+  if (typeof options?.cookie === "string") {
+    payload.cookie = options.cookie;
   }
   const res = await adminFetch(
     `/admin/api/v1/providers/${encodeURIComponent(provider)}/accounts/${encodeURIComponent(accountId)}/action`,
@@ -463,7 +470,13 @@ export async function probeAllAccounts(
 
 export async function cancelKamiLogin(
   provider = "chatgpt",
-  payload: { task_id?: string; account_id?: string; cancel_all?: boolean }
+  payload: {
+    task_id?: string;
+    account_id?: string;
+    account_ids?: string[];
+    cancel_all?: boolean;
+    queue?: "login" | "renew" | "all";
+  }
 ): Promise<{
   provider: string;
   cancelled: number;
@@ -1126,6 +1139,39 @@ export async function expandImagePrompt(
   return data;
 }
 
+export interface VideoPromptExpandRequest {
+  prompt: string;
+  action?: "expand" | "polish";
+  camera_style?: string;
+  model?: string;
+  duration?: number;
+  has_image?: boolean;
+}
+
+export interface VideoPromptExpandResponse {
+  title_zh: string;
+  camera_move: string;
+  prompt_zh: string;
+  prompt_en: string;
+  action: "expand" | "polish" | string;
+  source: string;
+}
+
+export async function expandVideoPrompt(
+  req: VideoPromptExpandRequest
+): Promise<VideoPromptExpandResponse> {
+  const res = await adminFetch("/admin/api/v1/prompts/video-expand", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error?.message || `Video prompt expand failed: HTTP ${res.status}`);
+  }
+  return data;
+}
+
 // ─── 持久化画廊 API (Server-side Gallery) ──────────────────────────
 
 export interface ServerGalleryWork {
@@ -1603,15 +1649,22 @@ export async function fetchVoices(): Promise<{ voices: VoiceDescriptor[]; total:
   return data;
 }
 
-export async function synthesizeSpeech(input: string, voice = "zh_female_shuangkuai", speed = 1.0): Promise<Blob> {
+export async function synthesizeSpeech(
+  input: string,
+  voice = "zh_female_shuangkuai",
+  speed = 1.0,
+  model = "tts-1",
+  signal?: AbortSignal,
+): Promise<Blob> {
   const res = await fetch("/v1/audio/speech", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       "X-Prefer-Tag": "permanent-free",
     },
+    signal,
     body: JSON.stringify({
-      model: "tts-1",
+      model: model || "tts-1",
       input,
       voice,
       response_format: "mp3",
@@ -1686,7 +1739,8 @@ export async function submitVideo(
   duration = 5,
   model = "THUDM/CogVideoX-5b",
   audioUrl?: string,
-): Promise<{ task_id: string; status: string; provider?: string }> {
+  options?: { noMockFallback?: boolean; aspectRatio?: string },
+): Promise<{ task_id: string; status: string; provider?: string; local_url?: string }> {
   const res = await fetch("/v1/videos/generations", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -1696,12 +1750,22 @@ export async function submitVideo(
       image_url: imageUrl,
       audio_url: audioUrl,
       duration,
+      aspect_ratio: options?.aspectRatio,
+      no_mock_fallback: Boolean(options?.noMockFallback),
       wait: false,
     }),
   });
   const data = await res.json();
   if (!res.ok) {
-    throw new Error(data?.error?.message || `Submit video failed: HTTP ${res.status}`);
+    const err = new Error(data?.error?.message || `Submit video failed: HTTP ${res.status}`) as Error & {
+      code?: string;
+      status?: number;
+      provider?: string;
+    };
+    err.code = data?.error?.code;
+    err.status = res.status;
+    err.provider = data?.error?.provider;
+    throw err;
   }
   return data;
 }
@@ -1720,6 +1784,27 @@ export async function fetchVideoTasks(): Promise<{ tasks: VideoTask[]; total: nu
   const data = await res.json();
   if (!res.ok) {
     throw new Error(data?.error || `Fetch video tasks failed: HTTP ${res.status}`);
+  }
+  return data;
+}
+
+export async function deleteVideoTask(taskId: string): Promise<void> {
+  const res = await adminFetch(`/admin/api/v1/multimodal/video-tasks/${encodeURIComponent(taskId)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data?.error || `Delete video task failed: HTTP ${res.status}`);
+  }
+}
+
+export async function clearFailedVideoTasks(): Promise<{ deleted_count: number }> {
+  const res = await adminFetch("/admin/api/v1/multimodal/video-tasks?status=FAILED", {
+    method: "DELETE",
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(data?.error || `Clear failed video tasks failed: HTTP ${res.status}`);
   }
   return data;
 }
@@ -1768,4 +1853,200 @@ export async function fetchAudioHistory(): Promise<{ records: AudioHistoryItem[]
   }
   return data;
 }
+
+export interface OpsLogEntry {
+  id: string;
+  timestamp: string;
+  source: "backend" | "frontend";
+  level: "error" | "warn" | "info" | "debug";
+  module?: string;
+  message: string;
+  detail?: string;
+  page?: string;
+}
+
+export interface OpsLogSummary {
+  capacity: number;
+  buffered_count: number;
+  total_backend: number;
+  total_frontend: number;
+  error_count: number;
+  warn_count: number;
+}
+
+export interface OpsLogsResponse {
+  summary: OpsLogSummary;
+  entries: OpsLogEntry[];
+}
+
+export async function fetchOpsLogs(params?: {
+  source?: string;
+  level?: string;
+  q?: string;
+  limit?: number;
+}): Promise<OpsLogsResponse> {
+  const sp = new URLSearchParams();
+  if (params?.source) sp.set("source", params.source);
+  if (params?.level) sp.set("level", params.level);
+  if (params?.q) sp.set("q", params.q);
+  if (params?.limit) sp.set("limit", String(params.limit));
+  const qs = sp.toString();
+  const res = await adminFetch(`/admin/api/v1/ops-logs${qs ? `?${qs}` : ""}`);
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error?.message || `Fetch ops logs failed: HTTP ${res.status}`);
+  }
+  return data;
+}
+
+export async function clearOpsLogs(): Promise<void> {
+  const res = await adminFetch("/admin/api/v1/ops-logs", { method: "DELETE" });
+  if (!res.ok) {
+    throw new Error(`Clear ops logs failed: HTTP ${res.status}`);
+  }
+}
+
+export type DramaRoutingPolicy = "free_first" | "quality_first" | "fast";
+
+export interface DramaRecommendedPlan {
+  llm_model: string;
+  image_model: string;
+  tts_voice: string;
+  video_model: string;
+  fallback_mode: "ken_burns" | string;
+}
+
+export interface DramaCapabilities {
+  llm: { available: boolean; active: number; models: string[]; reason?: string };
+  image: {
+    available: boolean;
+    edit_available: boolean;
+    default_model: string;
+    reason?: string;
+    providers: Record<string, { available: boolean; active: number; models: string[] }>;
+  };
+  tts: {
+    available: boolean;
+    voice_design_available: boolean;
+    voice_clone_available: boolean;
+    providers: Record<string, { available: boolean; active?: number; zero_config?: boolean }>;
+  };
+  stt: { available: boolean; active: number; models: string[]; reason?: string };
+  video: {
+    available: boolean;
+    lipsync_available: boolean;
+    reason?: string;
+    providers: Record<
+      string,
+      { available: boolean; active: number; models: string[]; supports_i2v: boolean; supports_a2v: boolean }
+    >;
+  };
+  recommended: Record<DramaRoutingPolicy, DramaRecommendedPlan>;
+}
+
+export interface DramaProjectRecord {
+  id: string;
+  title: string;
+  genre: string;
+  aspect_ratio: string;
+  style_preset: string;
+  routing_policy: DramaRoutingPolicy;
+  outline: string;
+  graph_json: string;
+  status: string;
+  shot_count: number;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export async function fetchDramaCapabilities(): Promise<DramaCapabilities> {
+  const res = await adminFetch("/admin/api/v1/drama/capabilities");
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error || `Fetch drama capabilities failed: HTTP ${res.status}`);
+  }
+  return data;
+}
+
+export async function fetchDramaProjects(): Promise<DramaProjectRecord[]> {
+  const res = await adminFetch("/admin/api/v1/drama/projects");
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error || `Fetch drama projects failed: HTTP ${res.status}`);
+  }
+  return data.data || [];
+}
+
+export async function fetchDramaProject(id: string): Promise<DramaProjectRecord> {
+  const res = await adminFetch(`/admin/api/v1/drama/projects/${encodeURIComponent(id)}`);
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error || `Fetch drama project failed: HTTP ${res.status}`);
+  }
+  return data;
+}
+
+export async function saveDramaProject(
+  payload: Partial<DramaProjectRecord> & { id: string; title: string },
+): Promise<DramaProjectRecord> {
+  const res = await adminFetch(`/admin/api/v1/drama/projects/${encodeURIComponent(payload.id)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error || `Save drama project failed: HTTP ${res.status}`);
+  }
+  return data;
+}
+
+export async function deleteDramaProject(id: string): Promise<void> {
+  const res = await adminFetch(`/admin/api/v1/drama/projects/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) {
+    throw new Error(`Delete drama project failed: HTTP ${res.status}`);
+  }
+}
+
+export async function cacheDramaMedia(payload: {
+  url?: string;
+  data_url?: string;
+  category?: "images" | "videos" | "audio";
+  id?: string;
+  mime_type?: string;
+}): Promise<{ local_url: string; rel_path?: string; mime_type?: string; cached: boolean }> {
+  const res = await adminFetch("/admin/api/v1/drama/media/cache", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error || `Cache drama media failed: HTTP ${res.status}`);
+  }
+  return data;
+}
+
+export async function transcribeAudio(
+  file: Blob,
+  options?: { filename?: string; language?: string; prompt?: string },
+): Promise<{ text: string }> {
+  const form = new FormData();
+  form.append("file", file, options?.filename || "audio.mp3");
+  form.append("model", "whisper-1");
+  if (options?.language) form.append("language", options.language);
+  if (options?.prompt) form.append("prompt", options.prompt);
+  const res = await fetch("/v1/audio/transcriptions", {
+    method: "POST",
+    body: form,
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error?.message || `Transcribe audio failed: HTTP ${res.status}`);
+  }
+  return data;
+}
+
 

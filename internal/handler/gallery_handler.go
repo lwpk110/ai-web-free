@@ -46,11 +46,21 @@ func (h *GalleryHandler) ServeStaticImage(c *gin.Context) {
 	}
 
 	// 1. 如果本地存储引擎存在物理文件，直接流式分发
+	c.Header("Access-Control-Allow-Origin", "*")
 	if local, ok := h.storageEngine.(*storage.LocalStorageEngine); ok && local != nil {
 		fullPath := filepath.Join(local.ImagesDir(), filename)
 		if info, err := os.Stat(fullPath); err == nil && !info.IsDir() && info.Size() > 0 {
 			c.Header("Cache-Control", "public, max-age=31536000, immutable")
 			c.File(fullPath)
+			return
+		}
+	}
+
+	// 1.5 统一媒体存储引擎兜底（支持纯内存存储或测试环境通过 MediaStorageEngine.Read 读取）
+	if mse, ok := h.storageEngine.(storage.MediaStorageEngine); ok && mse != nil {
+		if data, err := mse.Read(c.Request.Context(), "images/"+filename); err == nil && len(data) > 0 {
+			c.Header("Cache-Control", "public, max-age=31536000, immutable")
+			c.Data(http.StatusOK, detectMediaMimeFromExt(filepath.Ext(filename), data), data)
 			return
 		}
 	}

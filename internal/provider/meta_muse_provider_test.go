@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"ai-web-free/internal/db"
@@ -193,4 +194,39 @@ func TestMetaMuseProvider_DatabasePersistence(t *testing.T) {
 		t.Fatalf("sync_chrome action failed: %v", err)
 	}
 	t.Logf("sync_chrome result: %+v", syncRes)
+
+	// 9. 测试 get_cookie 与 UpdateAccountCookie（手动编辑 Cookie）
+	getRes, err := p2.ExecuteAccountAction("persist_user@meta.ai", "get_cookie")
+	if err != nil {
+		t.Fatalf("get_cookie failed: %v", err)
+	}
+	if gotCookie, _ := getRes["cookie"].(string); gotCookie == "" {
+		t.Fatalf("expected non-empty cookie from get_cookie, got %+v", getRes)
+	}
+	if _, err := p2.UpdateAccountCookie("persist_user@meta.ai", "datr=only_partial_cookie"); err == nil {
+		t.Fatalf("expected error when updating cookie without hatch_sess")
+	}
+	updRes, err := p2.UpdateAccountCookie("persist_user@meta.ai", "hatch_sess=edited_sess_999; hatch_gw=gw_1;")
+	if err != nil {
+		t.Fatalf("UpdateAccountCookie failed: %v", err)
+	}
+	if okFlag, _ := updRes["ok"].(bool); !okFlag {
+		t.Fatalf("expected ok=true from UpdateAccountCookie, got %+v", updRes)
+	}
+	getRes2, err := p2.ExecuteAccountAction("persist_user@meta.ai", "get_cookie")
+	if err != nil || getRes2["cookie"] != "hatch_sess=edited_sess_999; hatch_gw=gw_1;" {
+		t.Fatalf("expected updated cookie, got %+v, err=%v", getRes2, err)
+	}
+}
+
+func TestBuildMuseVideoPrompt(t *testing.T) {
+	got := buildMuseVideoPrompt("第一行\n第二行", "VID-1234ABCD", 8, true)
+	if strings.Contains(got, "\n") || strings.Contains(got, "\r") {
+		t.Fatalf("expected single-line prompt for SendKeys safety, got %q", got)
+	}
+	for _, want := range []string{"muse video", "工作空间", "8 秒", "参考图像", "第一行 第二行", "VID-1234ABCD"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected %q in built prompt %q", want, got)
+		}
+	}
 }

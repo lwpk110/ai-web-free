@@ -731,9 +731,22 @@ func imageEditDownloadHTTPURL(client httpclient.HttpClient, url string) (editIma
 }
 
 func imageEditConvertURL(client httpclient.HttpClient, raw string) (editImageInput, bool, error) {
+	return imageEditConvertURLWithRuntime(client, nil, raw)
+}
+
+func imageEditConvertURLWithRuntime(client httpclient.HttpClient, rt *GatewayRuntime, raw string) (editImageInput, bool, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return editImageInput{}, false, nil
+	}
+	if rt != nil {
+		if data, mimeType, filename, ok := LoadLocalImageAsset(raw, rt.StorageEngine, rt.DB); ok && len(data) > 0 {
+			return editImageInput{
+				Data:        data,
+				Filename:    filename,
+				ContentType: mimeType,
+			}, true, nil
+		}
 	}
 	if strings.HasPrefix(raw, "data:") {
 		item, err := imageEditDecodeDataURL(raw)
@@ -966,7 +979,7 @@ func (h *ImageHandler) runImageEditFlow(c *gin.Context, asVariation bool) {
 		client := bogdanfinn.NewStdClient()
 
 		for _, src := range body.Images {
-			item, _, err := imageEditConvertURL(client, src.ImageURL)
+			item, _, err := imageEditConvertURLWithRuntime(client, h.runtime, src.ImageURL)
 			if err != nil {
 				c.JSON(400, gin.H{"error": gin.H{
 					"message": "invalid image reference: " + err.Error(),
@@ -981,7 +994,7 @@ func (h *ImageHandler) runImageEditFlow(c *gin.Context, asVariation bool) {
 			}
 		}
 		if body.Image != nil {
-			item, _, err := imageEditConvertURL(client, body.Image.ImageURL)
+			item, _, err := imageEditConvertURLWithRuntime(client, h.runtime, body.Image.ImageURL)
 			if err != nil {
 				c.JSON(400, gin.H{"error": gin.H{
 					"message": "invalid image reference: " + err.Error(),
@@ -998,13 +1011,13 @@ func (h *ImageHandler) runImageEditFlow(c *gin.Context, asVariation bool) {
 		if body.ImageURL != nil {
 			switch t := body.ImageURL.(type) {
 			case string:
-				item, _, err := imageEditConvertURL(client, t)
+				item, _, err := imageEditConvertURLWithRuntime(client, h.runtime, t)
 				if err == nil && len(item.Data) > 0 {
 					imageSources = append(imageSources, item)
 				}
 			case map[string]interface{}:
 				if u, ok := t["url"].(string); ok {
-					item, _, err := imageEditConvertURL(client, u)
+					item, _, err := imageEditConvertURLWithRuntime(client, h.runtime, u)
 					if err == nil && len(item.Data) > 0 {
 						imageSources = append(imageSources, item)
 					}
@@ -1026,7 +1039,7 @@ func (h *ImageHandler) runImageEditFlow(c *gin.Context, asVariation bool) {
 			}
 		}
 		for _, p := range imageParts {
-			item, _, err := imageEditConvertURL(client, p)
+			item, _, err := imageEditConvertURLWithRuntime(client, h.runtime, p)
 			if err != nil {
 				c.JSON(400, gin.H{"error": gin.H{
 					"message": "invalid image reference: " + err.Error(),
@@ -1072,7 +1085,7 @@ func (h *ImageHandler) runImageEditFlow(c *gin.Context, asVariation bool) {
 		if vs, ok := form.Value["image_url"]; ok {
 			client := bogdanfinn.NewStdClient()
 			for _, s := range vs {
-				item, _, err := imageEditConvertURL(client, s)
+				item, _, err := imageEditConvertURLWithRuntime(client, h.runtime, s)
 				if err == nil && len(item.Data) > 0 {
 					imageSources = append(imageSources, item)
 				}

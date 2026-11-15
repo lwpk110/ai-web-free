@@ -15,6 +15,7 @@ import (
 	"ai-web-free/internal/audit"
 	"ai-web-free/internal/chatgpt"
 	"ai-web-free/internal/config"
+	"ai-web-free/internal/opslog"
 	"ai-web-free/internal/promptplaza"
 	"ai-web-free/internal/provider"
 	"ai-web-free/internal/proxy"
@@ -754,6 +755,32 @@ func TestAdminPromptPlazaEndpoints(t *testing.T) {
 	if expResp.Source != "ai_pool" || expResp.TitleZH != "霓虹猫咪咖啡馆" {
 		t.Fatalf("unexpected expand response: %+v", expResp)
 	}
+
+	// 6. POST /prompts/video-expand validates empty prompt -> 400 & valid -> 200
+	req = httptest.NewRequest(http.MethodPost, "/admin/api/v1/prompts/video-expand", strings.NewReader(`{"prompt":"  "}`))
+	req.Header.Set("X-Admin-Token", "plaza-secret")
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 on blank video prompt, got %d", w.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/admin/api/v1/prompts/video-expand", strings.NewReader(`{"prompt":"秋叶古道缓缓推近","action":"polish","camera_style":"Slow Dolly In","duration":5}`))
+	req.Header.Set("X-Admin-Token", "plaza-secret")
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 on valid video-expand, got %d body=%s", w.Code, w.Body.String())
+	}
+	var vidResp promptplaza.VideoExpandResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &vidResp); err != nil {
+		t.Fatalf("unmarshal video-expand response: %v", err)
+	}
+	if vidResp.Action != "polish" || vidResp.PromptZH == "" || vidResp.PromptEN == "" {
+		t.Fatalf("unexpected video-expand response: %+v", vidResp)
+	}
 }
 
 func TestAdminModelsCatalogCacheAndFallback(t *testing.T) {
@@ -863,4 +890,210 @@ func TestAdminModelsCatalogCacheAndFallback(t *testing.T) {
 	if len(cached) != 3 {
 		t.Fatalf("expected merged pool cache of 3 slugs, got %v", cached)
 	}
+}
+
+func TestAdminCancelRenewQueueEndpoint(t *testing.T) {
+	pool := accounts.NewPool(nil)
+	makeAcct := func(id, email string) *accounts.Account {
+		a := accounts.CreateAccount("", accounts.TypeFree, accounts.DefaultProfiles)
+		a.ID = id
+		a.Email = email
+		a.Password = "p"
+		a.TOTPSecret = "SECRET"
+		a.Status = accounts.StatusExpired
+		pool.AddAccount(a)
+		return a
+	}
+
+	a1 := makeAcct("rq-1", "rq1@example.com")
+	a2 := makeAcct("rq-2", "rq2@example.com")
+	a3 := makeAcct("rq-3", "rq3@example.com")
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	cfg := &config.Config{}
+	auditLog := audit.NewRingBuffer(50, "", 0)
+	worker := provider.NewKamiRenewWorker(pool, "", true, nil, auditLog)
+	worker.SetLoginExecutor(func(acct *accounts.Account, _ string, _ bool) provider.KamiLoginOutcome {
+		close(started)
+		<-release
+		return provider.KamiLoginOutcome{Email: acct.Email, OK: true, AccessToken: "tok"}
+	})
+	worker.Start()
+	defer worker.Stop()
+
+	reg := provider.NewRegistry()
+	cg := provider.NewChatGPTProvider(pool, nil, cfg, nil)
+	cg.SetKamiWorker(worker)
+	cg.SetAuditLog(auditLog)
+	provider.RegisterDefaultProviders(reg, cg)
+
+	router := RegisterRouterWithDeps(RouterDeps{
+		AccountPool: pool,
+		Registry:    reg,
+		Config:      cfg,
+		KamiWorker:  worker,
+		AuditLog:    auditLog,
+	})
+
+	worker.Enqueue(a1, "test")
+	worker.Enqueue(a2, "test")
+	worker.Enqueue(a3, "test")
+	<-started
+
+	req := httptest.NewRequest(http.MethodPost, "/admin/api/v1/providers/chatgpt/accounts/kami-login/cancel", strings.NewReader(`{"cancel_all":true,"queue":"renew"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 on renew queue cancel_all, got %d body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Cancelled int `json:"cancelled"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Cancelled != 2 {
+		t.Fatalf("expected cancelled=2, got %d", resp.Cancelled)
+	}
+	if worker.Stats().QueueLength != 0 {
+		t.Fatalf("expected worker queue length 0, got %+v", worker.Stats())
+	}
+
+	close(release)
+}
+
+func TestAdminOpsLogsIngestQueryAndClear(t *testing.T) {
+	router, _, _, _ := setupTestAdminRouter(t, "", nil)
+	opslog.Global().Clear()
+
+	opslog.Global().Record(opslog.Entry{
+		Source:  "backend",
+		Level:   "error",
+		Module:  "kami-login",
+		Message: "backend login error",
+		Detail:  "context deadline exceeded",
+	})
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/admin/api/v1/ops-logs/frontend",
+		strings.NewReader(`{"entries":[{"level":"error","module":"fetch","message":"POST /v1/videos/generations -> 500","detail":"upstream failed","page":"#/video"}]}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 on ingest frontend logs, got %d body=%s", w.Code, w.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/admin/api/v1/ops-logs?source=frontend&level=error&q=videos", nil)
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 on GET /ops-logs, got %d body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Summary opslog.Summary `json:"summary"`
+		Entries []opslog.Entry `json:"entries"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal /ops-logs: %v", err)
+	}
+	if len(resp.Entries) != 1 || resp.Entries[0].Module != "fetch" || resp.Summary.TotalFrontend != 1 || resp.Summary.TotalBackend != 1 {
+		t.Fatalf("unexpected /ops-logs response: %+v", resp)
+	}
+
+	req = httptest.NewRequest(http.MethodDelete, "/admin/api/v1/ops-logs", nil)
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 on DELETE /ops-logs, got %d", w.Code)
+	}
+	entries, _ := opslog.Global().Query(opslog.QueryOptions{Limit: 10})
+	if len(entries) != 0 {
+		t.Fatalf("expected empty ops logs after clear, got %d", len(entries))
+	}
+}
+
+func TestAdminBatchCancelQueueEndpoint(t *testing.T) {
+	pool := accounts.NewPool(nil)
+	makeAcct := func(id, email string) *accounts.Account {
+		a := accounts.CreateAccount("", accounts.TypeFree, accounts.DefaultProfiles)
+		a.ID = id
+		a.Email = email
+		a.Password = "p"
+		a.TOTPSecret = "SECRET"
+		a.Status = accounts.StatusExpired
+		pool.AddAccount(a)
+		return a
+	}
+
+	a1 := makeAcct("bq-1", "bq1@example.com")
+	a2 := makeAcct("bq-2", "bq2@example.com")
+	a3 := makeAcct("bq-3", "bq3@example.com")
+	a4 := makeAcct("bq-4", "bq4@example.com")
+
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	worker := provider.NewKamiRenewWorker(pool, "", true, nil, nil)
+	worker.SetLoginExecutor(func(acct *accounts.Account, _ string, _ bool) provider.KamiLoginOutcome {
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		<-release
+		return provider.KamiLoginOutcome{Email: acct.Email, OK: true, AccessToken: "tok"}
+	})
+	worker.Start()
+	defer worker.Stop()
+
+	cfg := &config.Config{}
+	auditLog := audit.NewRingBuffer(50, "", 0)
+	reg := provider.NewRegistry()
+	cg := provider.NewChatGPTProvider(pool, nil, cfg, nil)
+	cg.SetKamiWorker(worker)
+	cg.SetAuditLog(auditLog)
+	provider.RegisterDefaultProviders(reg, cg)
+
+	router := RegisterRouterWithDeps(RouterDeps{
+		AccountPool: pool,
+		Registry:    reg,
+		Config:      cfg,
+		KamiWorker:  worker,
+		AuditLog:    auditLog,
+	})
+
+	worker.Enqueue(a1, "test")
+	worker.Enqueue(a2, "test")
+	worker.Enqueue(a3, "test")
+	worker.Enqueue(a4, "test")
+	<-started
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/admin/api/v1/providers/chatgpt/accounts/kami-login/cancel",
+		strings.NewReader(`{"account_ids":["`+a2.ID+`","`+a4.ID+`"]}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 on batch cancel, got %d body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Cancelled int `json:"cancelled"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Cancelled != 2 {
+		t.Fatalf("expected cancelled=2, got %d", resp.Cancelled)
+	}
+	if st := worker.Stats(); st.QueueLength != 1 || len(st.QueuedAccountIDs) != 1 || st.QueuedAccountIDs[0] != a3.ID {
+		t.Fatalf("expected only bq-3 remaining in queue, got %+v", st)
+	}
+
+	close(release)
 }

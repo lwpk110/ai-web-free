@@ -50,6 +50,21 @@ func TestJianyingVoices(t *testing.T) {
 	}
 }
 
+func TestMapEdgeVoiceToJianyingKeepsVoicesDistinct(t *testing.T) {
+	voices := GetEdgeTTSVoiceDescriptors()
+	mapped := make(map[string]bool, len(voices))
+	for _, voice := range voices {
+		fallback := MapEdgeVoiceToJianying(voice.ID)
+		if _, ok := FindJianyingVoice(fallback); !ok {
+			t.Errorf("Edge voice %q maps to unknown fallback %q", voice.ID, fallback)
+		}
+		if mapped[fallback] {
+			t.Errorf("Edge voice %q shares fallback %q with another Edge voice", voice.ID, fallback)
+		}
+		mapped[fallback] = true
+	}
+}
+
 func TestJianYingProvider(t *testing.T) {
 	p := NewJianYingProvider(nil)
 	desc := p.Descriptor()

@@ -18,6 +18,62 @@ type StorageEngine interface {
 	Type() string
 }
 
+// MediaStorageEngine 扩展支持多模态分类目录（images / videos / audio）存储与字节读取。
+type MediaStorageEngine interface {
+	StorageEngine
+	SaveInCategory(ctx context.Context, category, id string, data []byte, mimeType string) (url string, path string, err error)
+	Read(ctx context.Context, path string) ([]byte, error)
+}
+
+func resolveExtForMime(category, mimeType string) string {
+	lower := strings.ToLower(strings.TrimSpace(mimeType))
+	if idx := strings.Index(lower, ";"); idx > 0 {
+		lower = strings.TrimSpace(lower[:idx])
+	}
+	switch lower {
+	case "image/jpeg", "image/jpg":
+		return ".jpg"
+	case "image/webp":
+		return ".webp"
+	case "image/gif":
+		return ".gif"
+	case "image/png":
+		return ".png"
+	case "video/mp4":
+		return ".mp4"
+	case "video/webm":
+		return ".webm"
+	case "audio/mpeg", "audio/mp3":
+		return ".mp3"
+	case "audio/wav", "audio/x-wav":
+		return ".wav"
+	case "audio/ogg":
+		return ".ogg"
+	}
+	if exts, _ := mime.ExtensionsByType(lower); len(exts) > 0 && exts[0] != "" {
+		return exts[0]
+	}
+	switch category {
+	case "videos":
+		return ".mp4"
+	case "audio":
+		return ".mp3"
+	default:
+		return ".png"
+	}
+}
+
+func normalizeMediaCategory(category string) string {
+	switch strings.ToLower(strings.TrimSpace(category)) {
+	case "videos", "video":
+		return "videos"
+	case "audio", "audios":
+		return "audio"
+	default:
+		return "images"
+	}
+}
+
 // LocalStorageEngine 本地文件系统存储引擎
 type LocalStorageEngine struct {
 	baseDir string
@@ -30,9 +86,11 @@ func NewLocalStorageEngine(baseDir string) (*LocalStorageEngine, error) {
 	if cleanDir == "" || cleanDir == "." {
 		cleanDir = "data/storage"
 	}
-	imagesDir := filepath.Join(cleanDir, "images")
-	if err := os.MkdirAll(imagesDir, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create storage directory %q: %w", imagesDir, err)
+	for _, sub := range []string{"images", "videos"} {
+		subDir := filepath.Join(cleanDir, sub)
+		if err := os.MkdirAll(subDir, 0755); err != nil {
+			return nil, fmt.Errorf("failed to create storage directory %q: %w", subDir, err)
+		}
 	}
 	return &LocalStorageEngine{baseDir: cleanDir}, nil
 }
@@ -45,52 +103,66 @@ func (s *LocalStorageEngine) ImagesDir() string {
 	return filepath.Join(s.baseDir, "images")
 }
 
+func (s *LocalStorageEngine) VideosDir() string {
+	return filepath.Join(s.baseDir, "videos")
+}
+
 func (s *LocalStorageEngine) Type() string {
 	return "local"
 }
 
 func (s *LocalStorageEngine) Save(ctx context.Context, id string, data []byte, mimeType string) (string, string, error) {
+	return s.SaveInCategory(ctx, "images", id, data, mimeType)
+}
+
+func (s *LocalStorageEngine) SaveInCategory(ctx context.Context, category, id string, data []byte, mimeType string) (string, string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	cleanID := filepath.Base(strings.TrimSpace(id))
-	if cleanID == "" || cleanID == "." {
+	if cleanID == "" || cleanID == "." || cleanID == ".." {
 		return "", "", fmt.Errorf("invalid file id: %q", id)
 	}
 
-	ext := ".png"
-	switch strings.ToLower(strings.TrimSpace(mimeType)) {
-	case "image/jpeg", "image/jpg":
-		ext = ".jpg"
-	case "image/webp":
-		ext = ".webp"
-	case "image/gif":
-		ext = ".gif"
-	default:
-		exts, _ := mime.ExtensionsByType(mimeType)
-		if len(exts) > 0 && exts[0] != "" {
-			ext = exts[0]
-		}
-	}
+	cat := normalizeMediaCategory(category)
+	ext := resolveExtForMime(cat, mimeType)
 
 	filename := cleanID
-	if !strings.HasSuffix(filename, ext) {
+	if !strings.HasSuffix(strings.ToLower(filename), ext) {
 		filename += ext
 	}
 
-	imagesDir := s.ImagesDir()
-	if err := os.MkdirAll(imagesDir, 0755); err != nil {
-		return "", "", fmt.Errorf("ensure images dir: %w", err)
+	targetDir := filepath.Join(s.baseDir, cat)
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		return "", "", fmt.Errorf("ensure %s dir: %w", cat, err)
 	}
 
-	fullPath := filepath.Join(imagesDir, filename)
+	fullPath := filepath.Join(targetDir, filename)
 	if err := os.WriteFile(fullPath, data, 0644); err != nil {
-		return "", "", fmt.Errorf("write image file %q: %w", fullPath, err)
+		return "", "", fmt.Errorf("write media file %q: %w", fullPath, err)
 	}
 
-	relPath := filepath.Join("images", filename)
-	url := "/storage/images/" + filename
+	relPath := filepath.Join(cat, filename)
+	url := "/storage/" + cat + "/" + filename
 	return url, relPath, nil
+}
+
+func (s *LocalStorageEngine) Read(ctx context.Context, path string) ([]byte, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	cleanPath := filepath.Clean(strings.TrimSpace(path))
+	if cleanPath == "" || cleanPath == "." || strings.HasPrefix(cleanPath, "..") || filepath.IsAbs(cleanPath) {
+		return nil, fmt.Errorf("invalid path: %q", path)
+	}
+
+	fullPath := filepath.Join(s.baseDir, cleanPath)
+	baseClean := filepath.Clean(s.baseDir)
+	if fullPath != baseClean && !strings.HasPrefix(fullPath, baseClean+string(os.PathSeparator)) {
+		return nil, fmt.Errorf("path traversal forbidden: %q", path)
+	}
+
+	return os.ReadFile(fullPath)
 }
 
 func (s *LocalStorageEngine) Delete(ctx context.Context, path string) error {
@@ -144,13 +216,41 @@ func (m *MemoryStorageEngine) Type() string {
 }
 
 func (m *MemoryStorageEngine) Save(ctx context.Context, id string, data []byte, mimeType string) (string, string, error) {
+	return m.SaveInCategory(ctx, "images", id, data, mimeType)
+}
+
+func (m *MemoryStorageEngine) SaveInCategory(ctx context.Context, category, id string, data []byte, mimeType string) (string, string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	filename := id + ".png"
-	relPath := "images/" + filename
-	m.files[relPath] = data
-	return "/storage/images/" + filename, relPath, nil
+	cleanID := filepath.Base(strings.TrimSpace(id))
+	if cleanID == "" || cleanID == "." || cleanID == ".." {
+		return "", "", fmt.Errorf("invalid file id: %q", id)
+	}
+	cat := normalizeMediaCategory(category)
+	ext := resolveExtForMime(cat, mimeType)
+	filename := cleanID
+	if !strings.HasSuffix(strings.ToLower(filename), ext) {
+		filename += ext
+	}
+	relPath := cat + "/" + filename
+	cp := make([]byte, len(data))
+	copy(cp, data)
+	m.files[relPath] = cp
+	return "/storage/" + relPath, relPath, nil
+}
+
+func (m *MemoryStorageEngine) Read(ctx context.Context, path string) ([]byte, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	normalized := strings.ReplaceAll(strings.TrimSpace(path), "\\", "/")
+	data, ok := m.files[normalized]
+	if !ok {
+		return nil, os.ErrNotExist
+	}
+	cp := make([]byte, len(data))
+	copy(cp, data)
+	return cp, nil
 }
 
 func (m *MemoryStorageEngine) Delete(ctx context.Context, path string) error {

@@ -1,16 +1,19 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   Check,
+  Clapperboard,
   Copy,
   Database,
   Dices,
   Download,
+  ExternalLink,
   Flame,
   Heart,
   Image as ImageIcon,
   Layers,
   Loader2,
   Maximize2,
+  MessageSquarePlus,
   RefreshCw,
   Repeat2,
   Search,
@@ -22,6 +25,8 @@ import {
   UploadCloud,
   Wand2,
   X,
+  ZoomIn,
+  ZoomOut,
 } from "lucide-react";
 import {
   editImageWithReferences,
@@ -35,6 +40,9 @@ import {
   type PromptVariable,
 } from "../api/client";
 import { NoticeBanner } from "../components/ui";
+import { PromptChatAssistant } from "../components/PromptChatAssistant";
+import { dispatchChatRemix } from "../lib/chatRemixBridge";
+import { dispatchDramaCanvas } from "../lib/dramaCanvasBridge";
 import { useModelsCatalog } from "../lib/models";
 import {
   base64ToBlob,
@@ -542,6 +550,16 @@ export const ImageStudio: React.FC = () => {
   const [lightboxItem, setLightboxItem] = useState<HydratedImageItem | null>(
     null
   );
+  const [lightboxZoom, setLightboxZoom] = useState<"fit" | "actual">("fit");
+  const [lightboxNaturalSize, setLightboxNaturalSize] = useState<{
+    width: number;
+    height: number;
+  } | null>(null);
+
+  useEffect(() => {
+    setLightboxZoom("fit");
+    setLightboxNaturalSize(null);
+  }, [lightboxItem?.id]);
   const [copiedCardId, setCopiedCardId] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
 
@@ -1134,6 +1152,48 @@ export const ImageStudio: React.FC = () => {
     setLightboxItem(null);
   };
 
+  const resolveItemImageUrl = async (item: HydratedImageItem): Promise<string> => {
+    const raw = item.remoteUrl || item.url;
+    if (raw.startsWith("blob:") && item.blob) {
+      return await new Promise<string>((resolve) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : item.url);
+        reader.onerror = () => resolve(item.url);
+        reader.readAsDataURL(item.blob!);
+      });
+    }
+    return raw;
+  };
+
+  const handleSendToChatRemix = async (item: HydratedImageItem) => {
+    const imageUrl = await resolveItemImageUrl(item);
+    setLightboxItem(null);
+    dispatchChatRemix({
+      id: item.id,
+      imageUrl,
+      prompt: item.revisedPrompt || item.prompt,
+      model: item.model,
+      size: item.size,
+      createdAt: item.createdAt,
+    });
+  };
+
+  const handleSendToDramaCanvas = async (
+    item: HydratedImageItem,
+    role: "character" | "scene" | "image" = "image",
+  ) => {
+    const imageUrl = await resolveItemImageUrl(item);
+    setLightboxItem(null);
+    dispatchDramaCanvas({
+      id: item.id,
+      type: role,
+      title: (item.revisedPrompt || item.prompt).slice(0, 18) || "图片工坊素材",
+      prompt: item.revisedPrompt || item.prompt,
+      imageUrl,
+      sourceView: "image",
+    });
+  };
+
   const filteredPlazaItems = useMemo(() => {
     if (plazaCategory === "全部") return plazaItems;
     if (plazaCategory === "⭐ 我的收藏") {
@@ -1424,6 +1484,14 @@ export const ImageStudio: React.FC = () => {
                   <Dices size={11} />
                   <span>随机灵感</span>
                 </button>
+                <PromptChatAssistant
+                  studio="图像工坊"
+                  targetLabel="图像 Prompt"
+                  targetKey="image:prompt"
+                  value={prompt}
+                  onApply={setPrompt}
+                  context={`生成模型：${model}`}
+                />
               </div>
             </div>
 
@@ -1997,6 +2065,24 @@ export const ImageStudio: React.FC = () => {
                         </button>
                         <button
                           type="button"
+                          onClick={() => void handleSendToChatRemix(item)}
+                          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl border border-indigo-500/30 bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-500/20 cursor-pointer transition"
+                          title="将图片与 Prompt 加入 Chat 进行多轮对话 Remix"
+                        >
+                          <MessageSquarePlus size={12} />
+                          <span>Chat Remix</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void handleSendToDramaCanvas(item, "character")}
+                          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl border border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400 hover:bg-amber-500/20 cursor-pointer transition"
+                          title="发送到短剧无限画布作为角色/分镜参考"
+                        >
+                          <Clapperboard size={12} />
+                          <span>短剧画布</span>
+                        </button>
+                        <button
+                          type="button"
                           onClick={() => handleCopyPromptOrUrl(item)}
                           className="inline-flex items-center gap-1 px-2 py-1.5 rounded-xl border z-border z-ghost-btn cursor-pointer"
                           title="复制链接或 Prompt"
@@ -2033,14 +2119,66 @@ export const ImageStudio: React.FC = () => {
           onClick={() => setLightboxItem(null)}
         >
           <div
-            className="p-surface z-text rounded-2xl max-w-4xl w-full overflow-hidden shadow-2xl grid grid-cols-1 md:grid-cols-[1.25fr_1fr]"
+            className="p-surface z-text rounded-2xl max-w-6xl w-[95vw] max-h-[90vh] overflow-hidden shadow-2xl grid grid-cols-1 md:grid-cols-[1.6fr_340px]"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="studio-grid-bg p-4 flex items-center justify-center min-h-[280px] max-h-[82vh]">
+            <div className="studio-grid-bg relative min-w-0 min-h-[320px] max-h-[86vh] overflow-auto p-4 flex items-center justify-center">
+              <div className="absolute top-3 left-3 z-10 flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() =>
+                    setLightboxZoom((z) => (z === "fit" ? "actual" : "fit"))
+                  }
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-black/65 hover:bg-black/80 text-white text-[11px] font-medium backdrop-blur-xs cursor-pointer transition"
+                  title={
+                    lightboxZoom === "fit"
+                      ? "切换至 1:1 原始像素尺寸"
+                      : "切换至适应窗口"
+                  }
+                >
+                  {lightboxZoom === "fit" ? (
+                    <>
+                      <ZoomIn size={12} />
+                      <span>1:1 原图</span>
+                    </>
+                  ) : (
+                    <>
+                      <ZoomOut size={12} />
+                      <span>适应窗口</span>
+                    </>
+                  )}
+                </button>
+                <a
+                  href={lightboxItem.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-black/65 hover:bg-black/80 text-white text-[11px] font-medium backdrop-blur-xs transition"
+                  title="在新标签页打开原图"
+                >
+                  <ExternalLink size={12} />
+                  <span>新标签打开</span>
+                </a>
+              </div>
               <img
                 src={lightboxItem.url}
                 alt={lightboxItem.prompt}
-                className="max-h-[74vh] w-auto object-contain rounded-xl border z-border"
+                onLoad={(e) => {
+                  const img = e.currentTarget;
+                  if (img.naturalWidth > 0 && img.naturalHeight > 0) {
+                    setLightboxNaturalSize({
+                      width: img.naturalWidth,
+                      height: img.naturalHeight,
+                    });
+                  }
+                }}
+                onClick={() =>
+                  setLightboxZoom((z) => (z === "fit" ? "actual" : "fit"))
+                }
+                className={
+                  lightboxZoom === "actual"
+                    ? "max-w-none w-auto h-auto rounded-xl border z-border cursor-zoom-out m-auto"
+                    : "max-w-full max-h-[78vh] w-auto h-auto object-contain rounded-xl border z-border cursor-zoom-in"
+                }
               />
             </div>
 
@@ -2105,7 +2243,9 @@ export const ImageStudio: React.FC = () => {
                   >
                     <div className="z-text-muted">画幅分辨率</div>
                     <div className="font-mono-num font-semibold mt-0.5">
-                      {lightboxItem.size.replace("x", "×")}
+                      {lightboxNaturalSize
+                        ? `${lightboxNaturalSize.width}×${lightboxNaturalSize.height}`
+                        : lightboxItem.size.replace("x", "×")}
                     </div>
                   </div>
                   <div
@@ -2126,21 +2266,37 @@ export const ImageStudio: React.FC = () => {
                 </div>
               </div>
 
-              <div className="flex items-center gap-2 pt-3 border-t z-border">
+              <div className="flex flex-wrap items-center gap-2 pt-3 border-t z-border">
                 <button
                   type="button"
                   onClick={() => handleRemix(lightboxItem)}
-                  className="flex-1 inline-flex items-center justify-center gap-1.5 py-2.5 rounded-xl border z-border z-surface z-ghost-btn font-medium cursor-pointer"
+                  className="flex-1 inline-flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl border z-border z-surface z-ghost-btn font-medium cursor-pointer"
                 >
                   <Repeat2 size={13} />
                   <span>复用参数 Remix</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleSendToChatRemix(lightboxItem)}
+                  className="flex-1 inline-flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl border border-indigo-500/30 bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-500/20 font-medium cursor-pointer transition"
+                >
+                  <MessageSquarePlus size={13} />
+                  <span>加入 Chat Remix</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleSendToDramaCanvas(lightboxItem, "character")}
+                  className="flex-1 inline-flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl border border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400 hover:bg-amber-500/20 font-medium cursor-pointer transition"
+                >
+                  <Clapperboard size={13} />
+                  <span>送入短剧画布</span>
                 </button>
                 <a
                   href={lightboxItem.url}
                   download={`${lightboxItem.id}.png`}
                   target="_blank"
                   rel="noreferrer"
-                  className="flex-1 inline-flex items-center justify-center gap-1.5 py-2.5 rounded-xl z-primary-btn font-medium"
+                  className="w-full inline-flex items-center justify-center gap-1.5 py-2.5 rounded-xl z-primary-btn font-medium"
                 >
                   <Download size={13} />
                   <span>下载 PNG 原图</span>

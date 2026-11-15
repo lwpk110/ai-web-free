@@ -17,6 +17,7 @@ import {
   Server,
   Sparkles,
   Sun,
+  Terminal,
   Unlock,
   Video,
   X,
@@ -38,9 +39,11 @@ import {
   type RouteKey,
 } from "./components/ui";
 import { GenerativeWorkbench } from "./views/GenerativeWorkbench";
+import { PromptChatAssistantHost } from "./components/PromptChatAssistant";
 import { ImageStudio } from "./views/ImageStudio";
 import { LogsView } from "./views/LogsView";
 import { NetworkView } from "./views/NetworkView";
+import { OpsLogsView } from "./views/OpsLogsView";
 import { OverviewView } from "./views/OverviewView";
 import { PoolConsole } from "./views/PoolConsole";
 import { ShortDramaStudio } from "./views/ShortDramaStudio";
@@ -63,6 +66,7 @@ function resolveRouteFromHash(): RouteKey {
   const h = window.location.hash.replace(/^#\/?/, "").toLowerCase();
   if (h.startsWith("pools")) return "pools";
   if (h.startsWith("network")) return "network";
+  if (h.startsWith("ops-logs")) return "ops-logs";
   if (h.startsWith("logs")) return "logs";
   if (h.startsWith("chat")) return "chat";
   if (h.startsWith("image")) return "image";
@@ -82,6 +86,8 @@ function renderNavIcon(id: RouteKey) {
       return <Globe size={15} className="shrink-0" />;
     case "logs":
       return <ListChecks size={15} className="shrink-0" />;
+    case "ops-logs":
+      return <Terminal size={15} className="shrink-0" />;
     case "chat":
       return <Sparkles size={15} className="shrink-0" />;
     case "image":
@@ -236,6 +242,14 @@ export const App: React.FC = () => {
     totalCount > 0 ? Math.max(0, (imgLimitedCount / totalCount) * 100) : 0;
   const queueLen = overview?.kami_worker?.queue_length ?? 0;
   const proxySum = overview?.proxies_summary;
+
+  const [chatKeepAlive, setChatKeepAlive] = useState(route === "chat");
+
+  useEffect(() => {
+    if (route === "chat" && !chatKeepAlive) {
+      setChatKeepAlive(true);
+    }
+  }, [route, chatKeepAlive]);
 
   const currentNav =
     NAV_ITEMS.find((n) => n.id === route) || NAV_ITEMS[0];
@@ -601,19 +615,29 @@ export const App: React.FC = () => {
           }`}
         >
           <ErrorBoundary>
-            {fullEdge ? (
-              route === "chat" ? (
+            {(chatKeepAlive || route === "chat") && (
+              <div
+                className={
+                  route === "chat"
+                    ? "flex-1 flex flex-col min-h-0 h-full"
+                    : "hidden"
+                }
+              >
                 <GenerativeWorkbench themeMode={themeMode} />
-              ) : route === "image" ? (
-                <ImageStudio />
-              ) : route === "tts" ? (
-                <TTSStudio />
-              ) : route === "video" ? (
-                <VideoStudio />
+              </div>
+            )}
+            {route !== "chat" &&
+              (fullEdge ? (
+                route === "image" ? (
+                  <ImageStudio />
+                ) : route === "tts" ? (
+                  <TTSStudio />
+                ) : route === "video" ? (
+                  <VideoStudio />
+                ) : (
+                  <ShortDramaStudio />
+                )
               ) : (
-                <ShortDramaStudio />
-              )
-            ) : (
               <div className="max-w-7xl mx-auto">
                 {route === "overview" && (
                   <OverviewView
@@ -630,8 +654,9 @@ export const App: React.FC = () => {
                   <NetworkView autoProbeTrigger={probeTrigger} />
                 )}
                 {route === "logs" && <LogsView />}
+                {route === "ops-logs" && <OpsLogsView />}
               </div>
-            )}
+            ))}
           </ErrorBoundary>
         </main>
       </div>
@@ -657,6 +682,8 @@ export const App: React.FC = () => {
         provider={exportProvider || "chatgpt"}
         onClose={() => setExportProvider(null)}
       />
+
+      <PromptChatAssistantHost />
     </div>
   );
 };
