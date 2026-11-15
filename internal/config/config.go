@@ -40,6 +40,11 @@ type Config struct {
 	S3SecretKey             string
 	S3Region                string
 	S3PublicURL             string
+	SiliconFlowAPIKey       string
+	DashScopeAPIKey         string
+	LocalTTSBaseURL         string
+	LocalTTSAPIKey          string
+	LocalTTSModel           string
 }
 
 func Load() Config {
@@ -78,6 +83,11 @@ func Load() Config {
 		S3SecretKey:             os.Getenv("S3_SECRET_KEY"),
 		S3Region:                getEnv("S3_REGION", "auto"),
 		S3PublicURL:             os.Getenv("S3_PUBLIC_URL"),
+		SiliconFlowAPIKey:       os.Getenv("SILICONFLOW_API_KEY"),
+		DashScopeAPIKey:         os.Getenv("DASHSCOPE_API_KEY"),
+		LocalTTSBaseURL:         getEnvWithFallback("LOCAL_TTS_BASE_URL", "CUSTOM_TTS_BASE_URL", ""),
+		LocalTTSAPIKey:          getEnvWithFallback("LOCAL_TTS_API_KEY", "CUSTOM_TTS_API_KEY", ""),
+		LocalTTSModel:           getEnvWithFallback("LOCAL_TTS_MODEL", "CUSTOM_TTS_MODEL", "kokoro"),
 	}
 }
 

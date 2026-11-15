@@ -6,9 +6,11 @@ import {
   fetchVideoModels,
   deleteVideoTask,
   clearFailedVideoTasks,
+  rescueVideoTask,
   expandVideoPrompt,
   fetchServerGallery,
   fetchAudioHistory,
+  fetchAuthStatus,
   VideoTask,
   VideoModelInfo,
   VideoPromptExpandResponse,
@@ -24,36 +26,39 @@ import {
 import { CameraMotionPreview } from "../components/CameraMotionPreview";
 import { dispatchDramaCanvas } from "../lib/dramaCanvasBridge";
 import {
-  Film,
-  Play,
-  Download,
-  Sparkles,
-  Wand2,
-  Loader2,
-  Undo2,
-  Languages,
   Camera,
-  Plus,
+  CheckCircle2,
   ChevronDown,
   ChevronUp,
-  FolderOpen,
-  Repeat2,
-  Volume2,
-  RefreshCw,
   Clock,
-  Video,
-  Image as ImageIcon,
-  CheckCircle2,
-  AlertCircle,
+  Download,
   ExternalLink,
+  Film,
+  FolderOpen,
+  Globe,
+  Image as ImageIcon,
+  KeyRound,
+  Languages,
   Layers,
+  Loader2,
+  Play,
+  Plus,
+  RefreshCw,
+  Repeat2,
   Sliders,
-  AudioWaveform,
+  Sparkles,
   Trash2,
+  Undo2,
   Upload,
+  Video,
+  Volume2,
+  Wand2,
   X,
+  AudioWaveform,
+  AlertCircle,
 } from "lucide-react";
 import { PromptChatAssistant } from "../components/PromptChatAssistant";
+import { CloudKeyConfigModal } from "../components/CloudKeyConfigModal";
 
 export function VideoStudio(): React.JSX.Element {
   const [prompt, setPrompt] = useState<string>(
@@ -70,8 +75,11 @@ export function VideoStudio(): React.JSX.Element {
   const [tasks, setTasks] = useState<VideoTask[]>([]);
   const [historyFilter, setHistoryFilter] = useState<"all" | "succeeded" | "pending" | "failed">("all");
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [rescuingId, setRescuingId] = useState<string | null>(null);
   const [clearingFailed, setClearingFailed] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [isAdmin, setIsAdmin] = useState<boolean>(true);
+  const [cloudKeyModalOpen, setCloudKeyModalOpen] = useState<boolean>(false);
   const fileInputRef = React.useRef<HTMLInputElement | null>(null);
 
   // AI 扩写 / 润色与专业运镜风格状态
@@ -141,7 +149,67 @@ export function VideoStudio(): React.JSX.Element {
   const [museGeneratingMap, setMuseGeneratingMap] = useState<Record<string, boolean>>({});
   const [museProgressMap, setMuseProgressMap] = useState<Record<string, number>>({});
   const [museErrorMap, setMuseErrorMap] = useState<Record<string, string | null>>({});
+  const [pickingDemoForPresetId, setPickingDemoForPresetId] = useState<string | null>(null);
+  const dismissedPreviewsRef = React.useRef<Set<string>>(
+    (() => {
+      try {
+        const raw = localStorage.getItem("ai_web_free_dismissed_camera_previews");
+        return new Set<string>(raw ? (JSON.parse(raw) as string[]) : []);
+      } catch {
+        return new Set<string>();
+      }
+    })(),
+  );
   const taskCameraMapRef = React.useRef<Record<string, string>>({});
+
+  const persistDismissedPreviews = () => {
+    try {
+      localStorage.setItem(
+        "ai_web_free_dismissed_camera_previews",
+        JSON.stringify(Array.from(dismissedPreviewsRef.current)),
+      );
+    } catch {
+      // ignore storage quota
+    }
+  };
+
+  const setPresetPreviewUrl = (presetId: string, videoUrl: string) => {
+    dismissedPreviewsRef.current.delete(`${presetId}::${videoUrl}`);
+    persistDismissedPreviews();
+    setMusePreviewUrls((prev) => {
+      const next = { ...prev, [presetId]: videoUrl };
+      try {
+        localStorage.setItem("ai_web_free_muse_camera_previews", JSON.stringify(next));
+      } catch {
+        // ignore storage quota
+      }
+      return next;
+    });
+  };
+
+  const handleClearMusePreview = (preset: VideoCameraPreset) => {
+    const oldUrl = musePreviewUrls[preset.id];
+    if (oldUrl) {
+      dismissedPreviewsRef.current.add(`${preset.id}::${oldUrl}`);
+      persistDismissedPreviews();
+    }
+    setMusePreviewUrls((prev) => {
+      if (!prev[preset.id]) return prev;
+      const next = { ...prev };
+      delete next[preset.id];
+      try {
+        localStorage.setItem("ai_web_free_muse_camera_previews", JSON.stringify(next));
+      } catch {
+        // ignore storage quota
+      }
+      return next;
+    });
+  };
+
+  const handlePickVideoForPreview = (preset: VideoCameraPreset) => {
+    setPickingDemoForPresetId(preset.id);
+    void openAssetPicker("videos");
+  };
 
   const matchPresetForTask = (t: VideoTask): string | null => {
     if (taskCameraMapRef.current[t.task_id]) {
@@ -166,11 +234,15 @@ export function VideoStudio(): React.JSX.Element {
 
   const syncPreviewUrlsFromTasks = (taskList: VideoTask[]) => {
     const updates: Record<string, string> = {};
-    // 遍历（最新任务优先保留）
+    // 遍历（最新任务优先保留，跳过用户手动移除的错误匹配）
     for (const t of taskList) {
       if (t.status === "SUCCEEDED" && t.video_url) {
         const presetId = matchPresetForTask(t);
-        if (presetId && !updates[presetId]) {
+        if (
+          presetId &&
+          !updates[presetId] &&
+          !dismissedPreviewsRef.current.has(`${presetId}::${t.video_url}`)
+        ) {
           updates[presetId] = t.video_url;
         }
       }
@@ -180,7 +252,7 @@ export function VideoStudio(): React.JSX.Element {
       let changed = false;
       const next = { ...prev };
       for (const [k, v] of Object.entries(updates)) {
-        if (!next[k] || taskCameraMapRef.current && Object.values(taskCameraMapRef.current).includes(k)) {
+        if (!next[k] || Object.values(taskCameraMapRef.current).includes(k)) {
           if (next[k] !== v) {
             next[k] = v;
             changed = true;
@@ -197,8 +269,8 @@ export function VideoStudio(): React.JSX.Element {
     });
   };
 
-  const handleGenerateMusePreview = async (preset: VideoCameraPreset) => {
-    if (musePreviewUrls[preset.id] || museGeneratingMap[preset.id]) return;
+  const runMusePreviewGeneration = async (preset: VideoCameraPreset, force = false) => {
+    if ((!force && musePreviewUrls[preset.id]) || museGeneratingMap[preset.id]) return;
     setSelectedCameraId(preset.id);
     setMuseGeneratingMap((prev) => ({ ...prev, [preset.id]: true }));
     setMuseProgressMap((prev) => ({ ...prev, [preset.id]: 10 }));
@@ -218,15 +290,7 @@ export function VideoStudio(): React.JSX.Element {
           }));
           if (latest.status === "SUCCEEDED" && latest.video_url) {
             window.clearInterval(pollTimer);
-            setMusePreviewUrls((prev) => {
-              const next = { ...prev, [preset.id]: latest.video_url! };
-              try {
-                localStorage.setItem("ai_web_free_muse_camera_previews", JSON.stringify(next));
-              } catch {
-                // ignore storage quota
-              }
-              return next;
-            });
+            setPresetPreviewUrl(preset.id, latest.video_url);
             setMuseGeneratingMap((prev) => ({ ...prev, [preset.id]: false }));
             void loadTasks();
           } else if (latest.status === "FAILED") {
@@ -255,6 +319,12 @@ export function VideoStudio(): React.JSX.Element {
       setMuseGeneratingMap((prev) => ({ ...prev, [preset.id]: false }));
     }
   };
+
+  const handleGenerateMusePreview = (preset: VideoCameraPreset) =>
+    void runMusePreviewGeneration(preset, false);
+
+  const handleRegenerateMusePreview = (preset: VideoCameraPreset) =>
+    void runMusePreviewGeneration(preset, true);
 
   const handleEnhancePrompt = async (action: "expand" | "polish") => {
     const raw = prompt.trim();
@@ -359,6 +429,9 @@ export function VideoStudio(): React.JSX.Element {
   useEffect(() => {
     loadModels();
     loadTasks();
+    fetchAuthStatus()
+      .then((s) => setIsAdmin(!s.auth_required || s.unlocked))
+      .catch(() => setIsAdmin(true));
   }, []);
 
   const loadModels = async () => {
@@ -382,6 +455,16 @@ export function VideoStudio(): React.JSX.Element {
       // ignore
     }
   };
+
+  // 若列表存在排队/运行中（含抢救拉取中）任务，自动每 3 秒刷新状态
+  useEffect(() => {
+    const hasPending = tasks.some((t) => t.status === "PENDING" || t.status === "RUNNING");
+    if (!hasPending) return;
+    const timer = setInterval(() => {
+      loadTasks();
+    }, 3000);
+    return () => clearInterval(timer);
+  }, [tasks]);
 
   // 轮询活跃任务状态
   useEffect(() => {
@@ -468,7 +551,24 @@ export function VideoStudio(): React.JSX.Element {
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <a
+            href="#/chat"
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md border z-border hover:bg-muted/50 transition-colors z-text"
+            title="前往 Chat 使用 /crawl 爬虫搜集首帧参考图或视频素材入库复用"
+          >
+            <Globe className="w-3.5 h-3.5 text-primary" />
+            Chat 爬虫找素材
+          </a>
+          <button
+            type="button"
+            onClick={() => setCloudKeyModalOpen(true)}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md bg-amber-500/10 text-amber-700 dark:text-amber-400 border border-amber-500/25 hover:bg-amber-500/20 transition-colors"
+            title="无需本地 GPU，配置云端 API Key 解锁深度视频扩散生成"
+          >
+            <KeyRound className="w-3.5 h-3.5" />
+            配置云端 API Key
+          </button>
           <button
             type="button"
             onClick={() => void openAssetPicker("images")}
@@ -494,8 +594,8 @@ export function VideoStudio(): React.JSX.Element {
       <div className="p-3 text-xs rounded-lg bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20 flex items-start gap-2">
         <Sparkles className="w-4 h-4 shrink-0 mt-0.5 text-blue-500" />
         <div>
-          <span className="font-semibold">视频生成模式说明：</span>
-          系统内置真实文生视频大模型通道与智能语义成片匹配引擎。当配置了真实 GPU 扩散秘钥（如 <code className="px-1.5 py-0.5 rounded bg-muted text-foreground font-mono">SILICONFLOW_API_KEY</code>）时将直接执行云端深度物理扩散生成；未配置 Key 时将根据您的 Prompt 关键词进行智能语义特征分析与切题高清成片交付，杜绝画不对题与黑屏。
+          <span className="font-semibold">纯云端 API 视频推理（无需本地硬件部署）：</span>
+          点击右上角「配置云端 API Key」注入 <code className="px-1.5 py-0.5 rounded bg-muted text-foreground font-mono">SILICONFLOW_API_KEY</code>、<code className="px-1.5 py-0.5 rounded bg-muted text-foreground font-mono">DASHSCOPE_API_KEY</code>、字节即梦或 Meta Muse Cookie 后，将直接通过云端大模型执行物理扩散生成；亦可前往 Chat 使用 <code className="px-1.5 py-0.5 rounded bg-muted text-foreground font-mono">/crawl</code> 搜集参考图与视频片段缓存到「项目素材库」中直接复用。
         </div>
       </div>
 
@@ -573,7 +673,11 @@ export function VideoStudio(): React.JSX.Element {
               museGenerating={Boolean(museGeneratingMap[previewCameraPreset.id])}
               museProgress={museProgressMap[previewCameraPreset.id] || 0}
               museError={museErrorMap[previewCameraPreset.id] || null}
+              canManageDemo={isAdmin}
               onGenerateMusePreview={handleGenerateMusePreview}
+              onRegenerateMusePreview={handleRegenerateMusePreview}
+              onPickVideoForPreview={handlePickVideoForPreview}
+              onClearMusePreview={handleClearMusePreview}
               onAppendClause={handleAppendCameraClause}
               onApplyExample={handleApplyCameraExample}
             />
@@ -1186,11 +1290,82 @@ export function VideoStudio(): React.JSX.Element {
                         <p className="text-xs z-text line-clamp-2 font-medium" title={t.prompt}>
                           {t.prompt || "（基于参考图生成）"}
                         </p>
+                        {(t.vid_id || t.account_email || t.upstream_seq || t.expected_bytes) && (
+                          <div className="flex flex-wrap items-center gap-1.5 text-[10px] font-mono z-text-muted">
+                            {t.vid_id && (
+                              <span
+                                className="px-1.5 py-0.5 rounded bg-primary/10 text-primary"
+                                title={t.upstream_asset_path || t.vid_id}
+                              >
+                                {t.vid_id}
+                              </span>
+                            )}
+                            {t.account_email && (
+                              <span
+                                className="px-1.5 py-0.5 rounded bg-muted truncate max-w-[160px]"
+                                title={t.account_email}
+                              >
+                                {t.account_email}
+                              </span>
+                            )}
+                            {typeof t.upstream_seq === "number" && t.upstream_seq > 0 && (
+                              <span
+                                className="px-1.5 py-0.5 rounded bg-muted"
+                                title={`msg_id: ${t.upstream_msg_id || "-"}`}
+                              >
+                                seq#{t.upstream_seq}
+                              </span>
+                            )}
+                            {typeof t.expected_bytes === "number" && t.expected_bytes > 0 && (
+                              <span
+                                className="px-1.5 py-0.5 rounded bg-muted"
+                                title={t.upstream_asset_path || ""}
+                              >
+                                {(t.expected_bytes / (1024 * 1024)).toFixed(2)} MB
+                              </span>
+                            )}
+                          </div>
+                        )}
                         <div className="flex items-center justify-between gap-2 text-[11px] z-text-muted pt-1 border-t z-border">
                           <span className="px-1.5 py-0.5 rounded bg-muted text-[10px]">
                             {t.model}
                           </span>
                           <div className="flex items-center gap-2">
+                            {t.status === "FAILED" &&
+                              (t.provider === "meta_muse" || t.model.includes("muse")) && (
+                                <button
+                                  type="button"
+                                  disabled={rescuingId === t.task_id}
+                                  onClick={async () => {
+                                    setRescuingId(t.task_id);
+                                    try {
+                                      const res = await rescueVideoTask(t.task_id);
+                                      if (res.task) {
+                                        setTasks((prev) =>
+                                          prev.map((item) =>
+                                            item.task_id === t.task_id ? res.task : item
+                                          )
+                                        );
+                                        setActiveTask(res.task);
+                                      }
+                                      await loadTasks();
+                                    } catch (err) {
+                                      setErrorMsg(err instanceof Error ? err.message : String(err));
+                                    } finally {
+                                      setRescuingId(null);
+                                    }
+                                  }}
+                                  title="按账号与 VID 从 Muse 会话抢救拉取已出片视频"
+                                  className="inline-flex items-center gap-1 text-amber-600 dark:text-amber-400 hover:underline font-medium transition-colors disabled:opacity-50"
+                                >
+                                  <RefreshCw
+                                    className={`w-3 h-3 ${
+                                      rescuingId === t.task_id ? "animate-spin" : ""
+                                    }`}
+                                  />
+                                  抢救拉取
+                                </button>
+                              )}
                             <button
                               type="button"
                               onClick={() => handleReuseVideoTask(t)}
@@ -1417,14 +1592,35 @@ export function VideoStudio(): React.JSX.Element {
                         </div>
                         <p className="text-xs z-text line-clamp-2">{vt.prompt || "（图生视频任务）"}</p>
                       </div>
-                      <button
-                        type="button"
-                        onClick={() => handleReuseVideoTask(vt)}
-                        className="w-full py-1.5 rounded-lg bg-primary/10 text-primary hover:bg-primary/20 text-xs font-medium flex items-center justify-center gap-1"
-                      >
-                        <Repeat2 className="w-3.5 h-3.5" />
-                        复用配方参数（Prompt / 参考图 / 音频）
-                      </button>
+                      <div className="flex items-center gap-1.5">
+                        {isAdmin && vt.status === "SUCCEEDED" && vt.video_url && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const targetId = pickingDemoForPresetId || previewCameraPreset.id;
+                              setPresetPreviewUrl(targetId, vt.video_url!);
+                              setSelectedCameraId(targetId);
+                              setPickingDemoForPresetId(null);
+                              setAssetPickerOpen(false);
+                            }}
+                            className="flex-1 py-1.5 px-2 rounded-lg bg-purple-600 hover:bg-purple-500 text-white text-xs font-medium flex items-center justify-center gap-1"
+                          >
+                            <Film className="w-3.5 h-3.5" />
+                            设为「{VIDEO_CAMERA_PRESETS.find((c) => c.id === (pickingDemoForPresetId || previewCameraPreset.id))?.nameZh || "运镜"}」示例
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setPickingDemoForPresetId(null);
+                            handleReuseVideoTask(vt);
+                          }}
+                          className="flex-1 py-1.5 px-2 rounded-lg bg-primary/10 text-primary hover:bg-primary/20 text-xs font-medium flex items-center justify-center gap-1"
+                        >
+                          <Repeat2 className="w-3.5 h-3.5" />
+                          复用配方
+                        </button>
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -1433,6 +1629,18 @@ export function VideoStudio(): React.JSX.Element {
           </div>
         </div>
       )}
+
+      <CloudKeyConfigModal
+        open={cloudKeyModalOpen}
+        onClose={() => setCloudKeyModalOpen(false)}
+        initialProvider="siliconflow"
+        allowedProviders={["siliconflow", "dashscope", "jimeng", "meta_muse"]}
+        title="配置云端视频大模型 API Key（纯云端无显卡占用）"
+        onSaved={() => {
+          loadModels();
+          loadTasks();
+        }}
+      />
     </div>
   );
 }

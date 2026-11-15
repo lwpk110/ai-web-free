@@ -10,6 +10,7 @@ import (
 	"ai-web-free/internal/audit"
 	"ai-web-free/internal/chatgpt"
 	"ai-web-free/internal/config"
+	"ai-web-free/internal/health"
 	"ai-web-free/internal/opslog"
 	"ai-web-free/internal/promptplaza"
 	"ai-web-free/internal/provider"
@@ -45,6 +46,7 @@ type RouterDeps struct {
 	DB            *gorm.DB
 	StorageEngine storage.StorageEngine
 	VectorStore   vectorstore.VectorStore
+	HealthTracker *health.Tracker
 }
 
 func RegisterRouter(accountPool *accounts.Pool, proxyPool *proxy.Pool, registry *provider.Registry, cfg *config.Config) *gin.Engine {
@@ -78,6 +80,7 @@ func RegisterRouterWithDeps(deps RouterDeps) *gin.Engine {
 		DB:            deps.DB,
 		StorageEngine: deps.StorageEngine,
 		VectorStore:   deps.VectorStore,
+		HealthTracker: deps.HealthTracker,
 	}
 	if rt.VectorStore == nil {
 		rt.VectorStore = vectorstore.NewMemoryVectorStore()
@@ -114,6 +117,7 @@ func RegisterRouterWithDeps(deps RouterDeps) *gin.Engine {
 	videoHandler := NewVideoHandler(registry, deps.AuditLog)
 	videoHandler.SetStorageEngine(rt.StorageEngine)
 	dramaHandler := NewDramaHandler(rt.DB, accountPool, registry, rt.StorageEngine)
+	mediaLibraryHandler := NewMediaLibraryHandler(audioHandler, galleryHandler, videoHandler, rt.StorageEngine)
 
 	// 初始化基础前置参数（DPL、BasicCookies 等）
 	proxyUrl := cfg.ProxyURL
@@ -175,6 +179,8 @@ func RegisterRouterWithDeps(deps RouterDeps) *gin.Engine {
 	}
 
 	router.GET("/ping", func(c *gin.Context) { c.JSON(200, gin.H{"message": "pong"}) })
+	router.GET("/health", adminHandler.PublicHealth)
+	router.GET("/healthz", adminHandler.PublicHealth)
 
 	// ─── 管理端 Admin APIs (/admin/api/v1/*) ───────────────────────
 	adminToken := ""
@@ -186,6 +192,7 @@ func RegisterRouterWithDeps(deps RouterDeps) *gin.Engine {
 	{
 		adminGroup.GET("/auth/status", adminHandler.AuthStatus)
 		adminGroup.GET("/overview", adminHandler.Overview)
+		adminGroup.GET("/system/status", adminHandler.SystemStatus)
 		adminGroup.GET("/models", adminHandler.ListModelsCatalog)
 		adminGroup.GET("/diagnostics", adminHandler.Diagnostics)
 		adminGroup.POST("/diagnostics/repair", adminHandler.ExecuteDiagnosticRepair)
@@ -217,6 +224,7 @@ func RegisterRouterWithDeps(deps RouterDeps) *gin.Engine {
 		adminGroup.GET("/gallery", galleryHandler.ListWorks)
 		adminGroup.POST("/gallery", galleryHandler.SaveWork)
 		adminGroup.POST("/gallery/batch-migrate", galleryHandler.BatchMigrate)
+		adminGroup.PUT("/gallery/:id/metadata", galleryHandler.UpdateMetadata)
 		adminGroup.PUT("/gallery/:id/favorite", galleryHandler.ToggleFavorite)
 		adminGroup.DELETE("/gallery/:id", galleryHandler.DeleteWork)
 		adminGroup.DELETE("/gallery", galleryHandler.ClearWorks)
@@ -248,6 +256,7 @@ func RegisterRouterWithDeps(deps RouterDeps) *gin.Engine {
 
 		// 多模态音频与视频任务运维
 		adminGroup.GET("/multimodal/video-tasks", videoHandler.ListTasks)
+		adminGroup.POST("/multimodal/video-tasks/:id/rescue", videoHandler.RescueTask)
 		adminGroup.DELETE("/multimodal/video-tasks/:id", videoHandler.DeleteTask)
 		adminGroup.DELETE("/multimodal/video-tasks", videoHandler.ClearTasks)
 		adminGroup.GET("/multimodal/audio-history", audioHandler.ListAudioHistory)
@@ -261,6 +270,13 @@ func RegisterRouterWithDeps(deps RouterDeps) *gin.Engine {
 		adminGroup.PUT("/drama/projects/:id", dramaHandler.SaveProject)
 		adminGroup.DELETE("/drama/projects/:id", dramaHandler.DeleteProject)
 		adminGroup.POST("/drama/media/cache", dramaHandler.CacheMedia)
+
+		// Chat Copilot 网页媒体爬虫与跨工坊系统资产库复用
+		adminGroup.POST("/media/crawl", mediaLibraryHandler.CrawlMedia)
+		adminGroup.POST("/media/crawl-import", mediaLibraryHandler.ImportCrawledMedia)
+		adminGroup.GET("/media/assets", mediaLibraryHandler.ListSystemAssets)
+		adminGroup.POST("/audio/voices/custom/:id/clone", audioHandler.CloneCustomVoice)
+		adminGroup.DELETE("/audio/voices/custom/:id", audioHandler.DeleteCustomVoice)
 	}
 
 	// 静态生图/音频资源强缓存分发
@@ -281,10 +297,20 @@ func RegisterRouterWithDeps(deps RouterDeps) *gin.Engine {
 	router.OPTIONS("/v1/audio/transcriptions", optionsHandler)
 	router.OPTIONS("/v1/audio/translations", optionsHandler)
 	router.OPTIONS("/v1/audio/voices", optionsHandler)
+	router.OPTIONS("/v1/audio/voices/:id/preview", optionsHandler)
+	router.OPTIONS("/v1/audio/voice-preview", optionsHandler)
+	router.OPTIONS("/v1/audio/voices/pull-local", optionsHandler)
 	router.OPTIONS("/v1/audio/voices/design", optionsHandler)
 	router.OPTIONS("/v1/audio/voices/clone", optionsHandler)
+	router.OPTIONS("/v1/audio/voices/crawl", optionsHandler)
+	router.OPTIONS("/v1/audio/voices/crawl-import", optionsHandler)
+	router.OPTIONS("/v1/audio/voices/custom/:id/clone", optionsHandler)
+	router.OPTIONS("/v1/audio/voices/custom/:id", optionsHandler)
 	router.OPTIONS("/v1/audio/history", optionsHandler)
 	router.OPTIONS("/v1/audio/files/:id", optionsHandler)
+	router.OPTIONS("/v1/media/crawl", optionsHandler)
+	router.OPTIONS("/v1/media/crawl-import", optionsHandler)
+	router.OPTIONS("/v1/media/assets", optionsHandler)
 	router.OPTIONS("/v1/videos/generations", optionsHandler)
 	router.OPTIONS("/v1/videos/tasks/:id", optionsHandler)
 	router.OPTIONS("/v1/videos/:id", optionsHandler)
@@ -311,10 +337,20 @@ func RegisterRouterWithDeps(deps RouterDeps) *gin.Engine {
 	authGroup.POST("/v1/audio/transcriptions", audioHandler.Transcriptions)
 	authGroup.POST("/v1/audio/translations", audioHandler.Translations)
 	authGroup.GET("/v1/audio/voices", audioHandler.ListVoices)
+	authGroup.GET("/v1/audio/voices/:id/preview", audioHandler.PreviewVoice)
+	authGroup.GET("/v1/audio/voice-preview", audioHandler.PreviewVoice)
+	authGroup.POST("/v1/audio/voices/pull-local", audioHandler.PullLocalVoices)
 	authGroup.POST("/v1/audio/voices/design", audioHandler.VoiceDesign)
 	authGroup.POST("/v1/audio/voices/clone", audioHandler.VoiceClone)
+	authGroup.POST("/v1/audio/voices/crawl", audioHandler.CrawlVoices)
+	authGroup.POST("/v1/audio/voices/crawl-import", audioHandler.ImportCrawledVoice)
+	authGroup.POST("/v1/audio/voices/custom/:id/clone", audioHandler.CloneCustomVoice)
+	authGroup.DELETE("/v1/audio/voices/custom/:id", audioHandler.DeleteCustomVoice)
 	authGroup.GET("/v1/audio/history", audioHandler.ListAudioHistory)
 	authGroup.GET("/v1/audio/files/:id", audioHandler.GetAudioFile)
+	authGroup.POST("/v1/media/crawl", mediaLibraryHandler.CrawlMedia)
+	authGroup.POST("/v1/media/crawl-import", mediaLibraryHandler.ImportCrawledMedia)
+	authGroup.GET("/v1/media/assets", mediaLibraryHandler.ListSystemAssets)
 	authGroup.POST("/v1/videos/generations", videoHandler.Generations)
 	authGroup.GET("/v1/videos/tasks/:id", videoHandler.GetTask)
 	authGroup.GET("/v1/videos/:id", videoHandler.GetTask)

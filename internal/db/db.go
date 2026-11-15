@@ -181,13 +181,24 @@ func seedDefaultChannels(db *gorm.DB) {
 		{
 			ID:           "chan-jianying-tts",
 			ProviderID:   "jianying",
-			ChannelName:  "剪映官方免密 TTS 逆向节点",
+			ChannelName:  "剪映旧免密 TTS 节点 (已退役)",
 			AuthType:     "no_auth",
 			Credential:   "anonymous-noauth",
-			Status:       "active",
+			Status:       "disabled",
 			IsFreeTier:   true,
 			Capabilities: "tts,stream",
-			Description:  "字节剪映 200+ 热门爆款音色（小帅、小美、猴哥、东北老总、四川妹子等），免登录免 Key，开箱即用",
+			Description:  "字节剪映旧免密域名（api-normal-c-lq.zijieapi.com 已返回 NXDOMAIN 下线），默认禁用；请使用 Edge-TTS、硅基流动或阿里云百炼云端语音引擎",
+		},
+		{
+			ID:           "chan-local-tts",
+			ProviderID:   "local_tts",
+			ChannelName:  "自定义 OpenAI 兼容云端 TTS 节点",
+			AuthType:     "no_auth",
+			Credential:   "custom-endpoint",
+			Status:       "standby",
+			IsFreeTier:   true,
+			Capabilities: "tts",
+			Description:  "可选外部 OpenAI 兼容云端/中继语音端点（配置 CUSTOM_TTS_BASE_URL 即生效，无需本地部署推理）",
 		},
 		{
 			ID:           "chan-edge-tts",
@@ -252,6 +263,12 @@ func seedDefaultChannels(db *gorm.DB) {
 			ch.CreatedAt = time.Now().UTC()
 			ch.UpdatedAt = time.Now().UTC()
 			_ = db.Create(&ch).Error
+		} else if ch.ID == "chan-jianying-tts" && existing.Status == "active" {
+			_ = db.Model(&existing).Updates(map[string]interface{}{
+				"status":      "disabled",
+				"description": ch.Description,
+				"updated_at":  time.Now().UTC(),
+			}).Error
 		}
 	}
 }

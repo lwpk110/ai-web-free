@@ -13,6 +13,7 @@ import {
   ExternalLink,
   FileCode2,
   FileText,
+  Globe,
   History,
   ImagePlus,
   KeyRound,
@@ -43,8 +44,10 @@ import {
   getOpenUISystemPrompt,
 } from "../lib/openui-library";
 import {
+  crawlMedia,
   editImageWithReferences,
   exportServerConversationMarkdown,
+  type CrawlerMediaKind,
   fetchDiagnostics,
   fetchServerChatPresets,
   generateImage,
@@ -99,6 +102,7 @@ const INITIAL_COPILOT_MESSAGE = `欢迎使用 **AI-Web-Free 智能对话与平�
 - 直接提问或使用 \`/diagnose\` 分析 **号池熔断、账号封禁、403 WAF 风控、401 过期、429 限流** 等根因
 - 使用 \`/fix\` 呼出平台诊断自愈台或直接点击下方按钮执行 **一键智能自愈**（支持无可用账号下的 **离线诊断兜底**）
 - 使用 \`/openui\` 或 \`/image\` 流式渲染交互式 OpenUI 看板与生图工作卡
+- 使用 \`/voice\` 或 \`/crawl\` 触发 **全工坊网络爬虫工具**：先检索现有本地缓存库，未命中则从网页搜集并缓存 **音色克隆样本 / 参考图像 / 视频素材** 写入系统库跨工坊复用（纯云端推理，无需本地硬件）
 
 \`\`\`openui
 root = Card([header, diagCard, poolCard])
@@ -191,6 +195,22 @@ const SLASH_SKILLS: SkillDefinition[] = [
     icon: ImagePlus,
   },
   {
+    command: "/voice",
+    skill: "media_crawl",
+    label: "音色爬虫克隆",
+    description: "先查本地系统音色库，未命中则搜索或爬取指定网页音频缓存到本地克隆入库",
+    defaultPrompt: "/voice 霸总低沉男声 短剧配音",
+    icon: Globe,
+  },
+  {
+    command: "/crawl",
+    skill: "media_crawl",
+    label: "全工坊素材爬虫",
+    description: "从网络/指定 URL 搜索并缓存音色、参考图或视频素材写入系统库供各工坊复用",
+    defaultPrompt: "/crawl 古风仙侠女主立绘 参考图",
+    icon: Globe,
+  },
+  {
     command: "/clear",
     skill: "clear",
     label: "清空本轮会话",
@@ -214,6 +234,11 @@ const STARTER_PROMPTS = [
       "/fix 帮我诊断当前损坏代理和过期账号，并展示一键自愈与账号诊断表格。",
   },
   {
+    icon: Globe,
+    label: "搜集短剧音色/素材入库",
+    prompt: "/voice 霸总低沉男声",
+  },
+  {
     icon: ImagePlus,
     label: "快捷生图 (/image)",
     prompt: SLASH_SKILLS[3].defaultPrompt,
@@ -230,6 +255,52 @@ const OPS_INTENT_RE =
   /(诊断|熔断|封禁|停用|风控|拦截|403|401|429|号池|代理|报错|异常|不可用|失败|为什么挂|挂了|续期|卡密|测活|修复|自愈|健康|banned|expired|failover|waf|cloudflare|sentinel|turnstile|proxy|pool|health)/i;
 const IMAGE_INTENT_RE = /(生图卡|image\s*studio|画一张|生成图片|文生图|生图工作台)/i;
 const OPENUI_INTENT_RE = /(openui|交互卡片|交互式|仪表盘|看板|可视化|饼图|柱状图|折线图)/i;
+const MEDIA_CRAWL_INTENT_RE =
+  /((爬虫|爬取|搜集|抓取|搜一个|找一个|找合适|采集).*(音色|声音|配音|克隆|声线|参考图|立绘|剧照|视频|素材))|((音色|参考图|视频素材).*(缓存|克隆|入库|系统库|复用))/i;
+
+function parseMediaCrawlIntent(raw: string): {
+  query: string;
+  targetUrl: string;
+  mediaKind: CrawlerMediaKind;
+  role: string;
+} {
+  let clean = raw
+    .trim()
+    .replace(/^\/(voice|crawl-voice|crawl)\s*/i, "")
+    .trim();
+  const urlMatch = clean.match(/https?:\/\/[^\s"'<>]+/i);
+  const targetUrl = urlMatch ? urlMatch[0] : "";
+  if (targetUrl) {
+    clean = clean.replace(targetUrl, "").trim();
+  }
+
+  let mediaKind: CrawlerMediaKind = "auto";
+  if (/^\/voice\b/i.test(raw) || /(音色|声音|配音|克隆|声线|tts|voice)/i.test(raw)) {
+    mediaKind = "voice";
+  } else if (/(参考图|立绘|剧照|人物图|场景图|背景图|图片|image|portrait)/i.test(raw)) {
+    mediaKind = "image";
+  } else if (/(视频|片段|镜头|空镜|video|clip|b-roll)/i.test(raw)) {
+    mediaKind = "video";
+  }
+
+  let role = "";
+  for (const r of ["霸总男主", "大女主", "甜宠千金", "冷酷反派", "悬疑旁白", "热血战神"]) {
+    if (clean.includes(r) || clean.includes(r.slice(0, 2))) {
+      role = r;
+      break;
+    }
+  }
+  const cleanQuery = clean
+    .replace(/(请帮我|帮我|爬虫|爬取|搜集|抓取|搜索|查找|找合适的|缓存到本地|克隆|写入系统库|加入系统库|复用)/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return {
+    query: cleanQuery || clean,
+    targetUrl,
+    mediaKind,
+    role,
+  };
+}
 
 async function classifySemanticRouteWithLLM(params: {
   promptText: string;
@@ -524,7 +595,7 @@ function buildUserPayloadForSkill(
 
 export function generateSmartTitle(prompt: string): string {
   let clean = prompt.trim();
-  clean = clean.replace(/^\/(image|diagnose|fix|openui|clear)\s*/i, "");
+  clean = clean.replace(/^\/(image|diagnose|fix|openui|voice|crawl|clear)\s*/i, "");
   clean = clean.replace(/^(gpt-image-[^\s]+|dall-e-[^\s]+|flux-[^\s]+|wanx-[^\s]+|jimeng-[^\s]+|auto)\s*/i, "");
   clean = clean.replace(/^(以当前模型最大的能力|请帮我|帮我|请生成|请绘制|生成一个|生成一张|制作一个|设计一个|画一个|画一张)\s*/i, "");
   clean = clean.trim();
@@ -1240,6 +1311,99 @@ export function GenerativeWorkbench({ themeMode = "dark" }: GenerativeWorkbenchP
       promptText = `![参考图](${activeRemix.imageUrl})\n\n[原始提示词] ${activeRemix.prompt || "无"}\n\n${promptText}`;
     }
 
+    // ─── 全工坊爬虫优先路由：/voice、/crawl 或自然语言搜索素材克隆/入库 ─────
+    const isExplicitCrawlCmd =
+      /^\/(voice|crawl-voice|crawl)\b/i.test(promptText.trim()) ||
+      MEDIA_CRAWL_INTENT_RE.test(promptText);
+    if (isExplicitCrawlCmd) {
+      const parsedCrawl = parseMediaCrawlIntent(promptText);
+      const userMessageId = "user-" + Date.now();
+      const assistantId = "assistant-" + (Date.now() + 1);
+      const nextUserMsg: StoredChatMessage = {
+        id: userMessageId,
+        conversationId: currentConvId,
+        role: "user",
+        content: promptText,
+        openuiMode: false,
+        skill: "media_crawl",
+        timestamp: Date.now(),
+      };
+      const nextAssistantMsg: StoredChatMessage = {
+        id: assistantId,
+        conversationId: currentConvId,
+        role: "assistant",
+        content: "🌐 正在检索系统现有缓存库并爬取外部匹配资源...",
+        model: "crawler",
+        openuiMode: false,
+        skill: "media_crawl",
+        isStreaming: true,
+        timestamp: Date.now(),
+      };
+      setMessages([...historyMessages, nextUserMsg, nextAssistantMsg]);
+      setIsSending(true);
+
+      const escapeAttr = (v: string) =>
+        v.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, " ");
+
+      const startTime = Date.now();
+      try {
+        const res = await crawlMedia({
+          query: parsedCrawl.query,
+          url: parsedCrawl.targetUrl,
+          media_kind: parsedCrawl.mediaKind,
+          limit: 10,
+        });
+        const elapsedMs = Date.now() - startTime;
+        const sysVoiceCount = res.existing_voices?.length || 0;
+        const sysImageCount = res.existing_images?.length || 0;
+        const sysVideoCount = res.existing_videos?.length || 0;
+        const candCount = res.candidates?.length || 0;
+
+        const openuiBlock = [
+          "```openui",
+          "root = Card([header, crawler])",
+          `header = CardHeader("跨工坊素材爬虫与系统库入库台", "检索词: ${escapeAttr(parsedCrawl.query || parsedCrawl.targetUrl || "全库检索")} · 现有命中 语音${sysVoiceCount}/图像${sysImageCount}/视频${sysVideoCount} · 新抓取 ${candCount} 项")`,
+          `crawler = MediaCrawlerCard("${escapeAttr(parsedCrawl.query)}", "${escapeAttr(parsedCrawl.targetUrl)}", "${parsedCrawl.mediaKind}", "${escapeAttr(parsedCrawl.role)}")`,
+          "```",
+        ].join("\n");
+
+        const summaryMarkdown = [
+          `🌐 **已完成系统缓存检索与网页媒体爬虫扫描** (${elapsedMs}ms)`,
+          `- **系统现有库命中**：音色 ${sysVoiceCount} 个 · 图像 ${sysImageCount} 张 · 视频 ${sysVideoCount} 条`,
+          `- **网络爬虫新发现**：${candCount} 条候选（可在下方卡片内直接试听/预览，点击按钮即可 **缓存本地克隆或写入系统库**，并在「配音/生图/视频/短剧工坊」中直接复用）`,
+          "",
+          openuiBlock,
+        ].join("\n");
+
+        const completedMsg: StoredChatMessage = {
+          ...nextAssistantMsg,
+          content: summaryMarkdown,
+          openuiMode: true,
+          isStreaming: false,
+          latencyMs: elapsedMs,
+        };
+        const finalMessages = [...historyMessages, nextUserMsg, completedMsg];
+        setMessages(finalMessages);
+        if (currentConvId) {
+          void saveUnifiedConversationMessages(currentConvId, finalMessages);
+          void updateUnifiedConversation(currentConvId, { messageCount: finalMessages.length });
+        }
+      } catch (err: any) {
+        const errText = err?.message || "媒体爬虫检索异常";
+        const failMsg: StoredChatMessage = {
+          ...nextAssistantMsg,
+          content: `❌ **素材爬虫调用失败**：${errText}`,
+          isStreaming: false,
+          latencyMs: Date.now() - startTime,
+        };
+        const finalMessages = [...historyMessages, nextUserMsg, failMsg];
+        setMessages(finalMessages);
+      } finally {
+        setIsSending(false);
+      }
+      return;
+    }
+
     // ─── 统一自然语言语义路由（生图 / 语音 / 深度研究 / 显式点名模型） ──────────
     const routeController = new AbortController();
     abortRef.current = routeController;
@@ -1568,7 +1732,7 @@ export function GenerativeWorkbench({ themeMode = "dark" }: GenerativeWorkbenchP
 
         const audioBlob = await synthesizeSpeech(
           speechText,
-          "zh_female_shuangkuai",
+          "zh-CN-XiaoxiaoNeural",
           1.0,
           chosenAudioModel
         );
@@ -2678,7 +2842,7 @@ export function GenerativeWorkbench({ themeMode = "dark" }: GenerativeWorkbenchP
                   void handleSendMessage();
                 }
               }}
-              placeholder="输入消息，或使用 /image (生图)、/diagnose、/fix、/openui (Enter 发送, Shift+Enter 换行)..."
+              placeholder="输入消息，或使用 /voice (搜集克隆音色)、/crawl (爬取图/视频入库)、/image、/diagnose、/openui (Enter 发送)..."
               rows={2}
               className="flex-1 bg-transparent text-sm z-text placeholder:z-text-muted focus:outline-none resize-none max-h-36 overflow-y-auto"
             />

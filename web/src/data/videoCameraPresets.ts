@@ -1,5 +1,6 @@
 export type CameraCategory =
   | "全部"
+  | "短剧常用"
   | "推拉运镜"
   | "摇移跟拍"
   | "环绕升降"
@@ -22,6 +23,7 @@ export interface VideoCameraPreset {
 
 export const VIDEO_CAMERA_CATEGORIES: CameraCategory[] = [
   "全部",
+  "短剧常用",
   "推拉运镜",
   "摇移跟拍",
   "环绕升降",
@@ -269,5 +271,37 @@ export const VIDEO_CAMERA_PRESETS: VideoCameraPreset[] = [
     musePrompt:
       "5-second live-action Phantom Flex4K 120fps slow-motion macro shot, 100mm Laowa Probe Macro lens at T2.8. Extreme close-up of a ballerina's satin pointe shoe landing gracefully on a sunlit wooden stage, kicking up a shimmering halo of rosin chalk dust suspended in warm golden backlighting, razor-sharp micro-textures and ultra-smooth slow-motion physics.",
     recommendedModel: "jimeng-video-2.0",
+  },
+  {
+    id: "drama-ceo-rush",
+    category: "短剧常用",
+    nameZh: "短剧霸总登场急推",
+    termEn: "Vertical 9:16 CEO Push-In",
+    effectDesc: "黄金前3秒竖屏戏剧张力，仰拍慢推搭配强对比轮廓光",
+    insertClauseZh: "9:16 竖屏短剧低角度仰拍缓慢推近人物脸部特写，冷暖对比轮廓光",
+    insertClauseEn: "9:16 vertical drama low-angle slow push-in to intense close-up portrait, high-contrast rim light",
+    examplePromptZh:
+      "9:16竖屏都市豪门短剧开场，身穿定制黑西装的冷峻男主推开奢华宴会厅大门缓步走来，低角度仰拍缓慢推近其眼神特写，水晶吊灯散景，高对比电影光影",
+    examplePromptEn:
+      "9:16 vertical luxury drama opening, a commanding young CEO in a tailored black suit stepping into a crystal-lit banquet hall, low-angle push-in to razor-sharp eye close-up",
+    musePrompt:
+      "5-second vertical 9:16 modern drama hero entrance shot, 35mm anamorphic lens at T2.0. Low-angle slow dolly push-in following a sharp-suited male lead parting heavy double doors into a warm chandelier-lit luxury hall, cool cyan rim light carving silhouette, decisive glance toward camera, 24fps.",
+    recommendedModel: "jimeng-video-2.0",
+  },
+  {
+    id: "drama-xianxia-orbit",
+    category: "短剧常用",
+    nameZh: "古装仙侠女主环绕",
+    termEn: "Ancient Costume Orbit",
+    effectDesc: "360度浪漫衣袂飘飞环绕运镜，适合仙侠/宫斗高光爆发桥段",
+    insertClauseZh: "古风仙侠 180 度流畅环绕运镜，发丝与丝绸长裙随风飘逸",
+    insertClauseEn: "Cinematic 180-degree orbital tracking shot around ancient Chinese heroine, flowing silk robes",
+    examplePromptZh:
+      "9:16竖屏古装仙侠短剧高光镜头，一袭绯红鎏金汉服的大女主傲立雕花楼台之上，镜头 180 度流畅环绕拍摄她衣袂飘飘与坚定目光，漫天飘落金色银杏叶与柔和仙雾",
+    examplePromptEn:
+      "9:16 vertical ancient fantasy drama, a dignified heroine in crimson-and-gold hanfu standing on an ornate palace terrace, smooth 180-degree orbital camera with drifting petals and mist",
+    musePrompt:
+      "5-second vertical 9:16 Chinese wuxia fantasy shot on ARRI Alexa, 50mm prime. Smooth 180-degree orbital tracking around a poised heroine in embroidered crimson silk hanfu atop an ancient timber balcony, golden ginkgo leaves drifting in slow motion through sunlit incense mist, 24fps.",
+    recommendedModel: "THUDM/CogVideoX-5b",
   },
 ];

@@ -7,14 +7,18 @@ import (
 
 // VoiceDescriptor 描述 TTS 音色元数据
 type VoiceDescriptor struct {
-	ID         string   `json:"id"`
-	Name       string   `json:"name"`
-	Provider   string   `json:"provider"` // "jianying" | "dashscope" | "siliconflow"
-	Category   string   `json:"category"` // "影视解说" | "特色搞怪" | "地域方言" | "情感生活" | "外语英语"
-	Gender     string   `json:"gender"`   // "female" | "male"
-	SampleText string   `json:"sample_text"`
-	Tags       []string `json:"tags"`
-	PreviewURL string   `json:"preview_url,omitempty"`
+	ID           string   `json:"id"`
+	Name         string   `json:"name"`
+	Provider     string   `json:"provider"` // "local_tts" | "edge_tts" | "siliconflow" | "dashscope" | "chatgpt" | "jianying"
+	Category     string   `json:"category"` // "本地离线" | "影视解说" | "自然情感" | "地域方言" | "特色角色" | "外语多语种"
+	Gender       string   `json:"gender"`   // "female" | "male"
+	Locale       string   `json:"locale,omitempty"`
+	SampleText   string   `json:"sample_text"`
+	Tags         []string `json:"tags"`
+	PreviewURL   string   `json:"preview_url,omitempty"`
+	Available    bool     `json:"available"`
+	CachedLocal  bool     `json:"cached_local"`
+	StatusReason string   `json:"status_reason,omitempty"`
 }
 
 var (

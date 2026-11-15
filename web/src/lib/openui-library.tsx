@@ -27,18 +27,23 @@ import {
 } from "lucide-react";
 import { z } from "zod/v4";
 import {
+  crawlMedia,
   executeAccountAction,
   executeDiagnosticRepair,
   fetchAccounts,
   fetchDiagnostics,
   fetchOverview,
+  fetchSystemMediaAssets,
   generateImage,
+  importCrawledMedia,
+  type CrawlerMediaKind,
   probeAllAccounts,
   type AccountView,
   type DiagnosticRepairResponse,
   type DiagnosticsReport,
   type PoolStats,
 } from "../api/client";
+import { MediaCrawlerCardWidget } from "../components/MediaCrawlerCardWidget";
 import { useModelsCatalog } from "./models";
 
 function maskProxyHost(raw?: string): string {
@@ -896,6 +901,26 @@ const ExtendedCard = defineComponent({
 /**
  * 基于 @openuidev/react-ui 的 openuiChatLibrary 组合构建 aiWebFreeLibrary
  */
+export const MediaCrawlerCard = defineComponent({
+  name: "MediaCrawlerCard",
+  description:
+    "Searches the existing local system asset library first, then crawls public web pages or media links to preview and cache/clone voices (短剧音色), reference images (参考图), or video clips (视频素材) into the reusable system library.",
+  props: z.object({
+    query: z.string().optional(),
+    targetUrl: z.string().optional(),
+    mediaKind: z.enum(["auto", "voice", "image", "video"]).optional(),
+    role: z.string().optional(),
+  }),
+  component: ({ props }) => (
+    <MediaCrawlerCardWidget
+      initialQuery={props.query || ""}
+      initialUrl={props.targetUrl || ""}
+      initialKind={(props.mediaKind as CrawlerMediaKind) || "auto"}
+      initialRole={props.role || ""}
+    />
+  ),
+});
+
 export const aiWebFreeLibrary = createLibrary({
   root: "Card",
   components: [
@@ -907,6 +932,7 @@ export const aiWebFreeLibrary = createLibrary({
     AccountDiagnosticTable,
     ImageStudioCard,
     PlatformDiagnosisCard,
+    MediaCrawlerCard,
   ],
   componentGroups: [
     ...openuiChatComponentGroups,
@@ -917,6 +943,7 @@ export const aiWebFreeLibrary = createLibrary({
         "AccountDiagnosticTable",
         "ImageStudioCard",
         "PlatformDiagnosisCard",
+        "MediaCrawlerCard",
       ],
     },
   ],
@@ -925,12 +952,13 @@ export const aiWebFreeLibrary = createLibrary({
 export const aiWebFreePromptOptions: PromptOptions = {
   ...openuiChatPromptOptions,
   preamble:
-    "You are the AI-Web-Free Generative UI & Operations Copilot powered by OpenUI Lang. When generating OpenUI UI cards, emit valid OpenUI Lang starting with `root = Card([...])`. Combine built-in OpenUI components (Header, TextContent, BarChart, LineChart, PieChart, Table, Tabs, Form, Callout, CodeBlock) and custom AI-Web-Free components (PoolOverviewCard, AccountDiagnosticTable, ImageStudioCard, PlatformDiagnosisCard) to build clean, production-grade interactive interfaces.",
+    "You are the AI-Web-Free Generative UI & Operations Copilot powered by OpenUI Lang. When generating OpenUI UI cards, emit valid OpenUI Lang starting with `root = Card([...])`. Combine built-in OpenUI components (Header, TextContent, BarChart, LineChart, PieChart, Table, Tabs, Form, Callout, CodeBlock) and custom AI-Web-Free components (PoolOverviewCard, AccountDiagnosticTable, ImageStudioCard, PlatformDiagnosisCard, MediaCrawlerCard) to build clean, production-grade interactive interfaces.",
   additionalRules: [
     ...(openuiChatPromptOptions.additionalRules || []),
     'When the user asks to diagnose platform failures, pool circuit-breakers, banned accounts, 403 WAF/Cloudflare blocks, 401 expiry, or proxy meltdowns, include PlatformDiagnosisCard("全平台异常根因诊断与自愈台", "all") inside Card.',
     'When the user asks about account pool status, health metrics, or provider overview, include PoolOverviewCard("chatgpt", "ChatGPT 号池实时健康状态") and/or AccountDiagnosticTable("chatgpt") inside Card.',
     'When the user wants to generate or preview an image, include ImageStudioCard(prompt, "gpt-image-2.5-sunburst", "1024x1024", "hd") inside Card.',
+    'When the user wants to search, crawl webpages/URLs, download, clone, or reuse voices/audio samples, reference images/portraits, or video clips from the web or system cache library, include MediaCrawlerCard(query, targetUrl, mediaKind, role) inside Card (mediaKind is "auto" | "voice" | "image" | "video").',
   ],
   examples: [
     ...(openuiChatPromptOptions.examples || []),
@@ -942,6 +970,9 @@ table = AccountDiagnosticTable("chatgpt")`,
 header = CardHeader("ChatGPT Web 免费号池运行状态", "实时号池监控与账号诊断")
 overview = PoolOverviewCard("chatgpt", "号池核心指标")
 table = AccountDiagnosticTable("chatgpt")`,
+    `root = Card([header, crawler])
+header = CardHeader("跨工坊网络爬虫与系统素材库", "先查缓存库，未命中时网页采集缓存并克隆复用")
+crawler = MediaCrawlerCard("霸总低沉男声", "", "voice", "霸总男主")`,
   ],
 };
 
@@ -962,6 +993,31 @@ export const aiWebFreeToolProvider: Record<
       action: String(args.action || "smart_heal"),
       confirm: Boolean(args.confirm),
       provider: args.provider ? String(args.provider) : "chatgpt",
+    }),
+  search_system_media: async (args) =>
+    fetchSystemMediaAssets(
+      (String(args.media_kind || "auto") as CrawlerMediaKind) || "auto",
+      String(args.query || "")
+    ),
+  crawl_web_media: async (args) =>
+    crawlMedia({
+      query: args.query ? String(args.query) : "",
+      url: args.url ? String(args.url) : "",
+      media_kind: (String(args.media_kind || "auto") as CrawlerMediaKind) || "auto",
+      limit: Number(args.limit || 10),
+    }),
+  import_crawled_media: async (args) =>
+    importCrawledMedia({
+      media_kind:
+        (String(args.media_kind || "voice") as "voice" | "image" | "video") || "voice",
+      url: String(args.url || ""),
+      source_page: args.source_page ? String(args.source_page) : undefined,
+      title: args.title ? String(args.title) : undefined,
+      role: args.role ? String(args.role) : undefined,
+      transcript: args.transcript ? String(args.transcript) : undefined,
+      clone_engine:
+        (String(args.clone_engine || "auto") as "auto" | "siliconflow" | "dashscope" | "cache_only") ||
+        "auto",
     }),
 };
 

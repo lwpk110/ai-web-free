@@ -31,6 +31,7 @@ func setupTestGalleryHandler(t *testing.T) (*GalleryHandler, *gin.Engine) {
 		adminGroup.GET("/gallery", handler.ListWorks)
 		adminGroup.POST("/gallery", handler.SaveWork)
 		adminGroup.POST("/gallery/batch-migrate", handler.BatchMigrate)
+		adminGroup.PUT("/gallery/:id/metadata", handler.UpdateMetadata)
 		adminGroup.PUT("/gallery/:id/favorite", handler.ToggleFavorite)
 		adminGroup.DELETE("/gallery/:id", handler.DeleteWork)
 		adminGroup.DELETE("/gallery", handler.ClearWorks)
@@ -46,6 +47,76 @@ func setupTestGalleryHandler(t *testing.T) (*GalleryHandler, *gin.Engine) {
 	router.GET("/storage/images/:filename", handler.ServeStaticImage)
 
 	return handler, router
+}
+
+func TestGalleryMetadataAndFilters(t *testing.T) {
+	_, router := setupTestGalleryHandler(t)
+	fakeB64 := base64.StdEncoding.EncodeToString([]byte("gallery-image"))
+	items := []SaveWorkRequest{
+		{ID: "gallery-character", Prompt: "portrait of Lin", Model: "model-a", Size: "1024x1792", Category: "character_portrait", Source: "drama_canvas", ProjectID: "project-1", ProjectTitle: "Moon Story", RoleName: "Lin", Tags: []string{"lead", "portrait"}, B64JSON: fakeB64},
+		{ID: "gallery-general", Prompt: "mountain landscape", Model: "model-b", Size: "1024x1024", B64JSON: fakeB64},
+	}
+	for _, item := range items {
+		body, _ := json.Marshal(item)
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/admin/api/v1/gallery", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		router.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("save gallery work failed: %d %s", w.Code, w.Body.String())
+		}
+	}
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/admin/api/v1/gallery?category=character_portrait&source=drama_canvas&project_id=project-1&q=portrait", nil)
+	router.ServeHTTP(w, req)
+	var list struct {
+		Items []db.GalleryWork `json:"items"`
+		Total int              `json:"total"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &list); err != nil || w.Code != http.StatusOK || list.Total != 1 || len(list.Items) != 1 {
+		t.Fatalf("filtered gallery result mismatch: status=%d body=%s err=%v", w.Code, w.Body.String(), err)
+	}
+	if list.Items[0].Source != "drama_canvas" || list.Items[0].ProjectTitle != "Moon Story" || list.Items[0].RoleName != "Lin" || len(list.Items[0].Tags) != 2 {
+		t.Fatalf("gallery metadata did not round-trip: %+v", list.Items[0])
+	}
+
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/admin/api/v1/gallery?category=character_portrait&q=mountain", nil)
+	router.ServeHTTP(w, req)
+	list = struct {
+		Items []db.GalleryWork `json:"items"`
+		Total int              `json:"total"`
+	}{}
+	_ = json.Unmarshal(w.Body.Bytes(), &list)
+	if list.Total != 0 {
+		t.Fatalf("keyword search escaped category filter: %+v", list.Items)
+	}
+
+	updateBody, _ := json.Marshal(map[string]any{"category": "scene_anchor", "tags": []string{"night", "Night", "rain"}})
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPut, "/admin/api/v1/gallery/gallery-character/metadata", bytes.NewReader(updateBody))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(w, req)
+	var updated db.GalleryWork
+	if err := json.Unmarshal(w.Body.Bytes(), &updated); err != nil || w.Code != http.StatusOK {
+		t.Fatalf("update gallery metadata failed: status=%d body=%s err=%v", w.Code, w.Body.String(), err)
+	}
+	if updated.Category != "scene_anchor" || len(updated.Tags) != 2 || updated.Tags[0] != "night" || updated.Tags[1] != "rain" {
+		t.Fatalf("gallery metadata normalization mismatch: %+v", updated)
+	}
+
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/admin/api/v1/gallery?q=lead", nil)
+	router.ServeHTTP(w, req)
+	list = struct {
+		Items []db.GalleryWork `json:"items"`
+		Total int              `json:"total"`
+	}{}
+	_ = json.Unmarshal(w.Body.Bytes(), &list)
+	if list.Total != 0 {
+		t.Fatalf("updated tags should replace old tags; got %d matching works", list.Total)
+	}
 }
 
 func TestGalleryWorksCRUD(t *testing.T) {

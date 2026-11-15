@@ -230,3 +230,48 @@ func TestBuildMuseVideoPrompt(t *testing.T) {
 		}
 	}
 }
+
+func TestMetaMuseProvider_ClaimVideoHashDedup(t *testing.T) {
+	p := NewMetaMuseProvider(nil, "")
+	if owner, ok := p.claimVideoHash("muse_task_a", "data:video/mp4;base64,AAA111"); !ok || owner != "muse_task_a" {
+		t.Fatalf("expected task_a to claim hash, got owner=%s ok=%v", owner, ok)
+	}
+	if owner, ok := p.claimVideoHash("muse_task_b", "data:video/mp4;base64,AAA111"); ok || owner != "muse_task_a" {
+		t.Fatalf("expected task_b to be rejected for duplicate video hash, got owner=%s ok=%v", owner, ok)
+	}
+	if owner, ok := p.claimVideoHash("muse_task_b", "data:video/mp4;base64,BBB222"); !ok || owner != "muse_task_b" {
+		t.Fatalf("expected task_b to claim distinct hash, got owner=%s ok=%v", owner, ok)
+	}
+}
+
+func TestToMuseUpstreamMetaAndGetTaskFullMeta(t *testing.T) {
+	res := &museProtoMatchResult{
+		Found: true,
+		Tier:  "tier1_presentation_vid",
+		Asset: &museProtoVideoAsset{
+			Source:      "presentation",
+			MsgID:       "msg-123",
+			Seq:         194,
+			SessionID:   "sess-456",
+			Path:        "sandbox://workspace/muse video/media-generation-5s-VID-ABCD1234.mp4",
+			Label:       "test video",
+			OriginalURL: "https://vm.metaaivm.com/media/raw/test.mp4",
+			ByteLen:     2165681,
+		},
+	}
+	meta := toMuseUpstreamMeta(res, "VID-ABCD1234", "muse-1@meta.local")
+	if meta.UpstreamSessionID != "sess-456" || meta.UpstreamMsgID != "msg-123" || meta.UpstreamSeq != 194 || meta.ExpectedBytes != 2165681 {
+		t.Fatalf("unexpected mapped meta: %+v", meta)
+	}
+	if !strings.Contains(meta.UpstreamMeta, "tier1_presentation_vid") {
+		t.Fatalf("expected match_tier in UpstreamMeta JSON, got %q", meta.UpstreamMeta)
+	}
+
+	p := NewMetaMuseProvider(nil, "")
+	p.videoTasks["t1"] = &museVideoTask{TaskID: "t1", VidID: "VID-ABCD1234", AccountEmail: "muse-1@meta.local"}
+	p.setTaskUpstreamMeta("t1", meta)
+	got := p.GetTaskFullMeta("t1")
+	if got.UpstreamSeq != 194 || got.ExpectedBytes != 2165681 || got.UpstreamAssetPath != res.Asset.Path {
+		t.Fatalf("unexpected GetTaskFullMeta: %+v", got)
+	}
+}

@@ -772,6 +772,9 @@ func RegisterDefaultProviders(reg *Registry, chatgptPlugin *ChatGPTProvider) {
 	// 注册免密微软 Edge-TTS 引擎
 	reg.Register(NewEdgeTTSProvider())
 
+	// 注册本地/自托管 OpenAI 兼容 TTS 引擎（Kokoro-FastAPI 等）
+	reg.Register(NewLocalTTSProvider("", "", ""))
+
 	// 注册硅基流动永久免费模型号池插件
 	reg.Register(NewSiliconFlowProvider(nil, ""))
 
@@ -835,4 +838,39 @@ func RegisterDefaultProviders(reg *Registry, chatgptPlugin *ChatGPTProvider) {
 		Capabilities:          []string{"chat", "reasoning", "web_search"},
 		FeaturedModels:        []string{"deepseek-chat", "deepseek-reasoner"},
 	}))
+}
+
+// ApplyConfig 将环境变量配置注入已注册的多模态供应商插件（SiliconFlow / DashScope / LocalTTS 等）。
+func ApplyConfig(reg *Registry, cfg *config.Config) {
+	if reg == nil || cfg == nil {
+		return
+	}
+	if sfKeys := splitConfigKeys(cfg.SiliconFlowAPIKey); len(sfKeys) > 0 {
+		if p, ok := reg.Get("siliconflow"); ok {
+			if sf, ok := p.(*SiliconFlowProvider); ok {
+				sf.AddKeys(sfKeys)
+			}
+		}
+	}
+	if dsKeys := splitConfigKeys(cfg.DashScopeAPIKey); len(dsKeys) > 0 {
+		if p, ok := reg.Get("dashscope"); ok {
+			if ds, ok := p.(*DashScopeProvider); ok {
+				ds.AddKeys(dsKeys)
+			}
+		}
+	}
+	if p, ok := reg.Get("local_tts"); ok {
+		if localTTS, ok := p.(*LocalTTSProvider); ok {
+			localTTS.Configure(cfg.LocalTTSBaseURL, cfg.LocalTTSAPIKey, cfg.LocalTTSModel)
+		}
+	}
+}
+
+func splitConfigKeys(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	return strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ';' || r == '\n' || r == '\r' || r == '\t' || r == ' '
+	})
 }

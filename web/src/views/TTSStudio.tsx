@@ -1,13 +1,20 @@
 import React, { useState, useEffect, useRef } from "react";
 import {
   fetchVoices,
-  synthesizeSpeech,
+  fetchVoicePreview,
+  pullLocalVoices,
+  cloneCustomVoice,
+  deleteCustomVoice,
+  synthesizeSpeechWithMeta,
   voiceDesign,
   voiceClone,
   fetchAudioHistory,
   VoiceDescriptor,
   AudioHistoryItem,
+  TTSProviderSummary,
+  SynthesizeSpeechMeta,
 } from "../api/client";
+import { CloudKeyConfigModal, type CloudKeyProviderId } from "../components/CloudKeyConfigModal";
 import {
   Mic,
   Volume2,
@@ -28,12 +35,19 @@ import {
   Clapperboard,
   ExternalLink,
   X,
+  HardDrive,
+  AlertTriangle,
+  KeyRound,
+  Globe,
+  Trash2,
 } from "lucide-react";
 import { PromptChatAssistant } from "../components/PromptChatAssistant";
 import { dispatchDramaCanvas } from "../lib/dramaCanvasBridge";
 
 export function TTSStudio(): React.JSX.Element {
   const [voices, setVoices] = useState<VoiceDescriptor[]>([]);
+  const [providersSummary, setProvidersSummary] = useState<Record<string, TTSProviderSummary>>({});
+  const [cachedLocalTotal, setCachedLocalTotal] = useState<number>(0);
   const [loadingVoices, setLoadingVoices] = useState(false);
   const [voiceLoadError, setVoiceLoadError] = useState<string | null>(null);
   const [selectedVoice, setSelectedVoice] = useState<string>("zh-CN-XiaoxiaoNeural");
@@ -41,14 +55,21 @@ export function TTSStudio(): React.JSX.Element {
     "注意看，眼前这个女人叫小美，就在刚刚，她发现了整个控制台里隐藏的秘密...",
   );
   const [speed, setSpeed] = useState<number>(1.0);
+  const [allowFallback, setAllowFallback] = useState<boolean>(false);
   const [activeCategory, setActiveCategory] = useState<string>("全部");
+  const [availabilityFilter, setAvailabilityFilter] = useState<"all" | "available" | "cached">("all");
   const [searchTerm, setSearchTerm] = useState<string>("");
 
   const [synthesizing, setSynthesizing] = useState<boolean>(false);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const audioUrlRef = useRef<string | null>(null);
+  const [synthMeta, setSynthMeta] = useState<Omit<SynthesizeSpeechMeta, "blob"> | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const generationControllerRef = useRef<AbortController | null>(null);
+
+  // 本地目录与样音拉取状态
+  const [pullingLocal, setPullingLocal] = useState<boolean>(false);
+  const [pullStatusMsg, setPullStatusMsg] = useState<string | null>(null);
 
   // 历史配音列表
   const [historyList, setHistoryList] = useState<AudioHistoryItem[]>([]);
@@ -75,6 +96,11 @@ export function TTSStudio(): React.JSX.Element {
   const [cloning, setCloning] = useState<boolean>(false);
   const [cloneVoiceId, setCloneVoiceId] = useState<string | null>(null);
 
+  // 云端 API Key 配置弹窗状态
+  const [showKeyModal, setShowKeyModal] = useState<boolean>(false);
+  const [keyProvider, setKeyProvider] = useState<CloudKeyProviderId>("siliconflow");
+  const [cloningCustomId, setCloningCustomId] = useState<string | null>(null);
+
   // 主音频播放控制
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
@@ -98,8 +124,11 @@ export function TTSStudio(): React.JSX.Element {
       const res = await fetchVoices();
       const list = res.voices || [];
       setVoices(list);
+      setProvidersSummary(res.providers || {});
+      setCachedLocalTotal(res.cached_local_total ?? list.filter((v) => v.cached_local).length);
       if (list.length > 0 && !list.some((v) => v.id === selectedVoice)) {
-        setSelectedVoice(list[0].id);
+        const preferred = list.find((v) => v.available !== false) || list[0];
+        setSelectedVoice(preferred.id);
       }
     } catch (err: any) {
       setVoiceLoadError(err.message || "音色列表加载失败，请检查网关连接后重试。");
@@ -117,6 +146,41 @@ export function TTSStudio(): React.JSX.Element {
     }
   };
 
+  const handlePullLocal = async () => {
+    setPullingLocal(true);
+    setErrorMsg(null);
+    setPullStatusMsg(null);
+    try {
+      const res = await pullLocalVoices({
+        include_samples: true,
+        refresh_live: true,
+        limit: 24,
+      });
+      const warnSuffix =
+        res.errors && res.errors.length > 0 ? `（部分警告: ${res.errors[0]}）` : "";
+      setPullStatusMsg(
+        `已完成本地拉取：目录共 ${res.catalog_total} 个音色（Edge 实时同步 ${res.edge_live_synced}），本次新缓存 ${res.pulled_samples} 个样音、累计已缓存 ${res.cached_total} 个${warnSuffix}`,
+      );
+      await loadVoices();
+    } catch (err: any) {
+      setErrorMsg(`拉取本地音色失败: ${err.message || "网络或服务异常"}`);
+    } finally {
+      setPullingLocal(false);
+    }
+  };
+
+  const speakWithBrowserFallback = (text: string) => {
+    if (typeof window === "undefined" || !("speechSynthesis" in window)) {
+      setErrorMsg("当前浏览器不支持 Web Speech API 本地系统朗读");
+      return;
+    }
+    window.speechSynthesis.cancel();
+    const utter = new SpeechSynthesisUtterance(text);
+    utter.lang = "zh-CN";
+    utter.rate = Math.min(Math.max(speed, 0.5), 2.0);
+    window.speechSynthesis.speak(utter);
+  };
+
   const handleSynthesize = async () => {
     if (!inputText.trim()) return;
     generationControllerRef.current?.abort();
@@ -124,13 +188,27 @@ export function TTSStudio(): React.JSX.Element {
     generationControllerRef.current = controller;
     setSynthesizing(true);
     setErrorMsg(null);
+    setSynthMeta(null);
     try {
-      const blob = await synthesizeSpeech(inputText, selectedVoice, speed, "tts-1", controller.signal);
+      const result = await synthesizeSpeechWithMeta(
+        inputText,
+        selectedVoice,
+        speed,
+        "tts-1",
+        controller.signal,
+        { allowFallback },
+      );
       if (controller.signal.aborted) return;
-      const url = URL.createObjectURL(blob);
+      const url = URL.createObjectURL(result.blob);
       if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current);
       audioUrlRef.current = url;
       setAudioUrl(url);
+      setSynthMeta({
+        provider: result.provider,
+        voice: result.voice,
+        fallback: result.fallback,
+        fallbackReason: result.fallbackReason,
+      });
       setIsPlaying(true);
       setTimeout(() => {
         if (audioRef.current) {
@@ -150,7 +228,7 @@ export function TTSStudio(): React.JSX.Element {
 
   const cancelSynthesis = () => generationControllerRef.current?.abort();
 
-  // 一键试听指定音色的 sampleText
+  // 一键试听指定音色（优先命中本地 voice_samples 缓存；未缓存时实时合成并落盘缓存）
   const handleAudition = async (v: VoiceDescriptor, e: React.MouseEvent) => {
     e.stopPropagation();
     if (auditioningVoice === v.id) {
@@ -167,17 +245,28 @@ export function TTSStudio(): React.JSX.Element {
       return;
     }
 
+    if (v.available === false && !v.cached_local) {
+      setErrorMsg(v.status_reason || `音色 ${v.name} 所属引擎当前未就绪，无法试听。`);
+      return;
+    }
+
     auditionControllerRef.current?.abort();
     if (auditionUrlRef.current) URL.revokeObjectURL(auditionUrlRef.current);
     auditionAudioRef.current?.pause();
     const controller = new AbortController();
     auditionControllerRef.current = controller;
     setAuditioningVoice(v.id);
+    setErrorMsg(null);
     try {
-      const sampleText = v.sample_text || `你好，我是${v.name}，很高兴为你提供智能语音合成。`;
-      const blob = await synthesizeSpeech(sampleText, v.id, 1.0, "tts-1", controller.signal);
+      const preview = await fetchVoicePreview(v.id, v.preview_url, controller.signal);
       if (controller.signal.aborted) return;
-      const sampleUrl = URL.createObjectURL(blob);
+      if (preview.cacheStatus === "stored" && !v.cached_local) {
+        setVoices((prev) =>
+          prev.map((item) => (item.id === v.id ? { ...item, cached_local: true } : item)),
+        );
+        setCachedLocalTotal((count) => count + 1);
+      }
+      const sampleUrl = URL.createObjectURL(preview.blob);
       auditionUrlRef.current = sampleUrl;
       if (auditionAudioRef.current) {
         auditionAudioRef.current.src = sampleUrl;
@@ -200,11 +289,12 @@ export function TTSStudio(): React.JSX.Element {
         id: res.voice_id,
         name: `定制音色: ${designPrompt.slice(0, 8)}...`,
         provider: "dashscope",
-        category: "自然情感",
+        category: "百炼精品",
         gender: "male",
         sample_text: designPrompt,
         tags: ["自然语言捏声音", "定制"],
         preview_url: res.preview_url,
+        available: true,
       };
       setVoices((prev) => [newVoice, ...prev]);
       setSelectedVoice(res.voice_id);
@@ -226,10 +316,11 @@ export function TTSStudio(): React.JSX.Element {
         id: res.voice_id,
         name: `克隆音色: ${res.voice_id.slice(-6)}`,
         provider: "dashscope",
-        category: "自然情感",
+        category: "百炼精品",
         gender: "female",
         sample_text: "这是使用声音复刻合成的自定义人声音频。",
         tags: ["音频声音复刻", "克隆"],
+        available: true,
       };
       setVoices((prev) => [newVoice, ...prev]);
       setSelectedVoice(res.voice_id);
@@ -240,10 +331,64 @@ export function TTSStudio(): React.JSX.Element {
     }
   };
 
-  const categories = ["全部", "影视解说", "特色搞怪", "地域方言", "情感生活", "自然情感", "外语英语"];
+  const openCloudKeyModal = (prov: CloudKeyProviderId) => {
+    setKeyProvider(prov);
+    setShowKeyModal(true);
+  };
 
-  const filteredVoices = voices.filter((v) => {
-    if (activeCategory !== "全部" && v.category !== activeCategory) {
+  const handleCloneCachedCustomVoice = async (v: VoiceDescriptor, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setCloningCustomId(v.id);
+    setErrorMsg(null);
+    try {
+      const res = await cloneCustomVoice(v.id, { clone_engine: "auto", transcript: v.sample_text });
+      if (res.status === "cloned") {
+        setPullStatusMsg(`✅ 已完成云端音色克隆：${v.name}，现在可直接用于配音与短剧角色。`);
+      } else {
+        setPullStatusMsg(res.custom_voice?.error || "当前未检测到 SILICONFLOW_API_KEY 或 DASHSCOPE_API_KEY，请先配置云端 Key 后再试。");
+      }
+      await loadVoices();
+    } catch (err: any) {
+      setErrorMsg(err?.message || "云端复刻失败");
+    } finally {
+      setCloningCustomId(null);
+    }
+  };
+
+  const handleDeleteCachedCustomVoice = async (v: VoiceDescriptor, e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      await deleteCustomVoice(v.id);
+      if (selectedVoice === v.id) setSelectedVoice("zh-CN-XiaoxiaoNeural");
+      await loadVoices();
+    } catch (err: any) {
+      setErrorMsg(err?.message || "删除自定义音色失败");
+    }
+  };
+
+  const localSummary = providersSummary.local_tts;
+  const localReady = localSummary?.available === true;
+  const localConfigured = localSummary?.configured === true || localReady;
+  const sfReady = providersSummary.siliconflow?.available === true;
+  const dsReady = providersSummary.dashscope?.available === true;
+
+  const displayableVoices = localConfigured
+    ? voices
+    : voices.filter((v) => v.provider !== "local_tts");
+
+  const rawCategories = Array.from(new Set(displayableVoices.map((v) => v.category).filter(Boolean)));
+  const categories = ["全部", "短剧常用", "系统克隆库", ...rawCategories.filter((c) => c !== "系统克隆库")];
+
+  const filteredVoices = displayableVoices.filter((v) => {
+    if (activeCategory === "短剧常用") {
+      if (!v.tags?.includes("短剧常用") && v.provider !== "custom") return false;
+    } else if (activeCategory !== "全部" && v.category !== activeCategory) {
+      return false;
+    }
+    if (availabilityFilter === "available" && v.available === false) {
+      return false;
+    }
+    if (availabilityFilter === "cached" && !v.cached_local) {
       return false;
     }
     if (searchTerm) {
@@ -251,6 +396,7 @@ export function TTSStudio(): React.JSX.Element {
       return (
         v.name.toLowerCase().includes(q) ||
         v.id.toLowerCase().includes(q) ||
+        v.provider.toLowerCase().includes(q) ||
         (v.tags && v.tags.some((t) => t.toLowerCase().includes(q)))
       );
     }
@@ -262,22 +408,22 @@ export function TTSStudio(): React.JSX.Element {
     {
       label: "🎬 影视解说开场 (晓晓)",
       text: "注意看，眼前这个女人叫小美，就在刚刚，她发现了整个控制台里隐藏的秘密...",
-      voice: "zh-CN-XiaoxiaoNeural",
+      voice: localReady ? "zf_xiaoxiao" : "zh-CN-XiaoxiaoNeural",
     },
     {
       label: "🎙️ 沉浸叙事男主 (云希)",
       text: "在这个被阴云笼罩的城市边缘，所有线索都在悄无声息地指向那个未知的终点...",
-      voice: "zh-CN-YunxiNeural",
+      voice: localReady ? "zm_yunxi" : "zh-CN-YunxiNeural",
     },
     {
       label: "💼 权威霸总宣判 (云扬)",
       text: "全场肃静，今天这笔投资合同，签还是不签，你只有这一次选择的机会。",
-      voice: "zh-CN-YunyangNeural",
+      voice: localReady ? "zm_yunyang" : "zh-CN-YunyangNeural",
     },
     {
-      label: "🐒 齐天大圣 (剪映猴哥)",
-      text: "俺老孙来也！妖怪，休得无礼，快快还我师傅！",
-      voice: "zh_male_houge",
+      label: "⚔️ 热血武侠少年 (云健)",
+      text: "我辈修仙之人，何惧一战！今日便以此剑斩破虚妄！",
+      voice: localReady ? "zm_yunjian" : "zh-CN-YunjianNeural",
     },
     {
       label: "🍢 东北老铁唠嗑 (晓北)",
@@ -298,24 +444,91 @@ export function TTSStudio(): React.JSX.Element {
       {/* 顶栏标题区 */}
       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 pb-4 border-b z-border">
         <div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <div className="p-2 bg-primary/10 rounded-lg text-primary">
               <Mic className="w-5 h-5" />
             </div>
             <h1 className="text-2xl font-bold tracking-tight z-text">语音创作工坊 (TTS Studio)</h1>
             <span className="px-2.5 py-0.5 text-xs font-medium rounded-full bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20">
-              微软 Edge-TTS (免密无限制)
+              微软 Edge-TTS 云端免密
             </span>
-            <span className="px-2.5 py-0.5 text-xs font-medium rounded-full bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20">
-              剪映音色库
+            <button
+              type="button"
+              onClick={() => openCloudKeyModal("siliconflow")}
+              className={`px-2.5 py-0.5 text-xs font-medium rounded-full border transition-colors ${
+                sfReady
+                  ? "bg-purple-500/10 text-purple-600 dark:text-purple-400 border-purple-500/20"
+                  : "bg-muted text-muted-foreground z-border hover:border-purple-500/40"
+              }`}
+              title={sfReady ? "硅基流动 CosyVoice2 已就绪" : "点击配置 SILICONFLOW_API_KEY"}
+            >
+              {sfReady ? "硅基流动 CosyVoice2 已激活" : "硅基流动 · 需 API Key"}
+            </button>
+            <button
+              type="button"
+              onClick={() => openCloudKeyModal("dashscope")}
+              className={`px-2.5 py-0.5 text-xs font-medium rounded-full border transition-colors ${
+                dsReady
+                  ? "bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/20"
+                  : "bg-muted text-muted-foreground z-border hover:border-blue-500/40"
+              }`}
+              title={dsReady ? "阿里云百炼 CosyVoice 已就绪" : "点击配置 DASHSCOPE_API_KEY"}
+            >
+              {dsReady ? "阿里百炼 CosyVoice 已激活" : "阿里百炼 · 需 API Key"}
+            </button>
+            {localConfigured && (
+              <span
+                className={`px-2.5 py-0.5 text-xs font-medium rounded-full border ${
+                  localReady
+                    ? "bg-teal-500/10 text-teal-600 dark:text-teal-400 border-teal-500/20"
+                    : "bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20"
+                }`}
+                title={localSummary?.last_error || localSummary?.endpoint || "自定义 OpenAI 兼容 TTS"}
+              >
+                {localReady ? "自定义 TTS 已连通" : "自定义 TTS 待检测"}
+              </span>
+            )}
+            <span className="px-2.5 py-0.5 text-xs font-medium rounded-full bg-cyan-500/10 text-cyan-600 dark:text-cyan-400 border border-cyan-500/20">
+              已缓存样音 {cachedLocalTotal}
             </span>
           </div>
           <p className="text-sm z-text-muted mt-1">
-            免登录聚合微软 Edge 原生引擎（晓晓、云希、云扬）、字节剪映抖音爆款库与 CosyVoice 语音大模型，支持长文本智能分句流式拼接。
+            全云端语音合成（免 Key 微软 Edge-TTS · 硅基流动 CosyVoice2 · 阿里云百炼 CosyVoice · ChatGPT），支持一键将云端音色目录与试听样音缓存至本地存储。
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <a
+            href="#/chat"
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md border z-border hover:bg-muted/50 transition-colors z-text"
+            title="前往 Chat 使用 /voice 爬虫工具搜索并克隆新音色写入系统库"
+          >
+            <Globe className="w-3.5 h-3.5 text-primary" />
+            Chat 爬虫找音色
+          </a>
+          <button
+            type="button"
+            onClick={() => openCloudKeyModal(sfReady ? "dashscope" : "siliconflow")}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md bg-amber-500/10 text-amber-700 dark:text-amber-400 border border-amber-500/25 hover:bg-amber-500/20 transition-colors"
+            title="导入硅基流动 / 阿里云百炼 / 自定义 OpenAI 兼容云端 TTS API Key"
+          >
+            <KeyRound className="w-3.5 h-3.5" />
+            配置云端 API Key
+          </button>
+          <button
+            type="button"
+            onClick={handlePullLocal}
+            disabled={pullingLocal}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border border-emerald-500/25 hover:bg-emerald-500/20 transition-colors disabled:opacity-50"
+            title="同步最新音色目录并拉取 24 个精选音色试听 MP3 到本地存储"
+          >
+            {pullingLocal ? (
+              <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+            ) : (
+              <HardDrive className="w-3.5 h-3.5" />
+            )}
+            {pullingLocal ? "正在拉取..." : "拉取音色到本地"}
+          </button>
           <button
             onClick={() => setShowDesignModal(true)}
             className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md bg-purple-500/10 text-purple-600 dark:text-purple-400 border border-purple-500/20 hover:bg-purple-500/20 transition-colors"
@@ -344,12 +557,40 @@ export function TTSStudio(): React.JSX.Element {
         </div>
       </div>
 
-      {errorMsg && (
-        <div className="p-3 text-sm rounded-lg bg-destructive/10 text-destructive border border-destructive/20 flex items-center justify-between">
-          <span>{errorMsg}</span>
-          <button onClick={() => setErrorMsg(null)} className="text-xs hover:underline">
+      {pullStatusMsg && (
+        <div className="p-3 text-xs rounded-lg bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border border-emerald-500/25 flex items-center justify-between gap-3">
+          <span>{pullStatusMsg}</span>
+          <button onClick={() => setPullStatusMsg(null)} className="shrink-0 hover:underline">
             关闭
           </button>
+        </div>
+      )}
+
+      {synthMeta?.fallback && (
+        <div className="p-3 text-xs rounded-lg bg-amber-500/10 text-amber-700 dark:text-amber-300 border border-amber-500/25 flex items-center gap-2">
+          <AlertTriangle className="w-4 h-4 shrink-0" />
+          <span>
+            注意：目标音色（<code className="font-mono">{selectedVoice}</code>）未直接可用（{synthMeta.fallbackReason || "已启用降级"}），本次已显式路由至{" "}
+            <strong>{synthMeta.provider}</strong> / <code className="font-mono">{synthMeta.voice}</code>。
+          </span>
+        </div>
+      )}
+
+      {errorMsg && (
+        <div className="p-3 text-sm rounded-lg bg-destructive/10 text-destructive border border-destructive/20 flex flex-wrap items-center justify-between gap-2">
+          <span>{errorMsg}</span>
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() => speakWithBrowserFallback(inputText)}
+              className="text-xs px-2 py-0.5 rounded border border-destructive/30 hover:bg-destructive/10"
+            >
+              浏览器系统朗读试听
+            </button>
+            <button onClick={() => setErrorMsg(null)} className="text-xs hover:underline">
+              关闭
+            </button>
+          </div>
         </div>
       )}
 
@@ -421,6 +662,15 @@ export function TTSStudio(): React.JSX.Element {
                 onChange={(e) => setSpeed(parseFloat(e.target.value))}
                 className="w-full accent-primary h-1.5 bg-muted rounded-lg cursor-pointer"
               />
+              <label className="flex items-center gap-2 pt-1 text-[11px] z-text-muted cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={allowFallback}
+                  onChange={(e) => setAllowFallback(e.target.checked)}
+                  className="rounded border z-border accent-primary"
+                />
+                <span>主引擎失败时允许跨引擎音色映射兜底（默认关闭，确保音色不静默替换）</span>
+              </label>
             </div>
 
             <div className="flex gap-2">
@@ -447,10 +697,17 @@ export function TTSStudio(): React.JSX.Element {
           {audioUrl && (
             <div className="p-card rounded-xl border border-primary/30 p-4 shadow-sm space-y-3 bg-primary/5">
               <div className="flex items-center justify-between gap-2">
-                <span className="text-xs font-medium text-primary flex items-center gap-1.5">
-                  <AudioWaveform className="w-4 h-4" />
-                  当前合成音频就绪
-                </span>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs font-medium text-primary flex items-center gap-1.5">
+                    <AudioWaveform className="w-4 h-4" />
+                    当前合成音频就绪
+                  </span>
+                  {synthMeta?.provider && (
+                    <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-primary/10 text-primary">
+                      {synthMeta.provider} · {synthMeta.voice}
+                    </span>
+                  )}
+                </div>
                 <div className="flex items-center gap-3">
                   <button
                     type="button"
@@ -573,9 +830,31 @@ export function TTSStudio(): React.JSX.Element {
         <div className="lg:col-span-7 space-y-4">
           <div className="p-card rounded-xl border z-border p-4 shadow-sm space-y-4">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <Layers className="w-4 h-4 text-primary" />
                 <h2 className="text-sm font-semibold z-text">音色分类库 ({filteredVoices.length})</h2>
+                <div className="flex items-center rounded-md border z-border p-0.5 text-[11px]">
+                  {(
+                    [
+                      ["all", "全部"],
+                      ["available", "可用"],
+                      ["cached", "已缓存"],
+                    ] as const
+                  ).map(([val, label]) => (
+                    <button
+                      key={val}
+                      type="button"
+                      onClick={() => setAvailabilityFilter(val)}
+                      className={`px-2 py-0.5 rounded transition-colors ${
+                        availabilityFilter === val
+                          ? "bg-primary text-primary-foreground font-medium"
+                          : "z-text-muted hover:z-text"
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
               </div>
 
               {/* 搜索框 */}
@@ -628,14 +907,33 @@ export function TTSStudio(): React.JSX.Element {
               {visibleVoices.map((v) => {
                 const isSelected = selectedVoice === v.id;
                 const isAuditioning = auditioningVoice === v.id;
+                const isAvailable = v.available !== false;
+                const providerBadge =
+                  v.provider === "local_tts"
+                    ? { label: "自定义 TTS", cls: "bg-teal-500/10 text-teal-600 dark:text-teal-400" }
+                    : v.provider === "edge_tts"
+                    ? { label: "Edge 官方", cls: "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400" }
+                    : v.provider === "siliconflow"
+                    ? { label: "硅基流动", cls: "bg-purple-500/10 text-purple-600 dark:text-purple-400" }
+                    : v.provider === "dashscope"
+                    ? { label: "阿里百炼", cls: "bg-blue-500/10 text-blue-600 dark:text-blue-400" }
+                    : v.provider === "chatgpt"
+                    ? { label: "OpenAI", cls: "bg-amber-500/10 text-amber-600 dark:text-amber-400" }
+                    : v.provider === "custom"
+                    ? { label: "系统克隆库", cls: "bg-indigo-500/10 text-indigo-600 dark:text-indigo-400" }
+                    : { label: v.provider, cls: "bg-muted text-muted-foreground" };
+
                 return (
                   <div
                     key={v.id}
                     onClick={() => setSelectedVoice(v.id)}
+                    title={v.status_reason || v.id}
                     className={`p-3 rounded-lg border text-left cursor-pointer transition-all relative flex flex-col justify-between gap-2 p-card ${
                       isSelected
                         ? "border-primary bg-primary/5 ring-1 ring-primary shadow-sm"
-                        : "z-border hover:border-primary/40 hover:bg-muted/30"
+                        : isAvailable
+                        ? "z-border hover:border-primary/40 hover:bg-muted/30"
+                        : "z-border border-dashed opacity-70 hover:opacity-90"
                     }`}
                     style={{ contentVisibility: "auto", containIntrinsicSize: "150px" }}
                   >
@@ -643,26 +941,29 @@ export function TTSStudio(): React.JSX.Element {
                       <div className="flex items-start justify-between gap-2">
                         <span className="font-semibold text-xs z-text flex items-center gap-1.5">
                           <Radio
-                            className={`w-3.5 h-3.5 ${
+                            className={`w-3.5 h-3.5 shrink-0 ${
                               isSelected ? "text-primary fill-primary" : "z-text-muted"
                             }`}
                           />
                           {v.name}
                         </span>
-                        <div className="flex items-center gap-1">
-                          <span
-                            className={`px-1.5 py-0.5 rounded text-[10px] font-normal ${
-                              v.provider === "edge_tts"
-                                ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
-                                : v.provider === "jianying"
-                                ? "bg-blue-500/10 text-blue-600 dark:text-blue-400"
-                                : "bg-purple-500/10 text-purple-600 dark:text-purple-400"
-                            }`}
-                          >
-                            {v.provider === "edge_tts" ? "Edge免密" : v.provider === "jianying" ? "剪映逆向" : v.provider}
+                        <div className="flex items-center gap-1 shrink-0">
+                          {v.cached_local && (
+                            <span className="px-1.5 py-0.5 rounded text-[10px] bg-cyan-500/10 text-cyan-600 dark:text-cyan-400">
+                              已缓存
+                            </span>
+                          )}
+                          <span className={`px-1.5 py-0.5 rounded text-[10px] font-normal ${providerBadge.cls}`}>
+                            {providerBadge.label}
                           </span>
                         </div>
                       </div>
+
+                      {!isAvailable && v.status_reason && (
+                        <p className="text-[10px] text-amber-600 dark:text-amber-400 mt-1 line-clamp-1">
+                          未就绪：{v.status_reason}
+                        </p>
+                      )}
 
                       {v.sample_text && (
                         <p className="text-[11px] z-text-muted mt-1 line-clamp-2 leading-relaxed">
@@ -681,16 +982,45 @@ export function TTSStudio(): React.JSX.Element {
                           ))}
                       </div>
 
-                      {/* 一键试听按钮 */}
-                      <button
-                        type="button"
-                        onClick={(e) => handleAudition(v, e)}
-                        className={`flex items-center gap-1 px-2 py-0.5 rounded text-[11px] transition-colors ${
+                      {/* 一键试听与自定义云端复刻 */}
+                      <div className="flex items-center gap-1 shrink-0">
+                        {v.provider === "custom" && !isAvailable && (
+                          <button
+                            type="button"
+                            onClick={(e) => void handleCloneCachedCustomVoice(v, e)}
+                            disabled={cloningCustomId === v.id}
+                            className="px-1.5 py-0.5 rounded text-[10px] bg-purple-500/10 text-purple-600 dark:text-purple-400 hover:bg-purple-500/20 disabled:opacity-50"
+                            title="上传本地缓存参考音至云端 CosyVoice 完成复刻"
+                          >
+                            {cloningCustomId === v.id ? "复刻中..." : "云端复刻"}
+                          </button>
+                        )}
+                        {v.provider === "custom" && (
+                          <button
+                            type="button"
+                            onClick={(e) => void handleDeleteCachedCustomVoice(v, e)}
+                            className="p-1 rounded text-rose-500 hover:bg-rose-500/10"
+                            title="从系统克隆库移除"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={(e) => handleAudition(v, e)}
+                          disabled={!isAvailable && !v.cached_local}
+                        className={`flex items-center gap-1 px-2 py-0.5 rounded text-[11px] transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
                           isAuditioning
                             ? "bg-amber-500 text-white font-medium"
                             : "bg-primary/10 text-primary hover:bg-primary/20"
                         }`}
-                        title="试听音色预设样本"
+                        title={
+                          v.cached_local
+                            ? "直接播放本地缓存试听样音"
+                            : isAvailable
+                            ? "试听并缓存音色预设样本"
+                            : v.status_reason || "当前引擎未就绪"
+                        }
                       >
                         {isAuditioning ? (
                           <>
@@ -705,6 +1035,7 @@ export function TTSStudio(): React.JSX.Element {
                         )}
                       </button>
                     </div>
+                  </div>
                   </div>
                 );
               })}
@@ -808,6 +1139,18 @@ export function TTSStudio(): React.JSX.Element {
           </div>
         </div>
       )}
+
+      <CloudKeyConfigModal
+        open={showKeyModal}
+        onClose={() => setShowKeyModal(false)}
+        initialProvider={keyProvider}
+        allowedProviders={["siliconflow", "dashscope", "local_tts"]}
+        title="配置云端 TTS API Key（无需本地算力）"
+        onSaved={(_prov, msg) => {
+          setPullStatusMsg(msg);
+          void loadVoices();
+        }}
+      />
     </div>
   );
 }

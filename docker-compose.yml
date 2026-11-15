@@ -11,3 +11,13 @@ services:
       - ./access_tokens.txt:/access_tokens.txt:ro
       # - ./free_tokens.txt:/free_tokens.txt:ro
       # - ./proxies.txt:/proxies.txt:ro
+
+  # 可选本地免外网 TTS 引擎（通过 docker compose --profile local-tts up -d 启用）
+  # 启用后在 .env 设置 LOCAL_TTS_BASE_URL=http://kokoro-tts:8880 (或宿主机 http://127.0.0.1:8880)
+  kokoro-tts:
+    image: ghcr.io/remsky/kokoro-fastapi-cpu:latest
+    container_name: ai-web-free-kokoro-tts
+    profiles: ["local-tts"]
+    restart: unless-stopped
+    ports:
+      - '8880:8880'

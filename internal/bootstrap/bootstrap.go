@@ -1,6 +1,7 @@
 package bootstrap
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -17,6 +18,7 @@ import (
 	"ai-web-free/internal/config"
 	"ai-web-free/internal/db"
 	"ai-web-free/internal/handler"
+	"ai-web-free/internal/health"
 	"ai-web-free/internal/opslog"
 	"ai-web-free/internal/promptplaza"
 	"ai-web-free/internal/provider"
@@ -30,10 +32,11 @@ import (
 
 // App 封装应用启动所需的所有依赖
 type App struct {
-	Router      *gin.Engine
-	Config      *config.Config
-	AccountPool *accounts.Pool
-	Cleanup     func() // 服务退出时调用，停止后台协程
+	Router        *gin.Engine
+	Config        *config.Config
+	AccountPool   *accounts.Pool
+	HealthTracker *health.Tracker
+	Cleanup       func() // 服务退出时调用，停止后台协程
 }
 
 // Init 完成所有初始化逻辑，返回 App 实例
@@ -180,6 +183,7 @@ func Init() (*App, error) {
 	}
 
 	accountPool := accounts.NewPool(accs)
+	healthTracker := health.NewTracker()
 
 	var kamiWorker *provider.KamiRenewWorker
 
@@ -197,12 +201,31 @@ func Init() (*App, error) {
 		return false
 	}
 	stopHealthCheck := accountPool.StartHealthCheck(10*time.Minute, renewFn)
+	healthTracker.RegisterService(
+		"account_health_check",
+		"账号健康巡检",
+		"scheduler",
+		(10 * time.Minute).String(),
+		"每 10 分钟恢复冷却账号并主动续期即将过期 Token",
+		true,
+		true,
+	)
 	stopTempGC := accountPool.StartTempAccountGC(10*time.Minute, 1*time.Minute)
+	healthTracker.RegisterService(
+		"temp_account_gc",
+		"临时账号清理 GC",
+		"scheduler",
+		(1 * time.Minute).String(),
+		"每 1 分钟清理空闲超过 10 分钟的外部透传临时账号",
+		true,
+		true,
+	)
 
 	// 初始化多供应商插件中心
 	chatgptPlugin := provider.NewChatGPTProvider(accountPool, proxyPool, &cfg, renewFn)
 	reg := provider.NewRegistry()
 	provider.RegisterDefaultProviders(reg, chatgptPlugin)
+	provider.ApplyConfig(reg, &cfg)
 
 	// 注册路由与生产级号池运维组件
 	defaultProxy := cfg.ProxyURL
@@ -219,6 +242,15 @@ func Init() (*App, error) {
 	stopKamiScan := func() {}
 	if cfg.KamiAutoRenew {
 		kamiWorker.Start()
+		healthTracker.RegisterService(
+			"kami_renew_worker",
+			"卡密自动续期 Worker",
+			"worker",
+			"",
+			"串行无头浏览器续期消费者已就绪",
+			true,
+			true,
+		)
 		scanStop := make(chan struct{})
 		stopKamiScan = func() { close(scanStop) }
 		go func() {
@@ -232,11 +264,41 @@ func Init() (*App, error) {
 					return
 				case <-firstScan.C:
 					kamiWorker.EnqueueDue(24 * time.Hour)
+					healthTracker.MarkTick("kami_due_scan", "已完成到期卡密扫描入队")
 				case <-ticker.C:
 					kamiWorker.EnqueueDue(24 * time.Hour)
+					healthTracker.MarkTick("kami_due_scan", "已完成定时到期卡密扫描")
 				}
 			}
 		}()
+		healthTracker.RegisterService(
+			"kami_due_scan",
+			"卡密到期扫描调度",
+			"scheduler",
+			(10 * time.Minute).String(),
+			"每 10 分钟扫描 24 小时内到期的卡密账号",
+			true,
+			true,
+		)
+	} else {
+		healthTracker.RegisterService(
+			"kami_renew_worker",
+			"卡密自动续期 Worker",
+			"worker",
+			"",
+			"已禁用（KAMI_AUTO_RENEW=false）",
+			false,
+			false,
+		)
+		healthTracker.RegisterService(
+			"kami_due_scan",
+			"卡密到期扫描调度",
+			"scheduler",
+			(10 * time.Minute).String(),
+			"已禁用（KAMI_AUTO_RENEW=false）",
+			false,
+			false,
+		)
 	}
 	// 初始化持久化数据库与文件存储引擎（严格零 CGO，优雅降级）
 	database, _ := db.InitDB(cfg.DatabaseURL)
@@ -245,6 +307,15 @@ func Init() (*App, error) {
 	storageEngine, storageErr = storage.NewLocalStorageEngine(cfg.StorageDir)
 	if storageErr != nil {
 		storageEngine = storage.NewMemoryStorageEngine()
+	}
+
+	voiceStore := provider.NewVoiceCatalogStore(storageEngine)
+	if cachedVoices, _, err := voiceStore.LoadCatalog(context.Background()); err == nil && len(cachedVoices) > 0 {
+		if edgeP, ok := reg.Get("edge_tts"); ok {
+			if edgeTTS, ok := edgeP.(*provider.EdgeTTSProvider); ok {
+				edgeTTS.SeedCachedVoices(cachedVoices)
+			}
+		}
 	}
 
 	rtForPlaza := &handler.GatewayRuntime{
@@ -261,7 +332,22 @@ func Init() (*App, error) {
 		ProxyFunc:    proxyPool.Allocate,
 		ChatExecutor: handler.NewPoolChatExecutor(rtForPlaza, accountPool, &cfg),
 	})
-	stopPromptSync := plazaMgr.StartScheduler(time.Duration(cfg.PromptSyncIntervalHours) * time.Hour)
+	promptSyncInterval := time.Duration(cfg.PromptSyncIntervalHours) * time.Hour
+	stopPromptSync := plazaMgr.StartScheduler(promptSyncInterval)
+	healthTracker.RegisterService(
+		"prompt_plaza_sync",
+		"提示词广场热榜同步",
+		"scheduler",
+		promptSyncInterval.String(),
+		func() string {
+			if cfg.PromptSyncIntervalHours > 0 {
+				return "后台周期性拉取多源提示词与预览图"
+			}
+			return "已禁用（PROMPT_SYNC_INTERVAL_HOURS<=0）"
+		}(),
+		cfg.PromptSyncIntervalHours > 0,
+		cfg.PromptSyncIntervalHours > 0,
+	)
 
 	router := handler.RegisterRouterWithDeps(handler.RouterDeps{
 		AccountPool:   accountPool,
@@ -274,17 +360,28 @@ func Init() (*App, error) {
 		PromptPlaza:   plazaMgr,
 		DB:            database,
 		StorageEngine: storageEngine,
+		HealthTracker: healthTracker,
 	})
 
 	return &App{
-		Router:      router,
-		Config:      &cfg,
-		AccountPool: accountPool,
+		Router:        router,
+		Config:        &cfg,
+		AccountPool:   accountPool,
+		HealthTracker: healthTracker,
 		Cleanup: func() {
 			stopHealthCheck()
+			healthTracker.MarkRunning("account_health_check", false, "已停止")
 			stopTempGC()
+			healthTracker.MarkRunning("temp_account_gc", false, "已停止")
 			stopKamiScan()
+			if cfg.KamiAutoRenew {
+				healthTracker.MarkRunning("kami_due_scan", false, "已停止")
+				healthTracker.MarkRunning("kami_renew_worker", false, "已停止")
+			}
 			stopPromptSync()
+			if cfg.PromptSyncIntervalHours > 0 {
+				healthTracker.MarkRunning("prompt_plaza_sync", false, "已停止")
+			}
 			kamiWorker.Stop()
 		},
 	}, nil

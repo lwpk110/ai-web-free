@@ -20,6 +20,7 @@ import {
   syncServerPromptFavorites,
   toggleServerGalleryFavorite,
   toggleServerPromptFavorite,
+  updateServerGalleryMetadata,
   updateServerConversation,
   type ServerChatMessage,
   type ServerConversation,
@@ -39,6 +40,13 @@ export interface StoredImageRecord {
   size: string;
   quality?: string;
   mode?: "generations" | "edits";
+  category?: string;
+  source?: string;
+  projectId?: string;
+  projectTitle?: string;
+  roleName?: string;
+  shotIndex?: number;
+  tags?: string[];
   latencyMs?: number;
   isFavorite?: boolean;
   storageType?: string;
@@ -59,6 +67,7 @@ export type CopilotSkill =
   | "openui"
   | "image"
   | "audio"
+  | "media_crawl"
   | "chat";
 
 export interface StoredChatMessage {
@@ -458,6 +467,13 @@ export async function syncLocalImagesToServer(
     size: string;
     quality?: string;
     mode?: "generations" | "edits";
+    category?: string;
+    source?: string;
+    project_id?: string;
+    project_title?: string;
+    role_name?: string;
+    shot_index?: number;
+    tags?: string[];
     b64_json?: string;
     url?: string;
     latency_ms?: number;
@@ -479,6 +495,13 @@ export async function syncLocalImagesToServer(
       size: item.size,
       quality: item.quality,
       mode: item.mode,
+      category: item.category,
+      source: item.source,
+      project_id: item.projectId,
+      project_title: item.projectTitle,
+      role_name: item.roleName,
+      shot_index: item.shotIndex,
+      tags: item.tags,
       b64_json: b64,
       url: item.remoteUrl,
       latency_ms: item.latencyMs,
@@ -538,6 +561,13 @@ export async function loadUnifiedImages(options?: {
         size: item.size,
         quality: item.quality,
         mode: item.mode,
+        category: item.category,
+        source: item.source,
+        projectId: item.project_id,
+        projectTitle: item.project_title,
+        roleName: item.role_name,
+        shotIndex: item.shot_index,
+        tags: item.tags || [],
         storageType: item.storage_type,
         isFavorite: item.is_favorite,
         latencyMs: item.latency_ms,
@@ -574,6 +604,13 @@ export async function saveUnifiedImage(
       size: rec.size,
       quality: rec.quality,
       mode: rec.mode,
+      category: rec.category,
+      source: rec.source,
+      project_id: rec.projectId,
+      project_title: rec.projectTitle,
+      role_name: rec.roleName,
+      shot_index: rec.shotIndex,
+      tags: rec.tags,
       b64_json: payloadB64,
       url: rec.remoteUrl,
       latency_ms: rec.latencyMs,
@@ -591,6 +628,13 @@ export async function saveUnifiedImage(
       size: serverWork.size,
       quality: serverWork.quality,
       mode: serverWork.mode,
+      category: serverWork.category,
+      source: serverWork.source,
+      projectId: serverWork.project_id,
+      projectTitle: serverWork.project_title,
+      roleName: serverWork.role_name,
+      shotIndex: serverWork.shot_index,
+      tags: serverWork.tags || [],
       storageType: serverWork.storage_type,
       isFavorite: serverWork.is_favorite,
       latencyMs: serverWork.latency_ms,
@@ -616,6 +660,32 @@ export async function deleteUnifiedImage(id: string): Promise<boolean> {
     return true;
   } catch {
     return false;
+  }
+}
+
+/** Update gallery classification locally first, then sync it to the server when available. */
+export async function updateUnifiedImageMetadata(
+  id: string,
+  metadata: { category?: string; tags?: string[] }
+): Promise<{ category?: string; tags: string[] }> {
+  const localItems = await loadRawStoredImages();
+  const localItem = localItems.find((item) => item.id === id);
+  const localPatch = {
+    category: metadata.category ?? localItem?.category,
+    tags: metadata.tags ?? localItem?.tags ?? [],
+  };
+  if (localItem) {
+    await saveStoredImage({ ...localItem, ...localPatch });
+  }
+
+  try {
+    const saved = await updateServerGalleryMetadata(id, metadata);
+    const result = { category: saved.category, tags: saved.tags || [] };
+    if (localItem) await saveStoredImage({ ...localItem, ...result });
+    return result;
+  } catch (error) {
+    if (localItem) return localPatch;
+    throw error;
   }
 }
 

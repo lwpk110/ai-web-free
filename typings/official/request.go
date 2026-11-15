@@ -677,6 +677,7 @@ type OpenAIRefreshToken struct {
 }
 
 type TTSAPIRequest struct {
+	Model  string  `json:"model,omitempty"`
 	Input  string  `json:"input"`
 	Voice  string  `json:"voice"`
 	Format string  `json:"response_format"`

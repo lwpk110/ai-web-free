@@ -26,6 +26,7 @@ type GalleryHandler struct {
 	db            *gorm.DB
 	storageEngine storage.StorageEngine
 	mu            sync.Mutex
+	memWorks      []db.GalleryWork
 }
 
 func NewGalleryHandler(database *gorm.DB, engine storage.StorageEngine) *GalleryHandler {
@@ -88,24 +89,57 @@ func (h *GalleryHandler) ServeStaticImage(c *gin.Context) {
 // ─── 图像工坊画廊 API ────────────────────────────────────────────────
 
 type SaveWorkRequest struct {
-	ID            string `json:"id"`
-	Prompt        string `json:"prompt" binding:"required"`
-	RevisedPrompt string `json:"revised_prompt"`
-	Model         string `json:"model"`
-	Size          string `json:"size"`
-	Quality       string `json:"quality"`
-	Mode          string `json:"mode"`
-	B64JSON       string `json:"b64_json"`
-	URL           string `json:"url"`
-	LatencyMs     int    `json:"latency_ms"`
-	IsFavorite    bool   `json:"is_favorite"`
-	Timestamp     int64  `json:"timestamp"`
+	ID            string   `json:"id"`
+	Prompt        string   `json:"prompt" binding:"required"`
+	RevisedPrompt string   `json:"revised_prompt"`
+	Model         string   `json:"model"`
+	Size          string   `json:"size"`
+	Quality       string   `json:"quality"`
+	Mode          string   `json:"mode"`
+	Category      string   `json:"category"`
+	Source        string   `json:"source"`
+	ProjectID     string   `json:"project_id"`
+	ProjectTitle  string   `json:"project_title"`
+	RoleName      string   `json:"role_name"`
+	ShotIndex     int      `json:"shot_index"`
+	Tags          []string `json:"tags"`
+	B64JSON       string   `json:"b64_json"`
+	URL           string   `json:"url"`
+	LatencyMs     int      `json:"latency_ms"`
+	IsFavorite    bool     `json:"is_favorite"`
+	Timestamp     int64    `json:"timestamp"`
 }
 
 // ListWorks 分页查询持久化画廊列表
 func (h *GalleryHandler) ListWorks(c *gin.Context) {
 	if h.db == nil {
-		c.JSON(http.StatusOK, gin.H{"items": []interface{}{}, "total": 0, "page": 1, "page_size": 50})
+		q := strings.ToLower(strings.TrimSpace(c.Query("q")))
+		model := strings.TrimSpace(c.Query("model"))
+		category := strings.TrimSpace(c.Query("category"))
+		source := strings.TrimSpace(c.Query("source"))
+		projectID := strings.TrimSpace(c.Query("project_id"))
+		h.mu.Lock()
+		items := make([]db.GalleryWork, 0, len(h.memWorks))
+		for _, w := range h.memWorks {
+			if category != "" && category != "all" && w.Category != category {
+				continue
+			}
+			if source != "" && source != "all" && w.Source != source {
+				continue
+			}
+			if projectID != "" && w.ProjectID != projectID {
+				continue
+			}
+			if model != "" && model != "all" && w.Model != model {
+				continue
+			}
+			if q != "" && !strings.Contains(strings.ToLower(w.Prompt+" "+w.RevisedPrompt+" "+w.Category+" "+w.Source+" "+w.ProjectTitle+" "+w.RoleName+" "+strings.Join(w.Tags, " ")), q) {
+				continue
+			}
+			items = append(items, w)
+		}
+		h.mu.Unlock()
+		c.JSON(http.StatusOK, gin.H{"items": items, "total": len(items), "page": 1, "page_size": 50})
 		return
 	}
 
@@ -119,6 +153,9 @@ func (h *GalleryHandler) ListWorks(c *gin.Context) {
 	}
 
 	model := strings.TrimSpace(c.Query("model"))
+	category := strings.TrimSpace(c.Query("category"))
+	source := strings.TrimSpace(c.Query("source"))
+	projectID := strings.TrimSpace(c.Query("project_id"))
 	favoriteOnly := strings.EqualFold(strings.TrimSpace(c.Query("favorite")), "true")
 	q := strings.TrimSpace(c.Query("q"))
 
@@ -126,12 +163,21 @@ func (h *GalleryHandler) ListWorks(c *gin.Context) {
 	if model != "" && model != "all" {
 		query = query.Where("model = ?", model)
 	}
+	if category != "" && category != "all" {
+		query = query.Where("category = ?", category)
+	}
+	if source != "" && source != "all" {
+		query = query.Where("source = ?", source)
+	}
+	if projectID != "" {
+		query = query.Where("project_id = ?", projectID)
+	}
 	if favoriteOnly {
 		query = query.Where("is_favorite = ?", true)
 	}
 	if q != "" {
 		pattern := "%" + q + "%"
-		query = query.Where("prompt LIKE ? OR revised_prompt LIKE ?", pattern, pattern)
+		query = query.Where("(prompt LIKE ? OR revised_prompt LIKE ? OR project_title LIKE ? OR role_name LIKE ? OR tags LIKE ? OR model LIKE ? OR category LIKE ? OR source LIKE ?)", pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern)
 	}
 
 	var total int64
@@ -153,6 +199,70 @@ func (h *GalleryHandler) ListWorks(c *gin.Context) {
 		"page":      page,
 		"page_size": pageSize,
 	})
+}
+
+type UpdateGalleryMetadataRequest struct {
+	Category *string   `json:"category"`
+	Tags     *[]string `json:"tags"`
+}
+
+func (h *GalleryHandler) UpdateMetadata(c *gin.Context) {
+	if h.db == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "database not initialized"})
+		return
+	}
+	var req UpdateGalleryMetadataRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request: " + err.Error()})
+		return
+	}
+	id := strings.TrimSpace(c.Param("id"))
+	var work db.GalleryWork
+	if err := h.db.First(&work, "id = ?", id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "work not found"})
+		return
+	}
+	if req.Category != nil {
+		work.Category = normalizeGalleryCategory(*req.Category)
+	}
+	if req.Tags != nil {
+		work.Tags = normalizeGalleryTags(*req.Tags)
+	}
+	if err := h.db.Save(&work).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, work)
+}
+
+func normalizeGalleryCategory(category string) string {
+	switch strings.TrimSpace(category) {
+	case "character_portrait", "scene_anchor", "storyboard_frame", "reference", "general":
+		return strings.TrimSpace(category)
+	default:
+		return "general"
+	}
+}
+
+func normalizeGalleryTags(tags []string) []string {
+	out := make([]string, 0, len(tags))
+	seen := make(map[string]struct{}, len(tags))
+	for _, tag := range tags {
+		tag = strings.TrimSpace(tag)
+		if tag == "" || len(tag) > 48 {
+			continue
+		}
+		key := strings.ToLower(tag)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, tag)
+		if len(out) == 16 {
+			break
+		}
+	}
+	return out
 }
 
 // SaveWork 保存或上传单张画廊作品
@@ -638,6 +748,13 @@ func (h *GalleryHandler) processAndSaveSingleWork(ctx context.Context, req SaveW
 		Size:          req.Size,
 		Quality:       req.Quality,
 		Mode:          req.Mode,
+		Category:      normalizeGalleryCategory(req.Category),
+		Source:        normalizeGallerySource(req.Source),
+		ProjectID:     strings.TrimSpace(req.ProjectID),
+		ProjectTitle:  strings.TrimSpace(req.ProjectTitle),
+		RoleName:      strings.TrimSpace(req.RoleName),
+		ShotIndex:     req.ShotIndex,
+		Tags:          normalizeGalleryTags(req.Tags),
 		StorageType:   storageType,
 		FilePath:      filePath,
 		URL:           url,
@@ -660,4 +777,101 @@ func (h *GalleryHandler) processAndSaveSingleWork(ctx context.Context, req SaveW
 	}
 
 	return &work, nil
+}
+
+func normalizeGallerySource(source string) string {
+	source = strings.TrimSpace(source)
+	if source == "" {
+		return "image_studio"
+	}
+	return source
+}
+
+// ImportCrawledImage 将爬虫下载的参考图字节写入统一存储与画廊系统库，供生图/视频/短剧工坊直接复用。
+func (h *GalleryHandler) ImportCrawledImage(ctx context.Context, id, title, summary, mode, sourceURL, mimeType string, data []byte) (*db.GalleryWork, error) {
+	cleanID := strings.TrimSpace(id)
+	if cleanID == "" {
+		cleanID = "crawl_img_" + uuid.NewString()[:8]
+	}
+	if mimeType == "" {
+		mimeType = "image/jpeg"
+	}
+	fileURL := sourceURL
+	filePath := ""
+	storageType := "local"
+	if len(data) > 0 && h.storageEngine != nil {
+		if mse, ok := h.storageEngine.(storage.MediaStorageEngine); ok && mse != nil {
+			if u, p, err := mse.SaveInCategory(ctx, "images", cleanID, data, mimeType); err == nil {
+				fileURL = u
+				filePath = p
+				storageType = h.storageEngine.Type()
+			}
+		} else if u, p, err := h.storageEngine.Save(ctx, cleanID, data, mimeType); err == nil {
+			fileURL = u
+			filePath = p
+			storageType = h.storageEngine.Type()
+		}
+	}
+
+	now := time.Now().UTC()
+	work := db.GalleryWork{
+		ID:            cleanID,
+		Prompt:        strings.TrimSpace(title),
+		RevisedPrompt: strings.TrimSpace(summary),
+		Model:         "crawled-ref",
+		Size:          "1024x1024",
+		Quality:       "hd",
+		Mode:          mode,
+		StorageType:   storageType,
+		FilePath:      filePath,
+		URL:           fileURL,
+		FileSize:      int64(len(data)),
+		MimeType:      mimeType,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	}
+	if storageType == "memory" || storageType == "blob" {
+		work.BlobData = data
+	}
+	if h.db != nil {
+		if err := h.db.Save(&work).Error; err != nil {
+			return nil, fmt.Errorf("save crawled image work: %w", err)
+		}
+	} else {
+		h.mu.Lock()
+		h.memWorks = append([]db.GalleryWork{work}, h.memWorks...)
+		h.mu.Unlock()
+	}
+	return &work, nil
+}
+
+// SearchWorks 返回与关键词匹配的画廊与爬虫系统参考图，供 Chat 爬虫先行检查现有缓存库。
+func (h *GalleryHandler) SearchWorks(query string, limit int) []db.GalleryWork {
+	if limit <= 0 {
+		limit = 20
+	}
+	q := strings.ToLower(strings.TrimSpace(query))
+	if h.db != nil {
+		var items []db.GalleryWork
+		tx := h.db.Model(&db.GalleryWork{}).Order("created_at desc").Limit(limit)
+		if q != "" {
+			pat := "%" + q + "%"
+			tx = tx.Where("LOWER(prompt) LIKE ? OR LOWER(revised_prompt) LIKE ? OR LOWER(mode) LIKE ?", pat, pat, pat)
+		}
+		if err := tx.Find(&items).Error; err == nil {
+			return items
+		}
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := make([]db.GalleryWork, 0, limit)
+	for _, w := range h.memWorks {
+		if q == "" || strings.Contains(strings.ToLower(w.Prompt+" "+w.RevisedPrompt+" "+w.Mode), q) {
+			out = append(out, w)
+			if len(out) >= limit {
+				break
+			}
+		}
+	}
+	return out
 }

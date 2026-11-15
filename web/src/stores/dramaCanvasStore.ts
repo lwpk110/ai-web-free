@@ -141,6 +141,7 @@ export interface DramaCanvasState {
   capabilitiesLoading: boolean;
   projects: DramaProjectRecord[];
   isSaving: boolean;
+  syncStatus: "unknown" | "synced" | "local";
   lastSavedAt: string | null;
   initialized: boolean;
 
@@ -227,6 +228,7 @@ export const useDramaCanvasStore = create<DramaCanvasState>((set, get) => {
     capabilitiesLoading: false,
     projects: [],
     isSaving: false,
+    syncStatus: "unknown",
     lastSavedAt: null,
     initialized: false,
 
@@ -268,10 +270,11 @@ export const useDramaCanvasStore = create<DramaCanvasState>((set, get) => {
           status: state.pipelineState,
           shot_count: shotCount,
         });
-        set({ lastSavedAt: saved.updated_at || nowIso });
+        set({ lastSavedAt: saved.updated_at || nowIso, syncStatus: "synced" });
         void get().refreshProjectsList();
       } catch {
         // 离线或后端不可用时 IndexedDB 已完整保存
+        set({ syncStatus: "local" });
       } finally {
         set({ isSaving: false });
       }
@@ -345,6 +348,7 @@ export const useDramaCanvasStore = create<DramaCanvasState>((set, get) => {
               checkpointAfterCast: Boolean(parsed.checkpointAfterCast),
               checkpointAfterKeyframes: Boolean(parsed.checkpointAfterKeyframes),
               lastSavedAt: serverRec.updated_at || null,
+              syncStatus: "synced",
             });
             return;
           }
@@ -361,6 +365,7 @@ export const useDramaCanvasStore = create<DramaCanvasState>((set, get) => {
           checkpointAfterCast: Boolean(localRec.checkpointAfterCast),
           checkpointAfterKeyframes: Boolean(localRec.checkpointAfterKeyframes),
           lastSavedAt: localRec.updatedAt,
+          syncStatus: "local",
         });
       }
     },

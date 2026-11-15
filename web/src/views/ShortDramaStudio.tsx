@@ -12,7 +12,9 @@ import {
   Clapperboard,
   FileAudio,
   FolderPlus,
+  Globe,
   Image as ImageIcon,
+  KeyRound,
   LayoutGrid,
   ListChecks,
   Loader2,
@@ -33,6 +35,7 @@ import { fetchVoices, type DramaRoutingPolicy, type VoiceDescriptor } from "../a
 import { DramaAssetDrawerModal } from "../components/drama/DramaAssetDrawerModal";
 import { DramaNodeInspector } from "../components/drama/DramaNodeInspector";
 import { DRAMA_NODE_TYPES, DramaNodeActionsProvider } from "../components/drama/DramaNodes";
+import { CloudKeyConfigModal } from "../components/CloudKeyConfigModal";
 import { DramaTimelinePlayerModal } from "../components/drama/DramaTimelinePlayerModal";
 import { DramaWizardView } from "../components/drama/DramaWizardView";
 import { consumePendingDramaImports, DRAMA_IMPORT_EVENT, type DramaCanvasImportPayload } from "../lib/dramaCanvasBridge";
@@ -75,6 +78,32 @@ function downloadBlob(blob: Blob, filename: string) {
   window.setTimeout(() => URL.revokeObjectURL(url), 10_000);
 }
 
+function assertShotsReadyForExport(nodes: DramaFlowNode[]) {
+  const shots = (nodes.filter((n) => n.type === "shot") as Array<DramaFlowNode & { data: ShotNodeData }>).sort(
+    (a, b) => a.data.index - b.data.index,
+  );
+  const missingVisuals: number[] = [];
+  const missingAudio: number[] = [];
+
+  for (const shot of shots) {
+    const branch = getActiveShotBranch(shot.data);
+    const hasVideo = branch.videoStatus === "ready" && branch.renderMode === "video" && Boolean(branch.videoUrl);
+    const hasKeyframe = branch.keyframeStatus === "ready" && Boolean(branch.imageUrl);
+    if (!hasVideo && !hasKeyframe) missingVisuals.push(shot.data.index);
+    if (shot.data.dialogue.trim() && (branch.audioStatus !== "ready" || !branch.audioUrl)) {
+      missingAudio.push(shot.data.index);
+    }
+  }
+
+  const issues = [
+    missingVisuals.length > 0 ? `缺少有效画面：第 ${missingVisuals.join("、")} 镜` : "",
+    missingAudio.length > 0 ? `缺少有效对白音轨：第 ${missingAudio.join("、")} 镜` : "",
+  ].filter(Boolean);
+  if (issues.length > 0) {
+    throw new Error(`无法导出完整成片。${issues.join("；")}。请重试对应素材后再导出。`);
+  }
+}
+
 export const ShortDramaStudio: React.FC = () => {
   const {
     projectId,
@@ -90,6 +119,7 @@ export const ShortDramaStudio: React.FC = () => {
     capabilitiesLoading,
     projects,
     isSaving,
+    syncStatus,
     initFromPersistence,
     refreshCapabilities,
     loadProject,
@@ -106,12 +136,14 @@ export const ShortDramaStudio: React.FC = () => {
     updateNodeData,
     updateScriptNode,
     addNode,
+    removeNode,
     addShotVersionBranch,
     switchShotVersionBranch,
     importCrossStudioAsset,
   } = useDramaCanvasStore();
 
   const [voices, setVoices] = useState<VoiceDescriptor[]>([]);
+  const [cloudKeyModalOpen, setCloudKeyModalOpen] = useState(false);
   const [assetDrawer, setAssetDrawer] = useState<"gallery" | "audio" | "prompts" | null>(null);
   const [playerOpen, setPlayerOpen] = useState(false);
   const [themeMode, setThemeMode] = useState<"light" | "dark">(() =>
@@ -187,16 +219,20 @@ export const ShortDramaStudio: React.FC = () => {
     void runScriptBreakdownToCanvas(ctrl.signal).catch(() => {});
   }, []);
 
-  const handleRunPipeline = useCallback((resumeFrom: "start" | "after_cast" | "after_keyframes" = "start") => {
+  const handleRunPipeline = useCallback((
+    resumeFrom: "start" | "after_cast" | "after_keyframes" = "start",
+    breakScript = resumeFrom === "start",
+  ) => {
     abortRef.current?.abort();
     const ctrl = new AbortController();
     abortRef.current = ctrl;
-    void runAutoDramaPipeline({ resumeFrom, signal: ctrl.signal }).catch(() => {});
+    void runAutoDramaPipeline({ resumeFrom, breakScript, signal: ctrl.signal }).catch(() => {});
   }, []);
 
   const handleExportSingleVideo = useCallback(async () => {
     if (!composerNode || !scriptNode) return;
     try {
+      assertShotsReadyForExport(nodes);
       updateNodeData<ComposerNodeData>(composerNode.id, {
         status: "running",
         exportProgress: 5,
@@ -235,11 +271,12 @@ export const ShortDramaStudio: React.FC = () => {
         error: err instanceof Error ? err.message : String(err),
       });
     }
-  }, [composerNode, composerShots, scriptNode, updateNodeData]);
+  }, [composerNode, composerShots, nodes, scriptNode, updateNodeData]);
 
   const handleExportZip = useCallback(async () => {
     if (!composerNode || !scriptNode) return;
     try {
+      assertShotsReadyForExport(nodes);
       updateNodeData<ComposerNodeData>(composerNode.id, {
         status: "running",
         exportProgress: 8,
@@ -360,7 +397,7 @@ export const ShortDramaStudio: React.FC = () => {
             </button>
 
             <span className="text-[11px] text-[var(--text-muted)]">
-              {isSaving ? "正在同步..." : "已云端+本地保存"}
+              {isSaving ? "正在同步..." : syncStatus === "synced" ? "云端+本地已保存" : syncStatus === "local" ? "仅本地保存" : "等待首次保存"}
             </span>
           </div>
 
@@ -452,7 +489,7 @@ export const ShortDramaStudio: React.FC = () => {
             ) : (
               <button
                 type="button"
-                onClick={() => handleRunPipeline("start")}
+                onClick={() => handleRunPipeline("start", !nodes.some((node) => node.type === "shot"))}
                 className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3.5 py-1.5 text-xs font-medium text-white hover:bg-indigo-500"
               >
                 <Sparkles className="h-3.5 w-3.5" />
@@ -486,8 +523,17 @@ export const ShortDramaStudio: React.FC = () => {
             </span>
             <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-2 py-0.5 text-emerald-600 dark:text-emerald-400">
               <CheckCircle2 className="h-3 w-3" />
-              免费配音 Edge-TTS / 剪映
+              纯云端配音 Edge-TTS / CosyVoice
             </span>
+            <button
+              type="button"
+              onClick={() => setCloudKeyModalOpen(true)}
+              className="inline-flex items-center gap-1 rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-amber-700 dark:text-amber-400 hover:bg-amber-500/20"
+              title="无本地硬件要求，点击配置硅基流动/阿里百炼/即梦/Meta Muse 云端 API Key"
+            >
+              <KeyRound className="h-3 w-3" />
+              配置云端 API Key
+            </button>
             <span
               title={capabilities?.video.reason || "真实视频大模型可用"}
               className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 ${
@@ -529,8 +575,17 @@ export const ShortDramaStudio: React.FC = () => {
         {/* 主体区：无限画布三栏 vs 5步分镜列表视图 */}
         {viewMode === "wizard" ? (
           <DramaWizardView
+            nodes={nodes}
+            updateNodeData={updateNodeData}
+            updateScriptNode={updateScriptNode}
+            addNode={(kind) => addNode(kind)}
+            removeNode={removeNode}
+            onSelectShot={(nodeId) => {
+              setSelectedNodeId(nodeId);
+              setViewMode("canvas");
+            }}
             onRunBreakdown={handleRunBreakdown}
-            onRunPipeline={() => handleRunPipeline("start")}
+            onRunPipeline={() => handleRunPipeline("start", false)}
             onGenerateCharacter={(id) => void generateCharacterPortrait(id).catch(() => {})}
             onGenerateScene={(id) => void generateSceneAnchor(id).catch(() => {})}
             onGenerateShotAudio={(id) => void generateShotAudioNode(id).catch(() => {})}
@@ -603,6 +658,12 @@ export const ShortDramaStudio: React.FC = () => {
                 >
                   <Sparkles className="h-3.5 w-3.5 text-amber-500" /> 从提示词广场套用风格
                 </button>
+                <a
+                  href="#/chat"
+                  className="flex w-full items-center gap-2 rounded-lg border border-dashed border-[var(--border-default)] px-2.5 py-2 text-left text-primary hover:bg-[var(--bg-surface-hover)]"
+                >
+                  <Globe className="h-3.5 w-3.5" /> Chat 爬虫搜音色/图/视频入库
+                </a>
               </div>
 
               <div className="space-y-1.5 border-t border-[var(--border-default)] pt-3">
@@ -683,6 +744,17 @@ export const ShortDramaStudio: React.FC = () => {
           exportStageText={composerNode?.data.exportStageText}
           onExportVideo={handleExportSingleVideo}
           onExportZip={handleExportZip}
+        />
+
+        <CloudKeyConfigModal
+          open={cloudKeyModalOpen}
+          onClose={() => setCloudKeyModalOpen(false)}
+          initialProvider="siliconflow"
+          allowedProviders={["siliconflow", "dashscope", "jimeng", "meta_muse"]}
+          title="配置短剧云端创作 API Key（纯云端推理）"
+          onSaved={() => {
+            void refreshCapabilities();
+          }}
         />
       </div>
     </DramaNodeActionsProvider>

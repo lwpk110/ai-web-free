@@ -540,6 +540,29 @@ export const App: React.FC = () => {
           </div>
 
           <div className="flex items-center gap-2 shrink-0">
+            {overview?.server_health && (
+              <button
+                type="button"
+                onClick={() => navigate("overview")}
+                className="hidden lg:inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl border z-border z-surface z-ghost-btn font-mono-num cursor-pointer"
+                title={`后台服务 ${overview.server_health.services_running}/${overview.server_health.services_total} 运行中 · ${overview.server_health.goroutines} goroutines · ${overview.server_health.mem_alloc_mb} MB`}
+              >
+                <span
+                  className={
+                    overview.server_health.status === "healthy"
+                      ? "status-dot-green"
+                      : overview.server_health.status === "degraded"
+                        ? "status-dot-amber"
+                        : "status-dot-red"
+                  }
+                />
+                <span>
+                  后台 {overview.server_health.services_running}/
+                  {overview.server_health.services_total}
+                </span>
+              </button>
+            )}
+
             <button
               type="button"
               onClick={() => setShowCmdPalette(true)}

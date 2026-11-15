@@ -13,9 +13,9 @@
 ### 核心约束
 1. **严格零 CGO**：全量 Go 代码基于纯标准库与纯 Go 依赖（`bogdanfinn/tls-client`、`gorilla/websocket`、标准 HTTP），禁止引入任何 SQLite 或 C 绑定。
 2. **混合双轨制**：
-   - **轨道一（零成本客户端逆向）**：剪映 TTS（200+ 热门抖音爆款音色，免额度/免登录）、即梦 AI（Cookie 号池，每日 66~88 免费积分生成图片与视频）。
-   - **轨道二（官方免费配额池）**：硅基流动（FLUX.1-schnell、CosyVoice 永久免费模型）、阿里云百炼 DashScope（CosyVoice、通义万相、Wan 视频 90 天新人免费额度）。
-3. **优雅降级与粘性防风控**：模型与音色显式路由，主渠道耗尽或熔断时跨渠道自动降级，保障下游客户端高可用。
+   - **轨道一（零成本免密云端 + 可选自定义 OpenAI 兼容通道）**：微软 Edge-TTS v2 签名逆向（纯云端推理、零本地算力占用、免密无额度限制，支持 `/voices/list` 实时同步）、即梦 AI（Cookie 号池，每日 66~88 免费积分生成图片与视频），并兼容通过 `CUSTOM_TTS_BASE_URL` / `LOCAL_TTS_BASE_URL` 接入外部 OpenAI 兼容 TTS 端点或自建 Kokoro-FastAPI 节点。原字节剪映旧免密域名 `api-normal-c-lq.zijieapi.com` 已永久下线（`NXDOMAIN`），已退役禁用。
+   - **轨道二（云端官方 API Key 配额池）**：硅基流动（`SILICONFLOW_API_KEY`，解锁 `FunAudioLLM/CosyVoice2-0.5B`、FLUX.1-schnell、CogVideoX）、阿里云百炼 DashScope（`DASHSCOPE_API_KEY`，WebSocket `SpeechSynthesizer` 流式/REST 兜底支持 `cosyvoice-v3-flash`/`v2`/`v1`、文字捏声音与音频复刻、通义万相、Wan 视频）。
+3. **显式路由与禁止静默音色塌缩**：音色按 ID/请求头严格路由至对应引擎；默认拒绝隐式替换为 ChatGPT `cove`，仅当调用方显式传 `X-Allow-Fallback: true` 时执行独立映射兜底，并在响应头返回 `X-TTS-Provider`、`X-TTS-Voice`、`X-TTS-Fallback`。
 
 ---
 
@@ -29,46 +29,24 @@
   {
     "model": "tts-1",
     "input": "这是一段需要合成的高清语音文本，支持超长篇幅自动切片...",
-    "voice": "zh_female_shuangkuai",
+    "voice": "zh-CN-XiaoxiaoNeural",
     "response_format": "mp3",
     "speed": 1.0
   }
   ```
 * **音色路由规则**：
-  * 若 `voice` 以 `zh_`、`dy_` 开头或属于剪映音色库，调度至 `internal/provider/jianying`。
-  * 若 `voice` 属于 `cosyvoice-*` 或指定 `model: "cosyvoice-v1"`，优先调度至硅基流动免费池；若配置了百炼 Key 则可使用百炼定制音色。
-  * 若 `voice` 为 OpenAI 预设音色（`alloy`, `echo`, `fable`, `onyx`, `nova`, `shimmer`），自动映射至剪映或 CosyVoice 的最接近中文音质音色。
+  * 若 `voice` 属于 Kokoro/本地音色（如 `zf_xiaoxiao`, `zm_yunxi`, `kokoro:*`）或 `X-Prefer-Provider: local_tts`，调度至 `internal/provider/local_tts_provider.go`。
+  * 若 `voice` 属于微软神经音色（如 `zh-CN-XiaoxiaoNeural`）或 `X-Prefer-Provider: edge_tts`，调度至 `internal/provider/edge_tts.go`（`readaloud/edge/v1`）。
+  * 若 `voice` 属于 `FunAudioLLM/CosyVoice2-0.5B:*` / `cosyvoice-v1:*` 或 `X-Prefer-Provider: siliconflow`，调度至硅基流动池（`CosyVoice2-0.5B`）；若为百炼 `long*` / `custom_*` / `designed_*`，调度至百炼 DashScope。
+  * 若 `voice` 为 OpenAI 预设音色（`alloy`~`shimmer`），有已登录 ChatGPT 账号时走官方映射；无账号时自动按独立映射调度至 `local_tts` -> `edge_tts`（各音色一一独立映射，禁止折叠）。
+  * 未知或已下线（如旧 `zh_*` 剪映）音色默认返回 HTTP `400` / `410`；仅在显式携带 `X-Allow-Fallback: true` 时按音色区分映射降级。
 * **智能标点长文本切片引擎**：
-  * 单句长度阈值：250 个字符。
-  * 分词算法：按中英文换行与标点符号（`\n`, `。`, `！`, `？`, `!`, `?`, `；`, `;`）切分成有序句子切片。
-  * 并发执行：纯 Go 内存协程并发合成分片（带信号量控制防止 429），依序号以流式 Chunked 形式写入 HTTP Response。
+  * 单句长度阈值：300 个字符（`SplitTextForTTS`），按中英文标点切分并顺序拼接无损输出。
 
-#### 2. 音色元数据端点：`GET /v1/audio/voices`
-* **响应格式**：
-  ```json
-  {
-    "voices": [
-      {
-        "id": "zh_female_shuangkuai",
-        "name": "双快姐（解说小美）",
-        "provider": "jianying",
-        "category": "影视解说",
-        "gender": "female",
-        "sample_text": "注意看，眼前这个男人叫小帅...",
-        "tags": ["热门", "解说", "快节奏"]
-      },
-      {
-        "id": "longxiaochun",
-        "name": "龙小春（亲切女声）",
-        "provider": "dashscope",
-        "category": "自然情感",
-        "gender": "female",
-        "sample_text": "今天的天气真不错，要一起去散步吗？",
-        "tags": ["多情感", "大模型拟真"]
-      }
-    ]
-  }
-  ```
+#### 2. 音色目录、本地样音拉取与试听缓存端点
+* `GET /v1/audio/voices`：聚合 `local_tts`、`edge_tts`、`siliconflow`、`dashscope`、`chatgpt` 音色及 `available`、`cached_local`、`preview_url` 与 `providers` 实时状态摘要。
+* `GET /v1/audio/voices/:id/preview`（含 `?id=` 兼容路由 `/v1/audio/voice-preview`）：优先读取本地 `voice_samples/*.mp3`（响应头 `X-Voice-Cache: hit`）；未命中时严格按原音色实时合成并持久化保存。
+* `POST /v1/audio/voices/pull-local`：同步实时音色清单写入 `voices/catalog.json`（启动时自动回填），并并发预拉取精选音色试听 MP3 至本地存储。
 
 ---
 
@@ -278,3 +256,21 @@ type ProviderDescriptor struct {
    * 在「语音工坊」和「图像工坊」下拉框中，每个模型或音色项右侧渲染紧凑型微型徽章（Pill Badge），使用户在选择时即刻知晓其背后的配额性质与能力。
 3. **网关智能请求 Header 支持**：
    * 客户端可在调用时传入偏好 Header：`X-Prefer-Tag: permanent-free` 或 `X-Require-Feature: tts-voice-clone`，网关调度器将优先仅在符合标签条件的健康可用账号池中轮询派发。
+
+---
+
+## 6. 全工坊纯云端推理、短剧高频音色矩阵与 Chat 媒体爬虫系统库 (`#/chat`, `#/tts`, `#/image`, `#/video`, `#/short-drama`)
+
+1. **纯云端零本地模型推理约束**：
+   - 由于本地部署环境无独立 GPU/大容量算力资源，语音（TTS/克隆）、生图（文生图/图生图）、视频生成与短剧管线均通过 **免密云端通道（Edge-TTS 等） + 可选云端 API Key（SiliconFlow / DashScope / 即梦 / Meta Muse / `CUSTOM_TTS_BASE_URL`）** 调度推理，严禁默认引导用户在本地硬件部署模型服务。
+   - 全部四大创作工坊均提供统一 `<CloudKeyConfigModal />` 入口，就地录入 `SILICONFLOW_API_KEY`、`DASHSCOPE_API_KEY`、`JIMENG_SESSION_ID`、`META_COOKIE` 或 `CUSTOM_TTS_BASE_URL` 即可实时激活对应云端通道（无需重启）。
+2. **短剧高频角色音色与预设矩阵**：
+   - `EnrichShortDramaVoices` 为 Edge-TTS、硅基流动 CosyVoice2-0.5B 与阿里云百炼 CosyVoice 精选音色自动标注 `"短剧常用"` 及剧组角色标签（`霸总男主`、`大女主`、`甜宠千金`、`冷酷反派`、`悬疑旁白`、`热血战神`、`搞笑方言`、`港风粤语`、`台偶言情`、`出海英音` 等）。
+   - 图像工坊新增短剧定妆/分镜预设模板，视频工坊新增短剧竖屏运镜预设（`短剧常用` 分类）。
+3. **Chat 统一网页爬虫工具与跨工坊系统库复用**：
+   - 新增纯 Go 爬虫引擎 `internal/provider/media_crawler.go`（内置 SSRF 内网/回环 IP 防护，支持直链、HTML `<audio>`/`<source>`/`<img>`/`<video>`/OG/JSON-LD 提取及 Wikimedia Commons / Bing 公开搜索）。
+   - 新增统一接口：`POST /v1/audio/voices/crawl`、`POST /v1/audio/voices/crawl-import`、`POST /v1/audio/voices/custom/:id/clone`、`DELETE /v1/audio/voices/custom/:id`、`POST /v1/media/crawl`、`POST /v1/media/crawl-import`、`GET /v1/media/assets`（含 `/admin/api/v1/media/*` 映射）。
+   - **先查后爬与本地入库复用闭环**：
+     - 语音样本：先在现有系统/短剧音色库检索；未命中时爬虫抓样并缓存至 `voice_samples/`，同时通过 SiliconFlow `/v1/uploads/audio/voice`（支持本地采集音频转 `data:audio/...;base64,...` 直传，无需公网回调地址）或 DashScope `VoiceCloning` 复刻为 `speech:...` / `cosyvoice-...` 音色，持久化于 `voices/custom_voices.json`。无 Key 时暂存为 `cached_pending_key`，待补充 Key 后支持一键「云端复刻」，并在 `#/tts`、`#/short-drama` 与 `POST /v1/audio/speech` 中透明路由复用。
+     - 参考图像与视频片段：爬虫下载缓存至 `images/` / `videos/` 并分别写入 `GalleryWork`（`model: "crawled-ref"`）与 `VideoTask`（`provider: "crawler"`），立即在 `#/image`（「设为参考图」）、`#/video`（「项目素材库」）与 `#/short-drama`（全平台画廊导入）中直接复用。
+

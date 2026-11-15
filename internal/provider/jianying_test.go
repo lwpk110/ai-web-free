@@ -51,24 +51,44 @@ func TestJianyingVoices(t *testing.T) {
 }
 
 func TestMapEdgeVoiceToJianyingKeepsVoicesDistinct(t *testing.T) {
-	voices := GetEdgeTTSVoiceDescriptors()
-	mapped := make(map[string]bool, len(voices))
-	for _, voice := range voices {
-		fallback := MapEdgeVoiceToJianying(voice.ID)
+	legacyMapped := []string{
+		"zh-CN-XiaoxiaoNeural",
+		"zh-CN-YunxiNeural",
+		"zh-CN-YunyangNeural",
+		"zh-CN-YunxiaNeural",
+		"zh-CN-YunjianNeural",
+		"zh-CN-liaoning-XiaobeiNeural",
+		"zh-HK-HiuGaaiNeural",
+		"zh-TW-HsiaoChenNeural",
+		"en-US-JennyNeural",
+	}
+	mapped := make(map[string]bool, len(legacyMapped))
+	for _, voiceID := range legacyMapped {
+		fallback := MapEdgeVoiceToJianying(voiceID)
 		if _, ok := FindJianyingVoice(fallback); !ok {
-			t.Errorf("Edge voice %q maps to unknown fallback %q", voice.ID, fallback)
+			t.Errorf("Edge voice %q maps to unknown fallback %q", voiceID, fallback)
 		}
 		if mapped[fallback] {
-			t.Errorf("Edge voice %q shares fallback %q with another Edge voice", voice.ID, fallback)
+			t.Errorf("Edge voice %q shares fallback %q with another Edge voice", voiceID, fallback)
 		}
 		mapped[fallback] = true
+	}
+
+	// 验证本地 Kokoro 映射同样保持音色独立
+	localSeen := make(map[string]string)
+	for _, openaiVoice := range []string{"alloy", "ash", "coral", "echo", "fable", "onyx", "nova", "sage", "shimmer"} {
+		localVoice := MapOpenAIVoiceToLocal(openaiVoice)
+		if prev, dup := localSeen[localVoice]; dup {
+			t.Errorf("OpenAI voices %q and %q collapsed to same local voice %q", prev, openaiVoice, localVoice)
+		}
+		localSeen[localVoice] = openaiVoice
 	}
 }
 
 func TestJianYingProvider(t *testing.T) {
 	p := NewJianYingProvider(nil)
 	desc := p.Descriptor()
-	if desc.ID != "jianying" || desc.Status != "enabled" {
+	if desc.ID != "jianying" || desc.Status != "disabled" {
 		t.Fatalf("unexpected descriptor: %+v", desc)
 	}
 
@@ -77,13 +97,13 @@ func TestJianYingProvider(t *testing.T) {
 	}
 
 	stats := p.Stats()
-	if stats.Active != 1 {
-		t.Fatalf("expected 1 active channel, got %d", stats.Active)
+	if stats.Active != 0 || stats.Disabled != 1 {
+		t.Fatalf("expected disabled retired channel, got %+v", stats)
 	}
 
 	accounts := p.ListAccounts("", "", "")
-	if len(accounts) != 1 {
-		t.Fatalf("expected 1 account snapshot, got %d", len(accounts))
+	if len(accounts) != 1 || accounts[0].Status != "disabled" {
+		t.Fatalf("expected 1 disabled account snapshot, got %+v", accounts)
 	}
 }
 

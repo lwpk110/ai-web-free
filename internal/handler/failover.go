@@ -15,6 +15,7 @@ import (
 	"ai-web-free/internal/audit"
 	"ai-web-free/internal/chatgpt"
 	"ai-web-free/internal/config"
+	"ai-web-free/internal/health"
 	"ai-web-free/internal/opslog"
 	"ai-web-free/internal/promptplaza"
 	"ai-web-free/internal/provider"
@@ -39,6 +40,7 @@ type GatewayRuntime struct {
 	DB            *gorm.DB
 	StorageEngine storage.StorageEngine
 	VectorStore   vectorstore.VectorStore
+	HealthTracker *health.Tracker
 }
 
 // FailoverOptions 控制单次请求账号容灾尝试策略与能力过滤。

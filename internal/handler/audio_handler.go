@@ -1,9 +1,15 @@
 package handler
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
+	"net/http"
+	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	chatgptrequestconverter "ai-web-free/conversion/requests/chatgpt"
@@ -24,10 +30,16 @@ type AudioHandler struct {
 	cfg         *config.Config
 	runtime     *GatewayRuntime
 	registry    *provider.Registry
+	crawlOpts   *provider.MediaCrawlOptions
 }
 
 func NewAudioHandler(pool *accounts.Pool, cfg *config.Config) *AudioHandler {
 	return &AudioHandler{accountPool: pool, cfg: cfg}
+}
+
+// SetCrawlerOptions 覆盖音色/媒体爬虫配置（供测试注入自定义 Client 与允许回环端点）。
+func (h *AudioHandler) SetCrawlerOptions(opts provider.MediaCrawlOptions) {
+	h.crawlOpts = &opts
 }
 
 // SetRegistry 注入多供应商插件注册中心
@@ -83,6 +95,35 @@ func (h *AudioHandler) getSiliconFlowProvider() *provider.SiliconFlowProvider {
 	return nil
 }
 
+func (h *AudioHandler) getLocalTTSProvider() *provider.LocalTTSProvider {
+	if h.registry == nil {
+		return nil
+	}
+	if p, ok := h.registry.Get("local_tts"); ok {
+		if casted, ok := p.(*provider.LocalTTSProvider); ok {
+			return casted
+		}
+	}
+	return nil
+}
+
+func (h *AudioHandler) getVoiceCatalogStore() *provider.VoiceCatalogStore {
+	rt := h.ensureRuntime()
+	return provider.NewVoiceCatalogStore(rt.StorageEngine)
+}
+
+func (h *AudioHandler) activeChatGPTCount() int {
+	if h.accountPool == nil {
+		return 0
+	}
+	st := h.accountPool.Stats()
+	n := st.Active - st.NoAuthCount
+	if n < 0 {
+		return 0
+	}
+	return n
+}
+
 // SetRuntime 注入网关共享的容灾、代理健康与审计运行时。
 func (h *AudioHandler) SetRuntime(rt *GatewayRuntime) {
 	h.runtime = rt
@@ -124,10 +165,347 @@ var ttsVoiceMap = map[string]string{
 	"shimmer": "juniper",
 }
 
+var chatgptVoiceOrder = []string{
+	"cove", "fathom", "vale", "ember", "breeze", "orbit", "maple", "glimmer", "juniper",
+}
+
+func parseBoolHeader(raw string) bool {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func isEdgeVoiceID(voice string) bool {
+	lower := strings.ToLower(strings.TrimSpace(voice))
+	if lower == "" {
+		return false
+	}
+	return strings.HasPrefix(lower, "edge:") ||
+		strings.HasSuffix(lower, "neural") ||
+		strings.HasPrefix(lower, "zh-cn-") ||
+		strings.HasPrefix(lower, "zh-hk-") ||
+		strings.HasPrefix(lower, "zh-tw-") ||
+		strings.HasPrefix(lower, "en-us-") ||
+		strings.HasPrefix(lower, "en-gb-") ||
+		strings.HasPrefix(lower, "ja-jp-") ||
+		strings.HasPrefix(lower, "ko-kr-")
+}
+
+func normalizeEdgeVoiceID(voice string) string {
+	trimmed := strings.TrimSpace(voice)
+	lower := strings.ToLower(trimmed)
+	if strings.HasPrefix(lower, "edge:") {
+		trimmed = strings.TrimSpace(trimmed[len("edge:"):])
+	}
+	if trimmed == "" {
+		return "zh-CN-XiaoxiaoNeural"
+	}
+	return trimmed
+}
+
+func isSiliconFlowVoiceID(voice string) bool {
+	lower := strings.ToLower(strings.TrimSpace(voice))
+	return strings.Contains(lower, "funaudiollm/") ||
+		strings.HasPrefix(lower, "cosyvoice-v1:") ||
+		strings.HasPrefix(lower, "cosyvoice-v2:") ||
+		strings.HasPrefix(lower, "speech:") ||
+		strings.HasPrefix(lower, "siliconflow:")
+}
+
+func isLegacyJianyingVoiceID(voice string) bool {
+	trimmed := strings.TrimSpace(voice)
+	if trimmed == "" {
+		return false
+	}
+	if _, ok := provider.FindJianyingVoice(trimmed); ok {
+		return true
+	}
+	lower := strings.ToLower(trimmed)
+	return strings.HasPrefix(lower, "zh_") || strings.HasPrefix(lower, "dy_") || strings.HasPrefix(lower, "en_")
+}
+
+func hashVoiceIndex(voice string, n int) int {
+	if n <= 0 {
+		return 0
+	}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(strings.ToLower(strings.TrimSpace(voice))))
+	return int(h.Sum32() % uint32(n))
+}
+
+func mapVoiceToDistinctEdge(voice string) string {
+	trimmed := strings.TrimSpace(voice)
+	if isEdgeVoiceID(trimmed) {
+		return normalizeEdgeVoiceID(trimmed)
+	}
+	lower := strings.ToLower(trimmed)
+	if ttsVoiceMap[lower] != "" {
+		return provider.MapOpenAIVoiceToEdge(lower)
+	}
+	switch lower {
+	case "zf_xiaoxiao", "zh_female_shuangkuai":
+		return "zh-CN-XiaoxiaoNeural"
+	case "zf_xiaobei", "zh_male_dongbei", "zh_male_dongbeilaozong":
+		return "zh-CN-liaoning-XiaobeiNeural"
+	case "zf_xiaoni", "zh_female_sichuan":
+		return "zh-CN-shaanxi-XiaoniNeural"
+	case "zf_xiaoyi", "zh_female_tianmei":
+		return "zh-CN-XiaoyiNeural"
+	case "zm_yunxi", "zh_male_chunhou":
+		return "zh-CN-YunxiNeural"
+	case "zm_yunjian", "zh_male_houge", "zh_male_yangguang":
+		return "zh-CN-YunjianNeural"
+	case "zm_yunxia":
+		return "zh-CN-YunxiaNeural"
+	case "zm_yunyang", "zh_male_lengku", "zh_male_chenwen":
+		return "zh-CN-YunyangNeural"
+	case "af_heart":
+		return "en-US-JennyNeural"
+	case "af_bella":
+		return "en-US-AvaMultilingualNeural"
+	case "am_adam":
+		return "en-US-GuyNeural"
+	case "am_michael":
+		return "en-US-AndrewMultilingualNeural"
+	}
+	if len(provider.BuiltinEdgeVoices) == 0 {
+		return "zh-CN-XiaoxiaoNeural"
+	}
+	return provider.BuiltinEdgeVoices[hashVoiceIndex(lower, len(provider.BuiltinEdgeVoices))].VoiceID
+}
+
+func mapVoiceToDistinctLocal(voice string) string {
+	trimmed := strings.TrimSpace(voice)
+	lower := strings.ToLower(trimmed)
+	if ttsVoiceMap[lower] != "" {
+		return provider.MapOpenAIVoiceToLocal(lower)
+	}
+	switch lower {
+	case "zh-cn-xiaoxiaoneural", "zh_female_shuangkuai":
+		return "zf_xiaoxiao"
+	case "zh-cn-liaoning-xiaobeineural":
+		return "zf_xiaobei"
+	case "zh-cn-shaanxi-xiaonineural":
+		return "zf_xiaoni"
+	case "zh-cn-xiaoyineural", "zh_female_tianmei":
+		return "zf_xiaoyi"
+	case "zh-cn-yunxineural", "zh_male_chunhou":
+		return "zm_yunxi"
+	case "zh-cn-yunjianneural", "zh_male_houge", "zh_male_yangguang":
+		return "zm_yunjian"
+	case "zh-cn-yunxianeural":
+		return "zm_yunxia"
+	case "zh-cn-yunyangneural", "zh_male_chenwen", "zh_male_lengku":
+		return "zm_yunyang"
+	case "en-us-jennyneural", "en-us-avamultilingualneural":
+		return "af_heart"
+	case "en-us-guyneural", "en-us-andrewmultilingualneural":
+		return "am_adam"
+	}
+	if strings.HasPrefix(lower, "zf_") || strings.HasPrefix(lower, "zm_") ||
+		strings.HasPrefix(lower, "af_") || strings.HasPrefix(lower, "am_") {
+		return trimmed
+	}
+	presets := provider.BuiltinLocalKokoroVoices
+	if len(presets) == 0 {
+		return "zf_xiaoxiao"
+	}
+	return presets[hashVoiceIndex(lower, len(presets))].VoiceID
+}
+
+func mapVoiceToDistinctChatGPT(voice string) string {
+	lower := strings.ToLower(strings.TrimSpace(voice))
+	if mapped := ttsVoiceMap[lower]; mapped != "" {
+		return mapped
+	}
+	return chatgptVoiceOrder[hashVoiceIndex(lower, len(chatgptVoiceOrder))]
+}
+
+func normalizePreferredTTSProvider(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "local", "local_tts", "kokoro":
+		return "local_tts"
+	case "edge", "edge_tts", "edge-tts":
+		return "edge_tts"
+	case "siliconflow", "sf":
+		return "siliconflow"
+	case "dashscope", "aliyun", "bailian":
+		return "dashscope"
+	case "chatgpt", "openai":
+		return "chatgpt"
+	case "jianying", "jy":
+		return "jianying"
+	default:
+		return ""
+	}
+}
+
+func (h *AudioHandler) resolveTTSEngine(voice, model, preferProvider string) string {
+	if pref := normalizePreferredTTSProvider(preferProvider); pref != "" {
+		return pref
+	}
+	trimmedVoice := strings.TrimSpace(voice)
+	voiceLower := strings.ToLower(trimmedVoice)
+	modelLower := strings.ToLower(strings.TrimSpace(model))
+	if trimmedVoice == "" || ttsVoiceMap[voiceLower] != "" {
+		return "openai_auto"
+	}
+	if localP := h.getLocalTTSProvider(); localP != nil && localP.IsKnownVoice(trimmedVoice) {
+		return "local_tts"
+	}
+	if strings.HasPrefix(modelLower, "kokoro") {
+		return "local_tts"
+	}
+	if isEdgeVoiceID(trimmedVoice) {
+		return "edge_tts"
+	}
+	if isSiliconFlowVoiceID(trimmedVoice) {
+		return "siliconflow"
+	}
+	if provider.IsDashScopeVoice(trimmedVoice) || strings.HasPrefix(voiceLower, "designed_") || strings.HasPrefix(voiceLower, "custom_") {
+		return "dashscope"
+	}
+	if isLegacyJianyingVoiceID(trimmedVoice) {
+		return "jianying"
+	}
+	return "unknown"
+}
+
+func (h *AudioHandler) synthesizeDirectEngine(ctx context.Context, engine, input, voice, model string, speed float64) (audio []byte, usedProvider, usedVoice string, status int, err error) {
+	if resolvedEngine, resolvedVoice, pendingErr := h.resolveCustomVoiceBeforeSynth(ctx, voice); pendingErr != nil {
+		return nil, "custom", voice, http.StatusBadRequest, pendingErr
+	} else if resolvedEngine != "" && resolvedVoice != "" {
+		engine = resolvedEngine
+		voice = resolvedVoice
+	}
+	switch engine {
+	case "local_tts":
+		localP := h.getLocalTTSProvider()
+		if localP == nil || !localP.IsConfigured() {
+			return nil, "local_tts", voice, http.StatusServiceUnavailable, errors.New("外部/自定义 OpenAI 兼容 TTS 服务未配置（可选设置 CUSTOM_TTS_BASE_URL / LOCAL_TTS_BASE_URL）")
+		}
+		targetVoice := provider.NormalizeLocalVoiceID(voice)
+		if targetVoice == "" || ttsVoiceMap[strings.ToLower(targetVoice)] != "" || isEdgeVoiceID(targetVoice) || isLegacyJianyingVoiceID(targetVoice) {
+			targetVoice = mapVoiceToDistinctLocal(voice)
+		}
+		audioBytes, synErr := localP.Synthesize(ctx, input, targetVoice, model, speed)
+		if synErr != nil {
+			return nil, "local_tts", targetVoice, http.StatusBadGateway, synErr
+		}
+		return audioBytes, "local_tts", targetVoice, http.StatusOK, nil
+
+	case "edge_tts":
+		edge := h.getEdgeTTSProvider()
+		if edge == nil {
+			return nil, "edge_tts", voice, http.StatusServiceUnavailable, errors.New("微软 Edge-TTS 插件未注册")
+		}
+		targetVoice := mapVoiceToDistinctEdge(voice)
+		audioBytes, synErr := edge.Synthesize(ctx, input, targetVoice, speed)
+		if synErr != nil {
+			return nil, "edge_tts", targetVoice, http.StatusBadGateway, fmt.Errorf("Edge-TTS 合成失败: %w", synErr)
+		}
+		return audioBytes, "edge_tts", targetVoice, http.StatusOK, nil
+
+	case "siliconflow":
+		sf := h.getSiliconFlowProvider()
+		if sf == nil || sf.Stats().Active == 0 {
+			return nil, "siliconflow", voice, http.StatusServiceUnavailable, errors.New("硅基流动未配置有效 API Key，请设置 SILICONFLOW_API_KEY 或点击「配置云端 API Key」导入密钥")
+		}
+		targetVoice := provider.NormalizeSiliconFlowVoice(voice)
+		if strings.TrimSpace(voice) == "" || ttsVoiceMap[strings.ToLower(strings.TrimSpace(voice))] != "" {
+			sfVoices := provider.GetSiliconFlowVoices(true, "")
+			targetVoice = sfVoices[hashVoiceIndex(voice, len(sfVoices))].ID
+		}
+		audioBytes, synErr := sf.SynthesizeSpeechWithSpeed(ctx, input, targetVoice, speed)
+		if synErr != nil {
+			return nil, "siliconflow", targetVoice, http.StatusBadGateway, synErr
+		}
+		return audioBytes, "siliconflow", targetVoice, http.StatusOK, nil
+
+	case "dashscope":
+		ds := h.getDashScopeProvider()
+		if ds == nil || ds.Stats().Active == 0 {
+			return nil, "dashscope", voice, http.StatusServiceUnavailable, errors.New("阿里云百炼未配置有效 API Key，请设置 DASHSCOPE_API_KEY 或点击「配置云端 API Key」导入密钥")
+		}
+		targetVoice := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(voice, "dashscope:"), "DashScope:"))
+		if targetVoice == "" || ttsVoiceMap[strings.ToLower(targetVoice)] != "" {
+			dsVoices := provider.GetDashScopeVoices(true, "")
+			targetVoice = dsVoices[hashVoiceIndex(voice, len(dsVoices))].ID
+		}
+		audioBytes, synErr := ds.SynthesizeSpeechWithRate(ctx, input, targetVoice, speed)
+		if synErr != nil {
+			return nil, "dashscope", targetVoice, http.StatusBadGateway, synErr
+		}
+		return audioBytes, "dashscope", targetVoice, http.StatusOK, nil
+
+	case "jianying":
+		return nil, "jianying", voice, http.StatusGone, errors.New("剪映旧免密接口 (api-normal-c-lq.zijieapi.com) 已永久下线，请切换至微软 Edge-TTS 或硅基流动/百炼云端音色，或传递 X-Allow-Fallback: true 自动迁移")
+
+	case "unknown":
+		return nil, "unknown", voice, http.StatusBadRequest, fmt.Errorf("未识别的音色 ID %q；请先调用 GET /v1/audio/voices 查询可用音色，或传 X-Allow-Fallback: true", voice)
+
+	default:
+		return nil, engine, voice, http.StatusBadRequest, fmt.Errorf("不支持的语音引擎: %s", engine)
+	}
+}
+
+func (h *AudioHandler) tryFallbackSynthesis(ctx context.Context, failedEngine, input, voice, model string, speed float64) ([]byte, string, string, bool) {
+	if failedEngine != "local_tts" {
+		if localP := h.getLocalTTSProvider(); localP != nil && localP.IsAvailable() {
+			if audio, usedProv, usedVoice, _, err := h.synthesizeDirectEngine(ctx, "local_tts", input, mapVoiceToDistinctLocal(voice), model, speed); err == nil && len(audio) > 0 {
+				return audio, usedProv, usedVoice, true
+			}
+		}
+	}
+	if failedEngine != "edge_tts" {
+		if audio, usedProv, usedVoice, _, err := h.synthesizeDirectEngine(ctx, "edge_tts", input, mapVoiceToDistinctEdge(voice), model, speed); err == nil && len(audio) > 0 {
+			return audio, usedProv, usedVoice, true
+		}
+	}
+	return nil, "", "", false
+}
+
+func writeTTSErrorJSON(c *gin.Context, status int, errType, codeVal, prov, message string) {
+	if status <= 0 {
+		status = http.StatusBadGateway
+	}
+	c.JSON(status, gin.H{
+		"error": gin.H{
+			"message":  message,
+			"type":     errType,
+			"param":    "voice",
+			"code":     codeVal,
+			"provider": prov,
+		},
+	})
+}
+
+func (h *AudioHandler) writeTTSAudioResponse(c *gin.Context, contentType, usedProvider, usedVoice, requestedVoice, input string, speed float64, fallback bool, fallbackReason string, audioBytes []byte) {
+	c.Header("Content-Type", contentType)
+	c.Header("X-TTS-Provider", usedProvider)
+	c.Header("X-TTS-Voice", usedVoice)
+	if fallback {
+		c.Header("X-TTS-Fallback", "true")
+		if fallbackReason != "" {
+			c.Header("X-TTS-Fallback-Reason", fallbackReason)
+		}
+	} else {
+		c.Header("X-TTS-Fallback", "false")
+	}
+	label := usedProvider
+	if fallback {
+		label = usedProvider + "(降级:" + requestedVoice + "->" + usedVoice + ")"
+	}
+	h.recordAudioHistory(usedVoice, label, usedProvider, input, speed, audioBytes)
+	c.Data(http.StatusOK, contentType, audioBytes)
+}
+
 func (h *AudioHandler) TTS(c *gin.Context) {
 	var original_request officialtypes.TTSAPIRequest
-	err := c.BindJSON(&original_request)
-	if err != nil {
+	if err := c.BindJSON(&original_request); err != nil {
 		c.JSON(400, gin.H{"error": gin.H{
 			"message": "Request must be proper JSON",
 			"type":    "invalid_request_error",
@@ -146,76 +524,71 @@ func (h *AudioHandler) TTS(c *gin.Context) {
 		return
 	}
 
-	ttsModel := "tts-1"
-	voiceLower := strings.ToLower(strings.TrimSpace(original_request.Voice))
-	preferTag := c.GetHeader("X-Prefer-Tag")
+	ttsModel := strings.TrimSpace(original_request.Model)
+	if ttsModel == "" {
+		ttsModel = "tts-1"
+	}
+	requestedVoice := strings.TrimSpace(original_request.Voice)
 	preferProvider := c.GetHeader("X-Prefer-Provider")
+	allowFallback := parseBoolHeader(c.GetHeader("X-Allow-Fallback"))
+	engine := h.resolveTTSEngine(requestedVoice, ttsModel, preferProvider)
 
-	// 0. 微软 Edge-TTS 官方免密高品质音色（晓晓、云希、云扬等）
-	isEdgeVoice := strings.HasPrefix(original_request.Voice, "zh-CN-") || strings.HasPrefix(original_request.Voice, "zh-HK-") || strings.HasPrefix(original_request.Voice, "zh-TW-") || strings.HasPrefix(original_request.Voice, "en-US-") || strings.Contains(voiceLower, "xiaoxiao") || strings.Contains(voiceLower, "yunxi") || strings.Contains(voiceLower, "yunyang")
-	if isEdgeVoice || preferProvider == "edge_tts" {
-		if edge := h.getEdgeTTSProvider(); edge != nil {
-			audioBytes, err := edge.Synthesize(c.Request.Context(), original_request.Input, original_request.Voice, original_request.Speed)
-			if err == nil && len(audioBytes) > 0 {
-				h.recordAudioHistory(original_request.Voice, "微软官方", "edge_tts", original_request.Input, original_request.Speed, audioBytes)
-				c.Header("Content-Type", "audio/mpeg")
-				c.Header("X-TTS-Provider", "edge_tts")
-				c.Data(200, "audio/mpeg", audioBytes)
+	// 1. 非 ChatGPT 语音引擎（Local / Edge / SiliconFlow / DashScope / 报错拦截）
+	if engine != "chatgpt" && engine != "openai_auto" {
+		audioBytes, usedProv, usedVoice, status, err := h.synthesizeDirectEngine(
+			c.Request.Context(),
+			engine,
+			original_request.Input,
+			requestedVoice,
+			ttsModel,
+			original_request.Speed,
+		)
+		if err == nil && len(audioBytes) > 0 {
+			h.writeTTSAudioResponse(c, "audio/mpeg", usedProv, usedVoice, requestedVoice, original_request.Input, original_request.Speed, false, "", audioBytes)
+			return
+		}
+		if allowFallback {
+			if fbAudio, fbProv, fbVoice, ok := h.tryFallbackSynthesis(c.Request.Context(), engine, original_request.Input, requestedVoice, ttsModel, original_request.Speed); ok {
+				h.writeTTSAudioResponse(c, "audio/mpeg", fbProv, fbVoice, requestedVoice, original_request.Input, original_request.Speed, true, engine+"_unavailable", fbAudio)
 				return
 			}
 		}
-		// Keep fallback voices distinct so an Edge outage does not collapse the whole catalog to two voices.
-		if jy := h.getJianyingProvider(); jy != nil {
-			mappedVoice := provider.MapEdgeVoiceToJianying(original_request.Voice)
-			audioBytes, err := jy.Synthesize(c.Request.Context(), original_request.Input, mappedVoice, original_request.Speed)
-			if err == nil && len(audioBytes) > 0 {
-				h.recordAudioHistory(original_request.Voice, "剪映免密(映射)", "jianying", original_request.Input, original_request.Speed, audioBytes)
-				c.Header("Content-Type", "audio/mpeg")
-				c.Header("X-TTS-Provider", "jianying")
-				c.Header("X-TTS-Fallback", "true")
-				c.Data(200, "audio/mpeg", audioBytes)
+		writeTTSErrorJSON(c, status, "tts_synthesis_error", engine+"_failed", engine, err.Error())
+		return
+	}
+
+	// 2. OpenAI 兼容标准音色（alloy/nova/...）：有 ChatGPT 登录账号时优先走官方语音；否则无 ChatGPT 账号且未强制 chatgpt 时自动走 local_tts -> edge_tts（各音色独立映射）
+	if engine == "openai_auto" && h.activeChatGPTCount() == 0 {
+		openAIVoice := requestedVoice
+		if openAIVoice == "" {
+			openAIVoice = "alloy"
+		}
+		if localP := h.getLocalTTSProvider(); localP != nil && localP.IsAvailable() {
+			if audioBytes, usedProv, usedVoice, _, err := h.synthesizeDirectEngine(c.Request.Context(), "local_tts", original_request.Input, provider.MapOpenAIVoiceToLocal(openAIVoice), ttsModel, original_request.Speed); err == nil && len(audioBytes) > 0 {
+				h.writeTTSAudioResponse(c, "audio/mpeg", usedProv, usedVoice, openAIVoice, original_request.Input, original_request.Speed, false, "", audioBytes)
 				return
 			}
+		}
+		if audioBytes, usedProv, usedVoice, status, err := h.synthesizeDirectEngine(c.Request.Context(), "edge_tts", original_request.Input, provider.MapOpenAIVoiceToEdge(openAIVoice), ttsModel, original_request.Speed); err == nil && len(audioBytes) > 0 {
+			h.writeTTSAudioResponse(c, "audio/mpeg", usedProv, usedVoice, openAIVoice, original_request.Input, original_request.Speed, false, "", audioBytes)
+			return
+		} else {
+			writeTTSErrorJSON(c, status, "tts_synthesis_error", "edge_tts_failed", "edge_tts", err.Error())
+			return
 		}
 	}
 
-	// 1. 若指定剪映音色、带有免密偏好或为中文特色音色
-	isJianyingVoice := strings.HasPrefix(voiceLower, "zh_") || strings.HasPrefix(voiceLower, "dy_") || strings.HasPrefix(voiceLower, "en_")
-	if isJianyingVoice || preferProvider == "jianying" || preferTag == "permanent-free" {
-		if jy := h.getJianyingProvider(); jy != nil {
-			audioBytes, err := jy.Synthesize(c.Request.Context(), original_request.Input, original_request.Voice, original_request.Speed)
-			if err == nil && len(audioBytes) > 0 {
-				h.recordAudioHistory(original_request.Voice, "剪映爆款", "jianying", original_request.Input, original_request.Speed, audioBytes)
-				c.Header("Content-Type", "audio/mpeg")
-				c.Header("X-TTS-Provider", "jianying")
-				c.Data(200, "audio/mpeg", audioBytes)
-				return
-			}
-		}
+	// 3. ChatGPT 官方 TTS（严格校验 OpenAI 音色映射，禁止静默塌缩为 cove）
+	chatgptVoice := ttsVoiceMap[strings.ToLower(requestedVoice)]
+	if requestedVoice == "" {
+		chatgptVoice = ttsVoiceMap["alloy"]
 	}
-
-	// 2. 若指定 CosyVoice 或百炼定制音色
-	if strings.Contains(voiceLower, "cosyvoice") || strings.HasPrefix(voiceLower, "long") || strings.HasPrefix(voiceLower, "designed_") || strings.HasPrefix(voiceLower, "custom_") {
-		if ds := h.getDashScopeProvider(); ds != nil {
-			audioBytes, err := ds.SynthesizeSpeech(c.Request.Context(), original_request.Input, original_request.Voice)
-			if err == nil && len(audioBytes) > 0 {
-				h.recordAudioHistory(original_request.Voice, "CosyVoice", "dashscope", original_request.Input, original_request.Speed, audioBytes)
-				c.Header("Content-Type", "audio/mpeg")
-				c.Header("X-TTS-Provider", "dashscope")
-				c.Data(200, "audio/mpeg", audioBytes)
-				return
-			}
+	if chatgptVoice == "" {
+		if !allowFallback {
+			writeTTSErrorJSON(c, http.StatusBadRequest, "invalid_request_error", "unsupported_chatgpt_voice", "chatgpt", fmt.Sprintf("ChatGPT 语音通道不支持音色 %q（仅支持 alloy/ash/coral/echo/fable/onyx/nova/sage/shimmer），或传 X-Allow-Fallback: true", requestedVoice))
+			return
 		}
-		if sf := h.getSiliconFlowProvider(); sf != nil {
-			audioBytes, err := sf.SynthesizeSpeech(c.Request.Context(), original_request.Input, original_request.Voice)
-			if err == nil && len(audioBytes) > 0 {
-				h.recordAudioHistory(original_request.Voice, "CosyVoice", "siliconflow", original_request.Input, original_request.Speed, audioBytes)
-				c.Header("Content-Type", "audio/mpeg")
-				c.Header("X-TTS-Provider", "siliconflow")
-				c.Data(200, "audio/mpeg", audioBytes)
-				return
-			}
-		}
+		chatgptVoice = mapVoiceToDistinctChatGPT(requestedVoice)
 	}
 
 	rt := h.ensureRuntime()
@@ -244,16 +617,9 @@ func (h *AudioHandler) TTS(c *gin.Context) {
 		}
 	})
 	if err != nil {
-		// 优雅降级：若 ChatGPT 逆向无可用账号，自动降级至剪映免费通道输出
-		if jy := h.getJianyingProvider(); jy != nil {
-			mappedVoice := provider.MapOpenAIVoiceToJianying(original_request.Voice)
-			audioBytes, jyErr := jy.Synthesize(c.Request.Context(), original_request.Input, mappedVoice, original_request.Speed)
-			if jyErr == nil && len(audioBytes) > 0 {
-				h.recordAudioHistory(original_request.Voice, "剪映免密降级", "jianying", original_request.Input, original_request.Speed, audioBytes)
-				c.Header("Content-Type", "audio/mpeg")
-				c.Header("X-TTS-Provider", "jianying")
-				c.Header("X-TTS-Fallback", "true")
-				c.Data(200, "audio/mpeg", audioBytes)
+		if allowFallback {
+			if fbAudio, fbProv, fbVoice, ok := h.tryFallbackSynthesis(c.Request.Context(), "chatgpt", original_request.Input, requestedVoice, ttsModel, original_request.Speed); ok {
+				h.writeTTSAudioResponse(c, "audio/mpeg", fbProv, fbVoice, requestedVoice, original_request.Input, original_request.Speed, true, "chatgpt_unavailable", fbAudio)
 				return
 			}
 		}
@@ -319,11 +685,7 @@ func (h *AudioHandler) TTS(c *gin.Context) {
 	if format == "" {
 		format = "aac"
 	}
-	voice := ttsVoiceMap[original_request.Voice]
-	if voice == "" {
-		voice = "cove"
-	}
-	data, status, err := chatgpt.GetTTS(client, account, msgId, convId, voice, format, proxyUrl)
+	data, status, err := chatgpt.GetTTS(client, account, msgId, convId, chatgptVoice, format, proxyUrl)
 	if err != nil {
 		c.JSON(status, gin.H{"error": gin.H{
 			"message": err.Error(),
@@ -334,9 +696,9 @@ func (h *AudioHandler) TTS(c *gin.Context) {
 		rt.RecordAudit(c, ttsModel, res, status, err)
 		return
 	}
-	h.recordAudioHistory(original_request.Voice, "ChatGPT官方", "chatgpt", original_request.Input, original_request.Speed, data)
+	isMappedFallback := requestedVoice != "" && ttsVoiceMap[strings.ToLower(requestedVoice)] == ""
 	rt.RecordAudit(c, ttsModel, res, 200, nil)
-	c.Data(200, ttsTypeMap[format], data)
+	h.writeTTSAudioResponse(c, ttsTypeMap[format], "chatgpt", chatgptVoice, requestedVoice, original_request.Input, original_request.Speed, isMappedFallback, "", data)
 }
 
 // ── Audio Transcriptions ──
@@ -521,45 +883,466 @@ func (h *AudioHandler) handleTranscription(c *gin.Context, isTranslation bool) {
 	}
 }
 
-// ListVoices 返回聚合音色清单与分类元数据: GET /v1/audio/voices
+func openAIStandardVoices(chatgptActive int) []provider.VoiceDescriptor {
+	reason := ""
+	if chatgptActive == 0 {
+		reason = "暂无已登录 ChatGPT 账号；OpenAI 标准音色在直连 /v1/audio/speech 时会自动映射为本地/Edge 独立音色"
+	}
+	presets := []struct {
+		id     string
+		name   string
+		gender string
+		sample string
+	}{
+		{"alloy", "OpenAI Alloy (均衡中性 · 多语种)", "female", "Hello, this is OpenAI Alloy voice with clear balanced tone."},
+		{"nova", "OpenAI Nova (清亮活力 · 女声)", "female", "Hello, I am Nova, bright and expressive for narration."},
+		{"echo", "OpenAI Echo (温和叙事 · 男声)", "male", "Welcome, this is Echo speaking in a warm narrative style."},
+		{"onyx", "OpenAI Onyx (低沉权威 · 男声)", "male", "Attention everyone, this is Onyx with a deep authoritative voice."},
+		{"fable", "OpenAI Fable (故事演绎 · 英式)", "male", "Once upon a time, Fable brought every character to life."},
+		{"shimmer", "OpenAI Shimmer (轻柔清澈 · 女声)", "female", "Good morning, shimmer gently guides your audience through the story."},
+		{"ash", "OpenAI Ash (沉稳理性 · 男声)", "male", "Here is the concise technical briefing read by Ash."},
+		{"coral", "OpenAI Coral (亲和自然 · 女声)", "female", "Hi there, Coral brings warm everyday conversation to your project."},
+		{"sage", "OpenAI Sage (从容知性 · 女声)", "female", "Step by step, Sage explains complex ideas with clarity."},
+	}
+	out := make([]provider.VoiceDescriptor, 0, len(presets))
+	for _, item := range presets {
+		out = append(out, provider.VoiceDescriptor{
+			ID:           item.id,
+			Name:         item.name,
+			Provider:     "chatgpt",
+			Category:     "多语种精选",
+			Gender:       item.gender,
+			Locale:       "en-US",
+			SampleText:   item.sample,
+			Tags:         []string{"OpenAI标准", "ChatGPT", "多语种"},
+			Available:    chatgptActive > 0,
+			StatusReason: reason,
+		})
+	}
+	return out
+}
+
+func (h *AudioHandler) collectVoiceCatalog(ctx context.Context, probeLocal bool) ([]provider.VoiceDescriptor, gin.H, int) {
+	voices := make([]provider.VoiceDescriptor, 0, 80)
+
+	localConfigured := false
+	localAvailable := false
+	localEndpoint := ""
+	localHealthy := false
+	localLastErr := ""
+	if localP := h.getLocalTTSProvider(); localP != nil {
+		localConfigured = localP.IsConfigured()
+		localEndpoint = localP.Endpoint()
+		if probeLocal && localConfigured {
+			_ = localP.ProbeMaybeCached(ctx)
+		}
+		localAvailable = localP.IsAvailable()
+		localHealthy, localLastErr = localP.HealthSnapshot()
+		voices = append(voices, localP.VoiceDescriptors()...)
+	}
+
+	edgeHealthy := true
+	edgeLastErr := ""
+	if edge := h.getEdgeTTSProvider(); edge != nil {
+		edgeHealthy, edgeLastErr = edge.HealthSnapshot()
+		voices = append(voices, edge.VoiceDescriptors()...)
+	} else {
+		voices = append(voices, provider.GetEdgeTTSVoiceDescriptors()...)
+	}
+
+	sfActive := 0
+	if sf := h.getSiliconFlowProvider(); sf != nil {
+		sfActive = sf.Stats().Active
+	}
+	sfReason := ""
+	if sfActive == 0 {
+		sfReason = "未配置 SILICONFLOW_API_KEY 或账号池中无有效 Key"
+	}
+	voices = append(voices, provider.GetSiliconFlowVoices(sfActive > 0, sfReason)...)
+
+	dsActive := 0
+	if ds := h.getDashScopeProvider(); ds != nil {
+		dsActive = ds.Stats().Active
+	}
+	dsReason := ""
+	if dsActive == 0 {
+		dsReason = "未配置 DASHSCOPE_API_KEY 或账号池中无有效 Key"
+	}
+	voices = append(voices, provider.GetDashScopeVoices(dsActive > 0, dsReason)...)
+
+	cgptActive := h.activeChatGPTCount()
+	voices = append(voices, openAIStandardVoices(cgptActive)...)
+
+	store := h.getVoiceCatalogStore()
+	customRecords, _ := store.LoadCustomVoices(ctx)
+	for _, rec := range customRecords {
+		voices = append(voices, provider.CustomVoiceToDescriptor(rec, sfActive > 0, dsActive > 0))
+	}
+	voices = provider.EnrichShortDramaVoices(voices)
+	annotated, cachedCount := store.AnnotateDescriptors(ctx, voices)
+
+	summary := gin.H{
+		"local_tts": gin.H{
+			"available":  localAvailable,
+			"configured": localConfigured,
+			"endpoint":   localEndpoint,
+			"healthy":    localHealthy,
+			"last_error": localLastErr,
+		},
+		"edge_tts": gin.H{
+			"available":   true,
+			"zero_config": true,
+			"healthy":     edgeHealthy,
+			"last_error":  edgeLastErr,
+		},
+		"siliconflow": gin.H{
+			"available": sfActive > 0,
+			"active":    sfActive,
+			"reason":    sfReason,
+		},
+		"dashscope": gin.H{
+			"available": dsActive > 0,
+			"active":    dsActive,
+			"reason":    dsReason,
+		},
+		"chatgpt": gin.H{
+			"available": cgptActive > 0,
+			"active":    cgptActive,
+		},
+		"jianying": gin.H{
+			"available": false,
+			"retired":   true,
+			"reason":    "字节旧免密域名 api-normal-c-lq.zijieapi.com 已返回 NXDOMAIN 下线",
+		},
+	}
+
+	return annotated, summary, cachedCount
+}
+
+// ListVoices 返回聚合音色清单与实时引擎状态: GET /v1/audio/voices
 func (h *AudioHandler) ListVoices(c *gin.Context) {
-	// 1. 微软 Edge-TTS 官方免密神级音色（晓晓、云希、云扬等）置顶
-	voices := provider.GetEdgeTTSVoiceDescriptors()
+	voices, summary, cachedCount := h.collectVoiceCatalog(c.Request.Context(), true)
 
-	// 2. 剪映 200+ 热门爆款音色
-	voices = append(voices, provider.GetJianyingVoices()...)
+	filterProvider := strings.ToLower(strings.TrimSpace(c.Query("provider")))
+	availableOnly := parseBoolHeader(c.Query("available_only"))
+	filtered := make([]provider.VoiceDescriptor, 0, len(voices))
+	availableTotal := 0
+	for _, v := range voices {
+		if v.Available {
+			availableTotal++
+		}
+		if filterProvider != "" && strings.ToLower(v.Provider) != filterProvider {
+			continue
+		}
+		if availableOnly && !v.Available {
+			continue
+		}
+		filtered = append(filtered, v)
+	}
 
-	// 3. 补充百炼/硅基流动 CosyVoice 音色
-	voices = append(voices, provider.VoiceDescriptor{
-		ID:         "cosyvoice-v1:alex",
-		Name:       "Alex (沉稳自然男声)",
-		Provider:   "siliconflow",
-		Category:   "自然情感",
-		Gender:     "male",
-		SampleText: "这是由 CosyVoice 语音大模型合成的超自然拟真人声。",
-		Tags:       []string{"CosyVoice", "大模型拟真", "永久免费"},
-	}, provider.VoiceDescriptor{
-		ID:         "cosyvoice-v1:anna",
-		Name:       "Anna (温柔知性女声)",
-		Provider:   "siliconflow",
-		Category:   "自然情感",
-		Gender:     "female",
-		SampleText: "很高兴与你相遇，希望我的声音能给你带来一丝温暖。",
-		Tags:       []string{"CosyVoice", "治愈温暖", "永久免费"},
-	}, provider.VoiceDescriptor{
-		ID:         "longxiaochun",
-		Name:       "龙小春 (亲切女声)",
-		Provider:   "dashscope",
-		Category:   "自然情感",
-		Gender:     "female",
-		SampleText: "今天阳光明媚，微风正好，要一起出去走走吗？",
-		Tags:       []string{"百炼官方", "多情感", "大模型"},
+	c.JSON(http.StatusOK, gin.H{
+		"voices":             filtered,
+		"total":              len(filtered),
+		"available_total":    availableTotal,
+		"cached_local_total": cachedCount,
+		"providers":          summary,
 	})
+}
 
-	c.JSON(200, gin.H{
-		"voices": voices,
-		"total":  len(voices),
+func (h *AudioHandler) synthesizeVoiceSampleStrict(ctx context.Context, voiceID, sampleText string) (audio []byte, usedProv, usedVoice string, status int, err error) {
+	text := strings.TrimSpace(sampleText)
+	if text == "" {
+		text = "你好，这是一段语音音色的本地试听样音。"
+	}
+	engine := h.resolveTTSEngine(voiceID, "tts-1", "")
+	if engine == "openai_auto" {
+		if localP := h.getLocalTTSProvider(); localP != nil && localP.IsAvailable() {
+			return h.synthesizeDirectEngine(ctx, "local_tts", text, provider.MapOpenAIVoiceToLocal(voiceID), "tts-1", 1.0)
+		}
+		return h.synthesizeDirectEngine(ctx, "edge_tts", text, provider.MapOpenAIVoiceToEdge(voiceID), "tts-1", 1.0)
+	}
+	return h.synthesizeDirectEngine(ctx, engine, text, voiceID, "tts-1", 1.0)
+}
+
+// PreviewVoice 获取指定音色的试听音频（优先读取本地 voice_samples 缓存）:
+// GET /v1/audio/voices/:id/preview 与 GET /v1/audio/voice-preview?id=...
+func (h *AudioHandler) PreviewVoice(c *gin.Context) {
+	rawID := strings.TrimSpace(c.Param("id"))
+	if rawID == "" {
+		rawID = strings.TrimSpace(c.Query("id"))
+	}
+	if rawID == "" {
+		rawID = strings.TrimSpace(c.Query("voice"))
+	}
+	if unescaped, err := url.PathUnescape(rawID); err == nil && strings.TrimSpace(unescaped) != "" {
+		rawID = strings.TrimSpace(unescaped)
+	}
+	if rawID == "" {
+		writeTTSErrorJSON(c, http.StatusBadRequest, "invalid_request_error", "missing_voice_id", "", "请指定有效的音色 ID")
+		return
+	}
+
+	refresh := parseBoolHeader(c.Query("refresh"))
+	store := h.getVoiceCatalogStore()
+	if !refresh && store.Enabled() {
+		if cachedBytes, hit, err := store.ReadSample(c.Request.Context(), rawID); err == nil && hit {
+			c.Header("Content-Type", "audio/mpeg")
+			c.Header("X-Voice-Cache", "hit")
+			c.Header("X-TTS-Provider", "local_cache")
+			c.Header("X-TTS-Voice", rawID)
+			c.Header("Cache-Control", "public, max-age=3600")
+			c.Data(http.StatusOK, "audio/mpeg", cachedBytes)
+			return
+		}
+	}
+
+	sampleText := ""
+	voices, _, _ := h.collectVoiceCatalog(c.Request.Context(), false)
+	for _, v := range voices {
+		if strings.EqualFold(v.ID, rawID) {
+			sampleText = v.SampleText
+			break
+		}
+	}
+
+	audioBytes, usedProv, usedVoice, status, err := h.synthesizeVoiceSampleStrict(c.Request.Context(), rawID, sampleText)
+	if err != nil {
+		writeTTSErrorJSON(c, status, "tts_preview_error", "preview_synthesis_failed", usedProv, err.Error())
+		return
+	}
+
+	cacheHeader := "miss"
+	if store.Enabled() {
+		if _, saveErr := store.SaveSample(c.Request.Context(), rawID, audioBytes); saveErr == nil {
+			cacheHeader = "stored"
+		}
+	}
+	c.Header("Content-Type", "audio/mpeg")
+	c.Header("X-Voice-Cache", cacheHeader)
+	c.Header("X-TTS-Provider", usedProv)
+	c.Header("X-TTS-Voice", usedVoice)
+	c.Header("Cache-Control", "public, max-age=3600")
+	c.Data(http.StatusOK, "audio/mpeg", audioBytes)
+}
+
+// PullLocalVoicesRequest 将音色目录与精选试听样音拉取到本地缓存的请求体。
+type PullLocalVoicesRequest struct {
+	Voices         []string `json:"voices"`
+	IncludeSamples *bool    `json:"include_samples"`
+	RefreshLive    *bool    `json:"refresh_live"`
+	Force          bool     `json:"force"`
+	Limit          int      `json:"limit"`
+}
+
+// PullLocalVoices 同步远端/本地音色目录并批量拉取样音至本地存储: POST /v1/audio/voices/pull-local
+func (h *AudioHandler) PullLocalVoices(c *gin.Context) {
+	var req PullLocalVoicesRequest
+	if c.Request.Body != nil && c.Request.ContentLength != 0 {
+		if err := c.ShouldBindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid JSON request body: " + err.Error()})
+			return
+		}
+	}
+
+	includeSamples := true
+	if req.IncludeSamples != nil {
+		includeSamples = *req.IncludeSamples
+	}
+	refreshLive := true
+	if req.RefreshLive != nil {
+		refreshLive = *req.RefreshLive
+	}
+	limit := req.Limit
+	if limit <= 0 {
+		limit = 24
+	}
+	if limit > 60 {
+		limit = 60
+	}
+
+	ctx := c.Request.Context()
+	edgeSynced := 0
+	var warnings []string
+
+	if refreshLive {
+		if edge := h.getEdgeTTSProvider(); edge != nil {
+			syncCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
+			liveVoices, err := edge.FetchLiveVoices(syncCtx)
+			cancel()
+			if err != nil {
+				warnings = append(warnings, "Edge 音色目录刷新失败: "+err.Error())
+			} else {
+				edgeSynced = len(liveVoices)
+			}
+		}
+		if localP := h.getLocalTTSProvider(); localP != nil && localP.IsConfigured() {
+			if err := localP.Probe(ctx); err != nil {
+				warnings = append(warnings, "本地 TTS 节点探测失败: "+err.Error())
+			}
+		}
+	}
+
+	voices, _, _ := h.collectVoiceCatalog(ctx, false)
+	store := h.getVoiceCatalogStore()
+	catalogSaved := false
+	if store.Enabled() {
+		if err := store.SaveCatalog(ctx, voices); err == nil {
+			catalogSaved = true
+		} else {
+			warnings = append(warnings, "写入本地 voices/catalog.json 失败: "+err.Error())
+		}
+	}
+
+	pulledSamples := 0
+	alreadyCached := 0
+	failedSamples := 0
+	if includeSamples && store.Enabled() {
+		targets := selectVoicesForLocalPull(voices, req.Voices, limit)
+		type pullResult struct {
+			cached bool
+			pulled bool
+			errMsg string
+		}
+		results := make([]pullResult, len(targets))
+		concurrency := 2
+		if localP := h.getLocalTTSProvider(); localP != nil && localP.IsAvailable() {
+			concurrency = 4
+		}
+		sem := make(chan struct{}, concurrency)
+		var wg sync.WaitGroup
+		for idx, item := range targets {
+			wg.Add(1)
+			go func(i int, desc provider.VoiceDescriptor) {
+				defer wg.Done()
+				if !req.Force && store.HasSample(ctx, desc.ID) {
+					results[i] = pullResult{cached: true}
+					return
+				}
+				select {
+				case sem <- struct{}{}:
+					defer func() { <-sem }()
+				case <-ctx.Done():
+					results[i] = pullResult{errMsg: desc.ID + ": cancelled"}
+					return
+				}
+				if desc.Provider != "local_tts" && i > 0 {
+					select {
+					case <-time.After(150 * time.Millisecond):
+					case <-ctx.Done():
+						results[i] = pullResult{errMsg: desc.ID + ": cancelled"}
+						return
+					}
+				}
+				audio, _, _, _, err := h.synthesizeVoiceSampleStrict(ctx, desc.ID, desc.SampleText)
+				if err != nil {
+					results[i] = pullResult{errMsg: fmt.Sprintf("%s: %v", desc.ID, err)}
+					return
+				}
+				if _, err := store.SaveSample(ctx, desc.ID, audio); err != nil {
+					results[i] = pullResult{errMsg: fmt.Sprintf("%s cache write: %v", desc.ID, err)}
+					return
+				}
+				results[i] = pullResult{pulled: true}
+			}(idx, item)
+		}
+		wg.Wait()
+		for _, r := range results {
+			switch {
+			case r.cached:
+				alreadyCached++
+			case r.pulled:
+				pulledSamples++
+			case r.errMsg != "":
+				failedSamples++
+				if len(warnings) < 12 {
+					warnings = append(warnings, r.errMsg)
+				}
+			}
+		}
+	}
+
+	updatedVoices, summary, cachedTotal := h.collectVoiceCatalog(ctx, false)
+	availableTotal := 0
+	for _, v := range updatedVoices {
+		if v.Available {
+			availableTotal++
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"catalog_saved":    catalogSaved,
+		"catalog_total":    len(updatedVoices),
+		"available_total":  availableTotal,
+		"edge_live_synced": edgeSynced,
+		"pulled_samples":   pulledSamples,
+		"already_cached":   alreadyCached,
+		"failed_samples":   failedSamples,
+		"cached_total":     cachedTotal,
+		"errors":           warnings,
+		"providers":        summary,
 	})
+}
+
+func selectVoicesForLocalPull(catalog []provider.VoiceDescriptor, requested []string, limit int) []provider.VoiceDescriptor {
+	byID := make(map[string]provider.VoiceDescriptor, len(catalog))
+	for _, v := range catalog {
+		byID[strings.ToLower(v.ID)] = v
+	}
+
+	out := make([]provider.VoiceDescriptor, 0, limit)
+	seen := make(map[string]struct{}, limit)
+	appendIfNew := func(v provider.VoiceDescriptor) bool {
+		key := strings.ToLower(v.ID)
+		if _, exists := seen[key]; exists {
+			return false
+		}
+		seen[key] = struct{}{}
+		out = append(out, v)
+		return len(out) >= limit
+	}
+
+	if len(requested) > 0 {
+		for _, rawID := range requested {
+			id := strings.TrimSpace(rawID)
+			if id == "" {
+				continue
+			}
+			if desc, ok := byID[strings.ToLower(id)]; ok {
+				if appendIfNew(desc) {
+					return out
+				}
+			} else {
+				if appendIfNew(provider.VoiceDescriptor{ID: id, Available: true}) {
+					return out
+				}
+			}
+		}
+		return out
+	}
+
+	// 默认拉取顺序：已连通本地音色 -> 微软 Edge 精选主推音色 -> 其它当前可用音色
+	for _, v := range catalog {
+		if v.Provider == "local_tts" && v.Available {
+			if appendIfNew(v) {
+				return out
+			}
+		}
+	}
+	for _, b := range provider.BuiltinEdgeVoices {
+		if desc, ok := byID[strings.ToLower(b.VoiceID)]; ok && desc.Available {
+			if appendIfNew(desc) {
+				return out
+			}
+		}
+	}
+	for _, v := range catalog {
+		if v.Available {
+			if appendIfNew(v) {
+				return out
+			}
+		}
+	}
+	return out
 }
 
 // VoiceDesignRequest 声音设计请求体

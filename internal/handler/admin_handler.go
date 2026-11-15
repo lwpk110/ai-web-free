@@ -157,6 +157,7 @@ func (h *AdminHandler) Overview(c *gin.Context) {
 		activeProbeTask = cg.ActiveProbeTask()
 	}
 	_, auditSummary := h.auditLog().Query("all", "", 1)
+	serverStatus := h.BuildServerStatus()
 
 	c.JSON(http.StatusOK, gin.H{
 		"service":                "ai-web-free",
@@ -174,6 +175,7 @@ func (h *AdminHandler) Overview(c *gin.Context) {
 		"login_task":             activeLoginTask,
 		"probe_task":             activeProbeTask,
 		"audit_summary":          auditSummary,
+		"server_health":          serverStatus.Summary,
 		"providers":              providerSummaries,
 	})
 }

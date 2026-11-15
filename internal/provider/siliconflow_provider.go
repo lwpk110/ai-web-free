@@ -327,25 +327,89 @@ func (p *SiliconFlowProvider) GenerateImage(ctx context.Context, prompt, size st
 	return imgURL, nil
 }
 
-// SynthesizeSpeech 使用 CosyVoice 语音大模型合成语音
+// NormalizeSiliconFlowVoice 将兼容的 cosyvoice-v1:/siliconflow: 前缀或裸音色名规范化为 SiliconFlow CosyVoice2-0.5B 格式。
+func NormalizeSiliconFlowVoice(voice string) string {
+	trimmed := strings.TrimSpace(voice)
+	if trimmed == "" {
+		return "FunAudioLLM/CosyVoice2-0.5B:alex"
+	}
+	lower := strings.ToLower(trimmed)
+	for _, prefix := range []string{"cosyvoice-v1:", "cosyvoice-v2:", "siliconflow:"} {
+		if strings.HasPrefix(lower, prefix) {
+			trimmed = strings.TrimSpace(trimmed[len(prefix):])
+			return "FunAudioLLM/CosyVoice2-0.5B:" + trimmed
+		}
+	}
+	if !strings.Contains(trimmed, ":") {
+		return "FunAudioLLM/CosyVoice2-0.5B:" + trimmed
+	}
+	return trimmed
+}
+
+// GetSiliconFlowVoices 返回硅基流动 CosyVoice2-0.5B 官方预置系统音色列表。
+func GetSiliconFlowVoices(available bool, statusReason string) []VoiceDescriptor {
+	presets := []struct {
+		id     string
+		name   string
+		gender string
+		locale string
+		sample string
+	}{
+		{"FunAudioLLM/CosyVoice2-0.5B:alex", "CosyVoice Alex (沉稳男声 · 硅基流动)", "male", "zh-CN", "你好，我是硅基流动 CosyVoice2 的 Alex，声音沉稳富有磁性。"},
+		{"FunAudioLLM/CosyVoice2-0.5B:anna", "CosyVoice Anna (知性女声 · 硅基流动)", "female", "zh-CN", "你好，我是硅基流动 CosyVoice2 的 Anna，适合旁白与知识科普。"},
+		{"FunAudioLLM/CosyVoice2-0.5B:bella", "CosyVoice Bella (温暖女声 · 硅基流动)", "female", "zh-CN", "很高兴见到你，我是 Bella，让我们开始今天的故事讲述吧。"},
+		{"FunAudioLLM/CosyVoice2-0.5B:benjamin", "CosyVoice Benjamin (低沉男声 · 硅基流动)", "male", "zh-CN", "这里是深夜广播时段，我是 Benjamin。"},
+		{"FunAudioLLM/CosyVoice2-0.5B:charles", "CosyVoice Charles (儒雅男声 · 硅基流动)", "male", "zh-CN", "保持冷静与专注，我是 Charles。"},
+		{"FunAudioLLM/CosyVoice2-0.5B:claire", "CosyVoice Claire (清甜女声 · 硅基流动)", "female", "zh-CN", "早安！今天也要元气满满哦，我是 Claire。"},
+		{"FunAudioLLM/CosyVoice2-0.5B:david", "CosyVoice David (阳光青年 · 硅基流动)", "male", "zh-CN", "大家好，我是 David，随时准备为你的角色配音！"},
+		{"FunAudioLLM/CosyVoice2-0.5B:diana", "CosyVoice Diana (飒爽女声 · 硅基流动)", "female", "zh-CN", "任务已经锁定，我是 Diana，立刻执行。"},
+	}
+	out := make([]VoiceDescriptor, 0, len(presets))
+	for _, item := range presets {
+		out = append(out, VoiceDescriptor{
+			ID:           item.id,
+			Name:         item.name,
+			Provider:     "siliconflow",
+			Category:     "情感大模型",
+			Gender:       item.gender,
+			Locale:       item.locale,
+			SampleText:   item.sample,
+			Tags:         []string{"硅基流动", "CosyVoice2", "大模型"},
+			Available:    available,
+			StatusReason: statusReason,
+		})
+	}
+	return out
+}
+
+// SynthesizeSpeech 使用 CosyVoice 语音大模型合成语音（默认语速 1.0）。
 func (p *SiliconFlowProvider) SynthesizeSpeech(ctx context.Context, text, voice string) ([]byte, error) {
-	key, keyIdx, err := p.nextKey()
+	return p.SynthesizeSpeechWithSpeed(ctx, text, voice, 1.0)
+}
+
+// SynthesizeSpeechWithSpeed 使用 CosyVoice2 语音大模型合成语音并支持语速控制 ([0.25, 4.0])。
+func (p *SiliconFlowProvider) SynthesizeSpeechWithSpeed(ctx context.Context, text, voice string, speed float64) ([]byte, error) {
+	k_key, keyIdx, err := p.nextKey()
 	if err != nil {
 		return nil, err
 	}
+	key := k_key
+	voice = NormalizeSiliconFlowVoice(voice)
 
-	if voice == "" {
-		voice = "FunAudioLLM/CosyVoice2-0.5B:alex"
-	}
-	if !strings.Contains(voice, ":") {
-		voice = "FunAudioLLM/CosyVoice2-0.5B:" + voice
+	if speed <= 0 {
+		speed = 1.0
+	} else if speed < 0.25 {
+		speed = 0.25
+	} else if speed > 4.0 {
+		speed = 4.0
 	}
 
 	reqBody := map[string]interface{}{
-		"model": "FunAudioLLM/CosyVoice2-0.5B",
-		"input": text,
-		"voice": voice,
+		"model":           "FunAudioLLM/CosyVoice2-0.5B",
+		"input":           text,
+		"voice":           voice,
 		"response_format": "mp3",
+		"speed":           speed,
 	}
 
 	bodyBytes, err := json.Marshal(reqBody)

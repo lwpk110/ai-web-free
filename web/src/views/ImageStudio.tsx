@@ -8,8 +8,10 @@ import {
   Download,
   ExternalLink,
   Flame,
+  Globe,
   Heart,
   Image as ImageIcon,
+  KeyRound,
   Layers,
   Loader2,
   Maximize2,
@@ -41,6 +43,7 @@ import {
 } from "../api/client";
 import { NoticeBanner } from "../components/ui";
 import { PromptChatAssistant } from "../components/PromptChatAssistant";
+import { CloudKeyConfigModal } from "../components/CloudKeyConfigModal";
 import { dispatchChatRemix } from "../lib/chatRemixBridge";
 import { dispatchDramaCanvas } from "../lib/dramaCanvasBridge";
 import { useModelsCatalog } from "../lib/models";
@@ -57,6 +60,7 @@ import {
   syncLocalImagesToServer,
   toggleUnifiedFavorite,
   toggleUnifiedFavoritePromptId,
+  updateUnifiedImageMetadata,
   type HydratedImageItem,
   type StoredImageRecord,
 } from "../lib/storage";
@@ -125,7 +129,42 @@ const ASPECT_OPTIONS = [
   },
 ];
 
+const GALLERY_CATEGORIES = [
+  { value: "all", label: "全部作品" },
+  { value: "character_portrait", label: "角色设定" },
+  { value: "scene_anchor", label: "场景设定" },
+  { value: "storyboard_frame", label: "分镜首帧" },
+  { value: "reference", label: "参考素材" },
+  { value: "general", label: "通用生图" },
+] as const;
+
+const GALLERY_SOURCE_LABELS: Record<string, string> = {
+  image_studio: "图像工坊",
+  drama_canvas: "短剧画布",
+  crawler: "网络采集",
+  imported: "导入素材",
+};
+
+function galleryCategoryLabel(category?: string): string {
+  return GALLERY_CATEGORIES.find((item) => item.value === category)?.label || "通用生图";
+}
+
 const FALLBACK_PRESETS = [
+  {
+    label: "短剧霸总定妆",
+    prompt:
+      "Vertical 9:16 Chinese modern drama male CEO portrait in bespoke matte black suit inside a glass penthouses overlooking night city skyline, dramatic rim lighting, 85mm cinema photography",
+  },
+  {
+    label: "古装仙侠女主",
+    prompt:
+      "Vertical 9:16 dignified ancient Chinese heroine in embroidered crimson and gold hanfu standing on an ancient wooden balcony, flowing hair, volumetric golden mist, ultra-detailed film frame",
+  },
+  {
+    label: "民国悬疑雨夜",
+    prompt:
+      "Vertical 9:16 moody 1930s Shanghai mansion street at rainy midnight, vintage streetlamp reflections on wet cobblestones, teal and warm tungsten noir lighting, 35mm cinema still",
+  },
   {
     label: "云端玻璃温室",
     prompt:
@@ -543,6 +582,10 @@ export const ImageStudio: React.FC = () => {
     text: string;
   } | null>(null);
   const [results, setResults] = useState<HydratedImageItem[]>([]);
+  const [galleryQuery, setGalleryQuery] = useState("");
+  const [galleryCategory, setGalleryCategory] = useState<string>("all");
+  const [gallerySource, setGallerySource] = useState<string>("all");
+  const [galleryProject, setGalleryProject] = useState<string>("all");
   const [hydratedIdb, setHydratedIdb] = useState(false);
   const [imageCapableCount, setImageCapableCount] = useState<number | null>(
     null
@@ -550,6 +593,8 @@ export const ImageStudio: React.FC = () => {
   const [lightboxItem, setLightboxItem] = useState<HydratedImageItem | null>(
     null
   );
+  const [metadataCategoryDraft, setMetadataCategoryDraft] = useState("general");
+  const [metadataTagsDraft, setMetadataTagsDraft] = useState("");
   const [lightboxZoom, setLightboxZoom] = useState<"fit" | "actual">("fit");
   const [lightboxNaturalSize, setLightboxNaturalSize] = useState<{
     width: number;
@@ -559,6 +604,8 @@ export const ImageStudio: React.FC = () => {
   useEffect(() => {
     setLightboxZoom("fit");
     setLightboxNaturalSize(null);
+    setMetadataCategoryDraft(lightboxItem?.category || "general");
+    setMetadataTagsDraft((lightboxItem?.tags || []).join(", "));
   }, [lightboxItem?.id]);
   const [copiedCardId, setCopiedCardId] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
@@ -586,6 +633,7 @@ export const ImageStudio: React.FC = () => {
     total: number;
   } | null>(null);
   const [expandingPrompt, setExpandingPrompt] = useState(false);
+  const [cloudKeyModalOpen, setCloudKeyModalOpen] = useState(false);
   const [activeTemplate, setActiveTemplate] =
     useState<ActiveTemplateState | null>(null);
 
@@ -818,6 +866,9 @@ export const ImageStudio: React.FC = () => {
       size: usedSize,
       quality,
       mode: usedMode,
+      category: "general",
+      source: "image_studio",
+      tags: ["图像工坊", usedMode === "edits" ? "参考图编辑" : "文生图"],
       latencyMs,
       createdAt: new Date().toLocaleTimeString("zh-CN", { hour12: false }),
       timestamp: Date.now() - idx,
@@ -1083,6 +1134,24 @@ export const ImageStudio: React.FC = () => {
     }
   };
 
+  const handleUpdateGalleryMetadata = async (
+    item: HydratedImageItem,
+    metadata: { category?: string; tags?: string[] },
+  ) => {
+    try {
+      const saved = await updateUnifiedImageMetadata(item.id, metadata);
+      const patch = {
+        category: saved.category || item.category || "general",
+        tags: saved.tags || item.tags || [],
+      };
+      setResults((prev) => prev.map((x) => (x.id === item.id ? { ...x, ...patch } : x)));
+      setLightboxItem((prev) => (prev?.id === item.id ? { ...prev, ...patch } : prev));
+      setNotice({ type: "success", text: "作品归类已更新" });
+    } catch (err: any) {
+      setError(err?.message || "作品归类保存失败");
+    }
+  };
+
   const handleSyncLegacyToServer = async () => {
     setIsMigrating(true);
     try {
@@ -1194,6 +1263,30 @@ export const ImageStudio: React.FC = () => {
     });
   };
 
+  const handleUseAsReference = async (item: HydratedImageItem) => {
+    try {
+      let blob = item.blob;
+      if (!blob) {
+        const res = await fetch(item.url || item.remoteUrl || "");
+        if (res.ok) blob = await res.blob();
+      }
+      if (!blob) {
+        setNotice({ type: "info", text: "未能读取该图片字节，请下载后拖拽上传为参考图" });
+        return;
+      }
+      const ext = blob.type.includes("jpeg") ? "jpg" : blob.type.includes("webp") ? "webp" : "png";
+      const file = new File([blob], `${item.id}.${ext}`, { type: blob.type || "image/png" });
+      appendFiles([file]);
+      setMode("edits");
+      if (!prompt.trim() && (item.revisedPrompt || item.prompt)) {
+        setPrompt(item.revisedPrompt || item.prompt);
+      }
+      setNotice({ type: "success", text: `已将「${(item.prompt || item.id).slice(0, 18)}」加载为图生图参考图` });
+    } catch {
+      setNotice({ type: "info", text: "加载参考图失败，请稍后重试" });
+    }
+  };
+
   const filteredPlazaItems = useMemo(() => {
     if (plazaCategory === "全部") return plazaItems;
     if (plazaCategory === "⭐ 我的收藏") {
@@ -1202,6 +1295,36 @@ export const ImageStudio: React.FC = () => {
     }
     return plazaItems.filter((it) => it.category === plazaCategory);
   }, [plazaItems, plazaCategory, favoriteIds]);
+
+  const galleryProjects = useMemo(() => {
+    const projects = new Map<string, string>();
+    results.forEach((item) => {
+      if (item.projectId) projects.set(item.projectId, item.projectTitle || item.projectId);
+    });
+    return [...projects.entries()].map(([id, title]) => ({ id, title }));
+  }, [results]);
+
+  const filteredGalleryResults = useMemo(() => {
+    const q = galleryQuery.trim().toLocaleLowerCase();
+    return results.filter((item) => {
+      const tags = item.tags || [];
+      if (galleryCategory !== "all" && (item.category || "general") !== galleryCategory) return false;
+      if (gallerySource !== "all" && (item.source || "image_studio") !== gallerySource) return false;
+      if (galleryProject !== "all" && item.projectId !== galleryProject) return false;
+      if (q && ![
+        item.prompt,
+        item.revisedPrompt,
+        item.projectTitle,
+        item.roleName,
+        item.model,
+        item.category,
+        item.source,
+        item.shotIndex ? String(item.shotIndex) : undefined,
+        ...tags,
+      ].filter(Boolean).join(" ").toLocaleLowerCase().includes(q)) return false;
+      return true;
+    });
+  }, [results, galleryQuery, galleryCategory, gallerySource, galleryProject]);
 
   const topQuickCapsules = useMemo(() => plazaItems.slice(0, 3), [plazaItems]);
 
@@ -1214,9 +1337,20 @@ export const ImageStudio: React.FC = () => {
       >
         <div className="flex-1 overflow-y-auto p-4 space-y-4 min-h-0 text-xs">
           <div>
-            <h2 className="text-sm font-semibold">图像创作参数台</h2>
+            <div className="flex items-center justify-between gap-2">
+              <h2 className="text-sm font-semibold">图像创作参数台</h2>
+              <button
+                type="button"
+                onClick={() => setCloudKeyModalOpen(true)}
+                className="inline-flex items-center gap-1 px-2 py-1 rounded-lg border border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-400 hover:bg-amber-500/20 text-[11px] font-medium cursor-pointer"
+                title="纯云端推理（无需本地硬件），可随时配置 SILICONFLOW_API_KEY / DASHSCOPE_API_KEY / 字节即梦"
+              >
+                <KeyRound size={11} />
+                <span>云端生图 Key</span>
+              </button>
+            </div>
             <p className="z-text-muted mt-1 leading-relaxed">
-              遇到生图 429 自动隔离该号生图能力并无感切号重绘，产物自动持久存入浏览器 IndexedDB。
+              纯云端推理调度（无需本地显卡），遇到生图 429 自动隔离并无感切号重绘，产物与爬虫采集参考图统一持久存储。
             </p>
           </div>
 
@@ -1427,6 +1561,13 @@ export const ImageStudio: React.FC = () => {
                 <div className="font-medium">点击或拖拽参考图至此处</div>
                 <div className="z-text-muted">支持 PNG / JPG / WebP</div>
               </div>
+              <a
+                href="#/chat"
+                className="w-full inline-flex items-center justify-center gap-1.5 py-1.5 rounded-xl border border-dashed z-border hover:bg-muted/50 text-primary text-[11px]"
+              >
+                <Globe size={12} />
+                <span>前往 Chat 爬虫搜索/抓取人物立绘与场景参考图</span>
+              </a>
 
               {filePreviews.length > 0 && (
                 <div className="grid grid-cols-4 gap-1.5">
@@ -1941,6 +2082,63 @@ export const ImageStudio: React.FC = () => {
         {/* TAB 2: LOCAL INDEXEDDB GALLERY */}
         {activeTab === "gallery" && (
           <>
+            <div className="p-card rounded-xl border z-border p-3 space-y-3">
+              <div className="flex flex-wrap items-center gap-1.5">
+                {GALLERY_CATEGORIES.map((category) => {
+                  const count = category.value === "all"
+                    ? results.length
+                    : results.filter((item) => (item.category || "general") === category.value).length;
+                  return (
+                    <button
+                      key={category.value}
+                      type="button"
+                      onClick={() => setGalleryCategory(category.value)}
+                      className={`px-2.5 py-1 rounded-md border text-xs transition ${galleryCategory === category.value ? "z-primary-btn border-transparent" : "z-border z-ghost-btn"}`}
+                    >
+                      {category.label} <span className="font-mono-num opacity-70">{count}</span>
+                    </button>
+                  );
+                })}
+              </div>
+              <div className="flex flex-wrap items-center gap-2 border-t z-border pt-3">
+                <div className="relative flex-1 min-w-[180px]">
+                  <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 z-text-muted pointer-events-none" />
+                  <input
+                    type="search"
+                    value={galleryQuery}
+                    onChange={(e) => setGalleryQuery(e.target.value)}
+                    placeholder="搜索提示词、工程、角色、标签或模型"
+                    aria-label="搜索作品集"
+                    className="w-full pl-8 pr-3 py-1.5 rounded-md p-input text-xs"
+                  />
+                </div>
+                <select
+                  value={gallerySource}
+                  onChange={(e) => setGallerySource(e.target.value)}
+                  aria-label="按来源筛选作品"
+                  className="p-input rounded-md px-2 py-1.5 text-xs"
+                >
+                  <option value="all">全部来源</option>
+                  <option value="image_studio">图像工坊</option>
+                  <option value="drama_canvas">短剧画布</option>
+                  <option value="crawler">网络采集</option>
+                  <option value="imported">导入素材</option>
+                </select>
+                {galleryProjects.length > 0 && (
+                  <select
+                    value={galleryProject}
+                    onChange={(e) => setGalleryProject(e.target.value)}
+                    aria-label="按短剧工程筛选作品"
+                    className="p-input rounded-md px-2 py-1.5 text-xs max-w-56"
+                  >
+                    <option value="all">全部工程</option>
+                    {galleryProjects.map((project) => <option key={project.id} value={project.id}>{project.title}</option>)}
+                  </select>
+                )}
+                <span className="z-text-muted text-xs font-mono-num">{filteredGalleryResults.length} / {results.length}</span>
+              </div>
+            </div>
+
             {results.length === 0 && !loading ? (
               <div className="flex-1 p-card rounded-2xl flex flex-col items-center justify-center p-8 text-center gap-3">
                 <div className="w-12 h-12 rounded-2xl z-muted border z-border flex items-center justify-center z-text-muted">
@@ -1961,6 +2159,11 @@ export const ImageStudio: React.FC = () => {
                 </button>
               </div>
             ) : (
+              filteredGalleryResults.length === 0 && !loading ? (
+                <div className="p-card rounded-xl border z-border p-8 text-center z-text-muted text-sm">
+                  没有符合当前筛选条件的作品。
+                </div>
+              ) : (
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
                 {loading && (
                   <div className="p-card rounded-2xl overflow-hidden flex flex-col">
@@ -1976,7 +2179,7 @@ export const ImageStudio: React.FC = () => {
                     </div>
                   </div>
                 )}
-                {results.map((item) => (
+                {filteredGalleryResults.map((item) => (
                   <div
                     key={item.id}
                     className="p-card rounded-2xl overflow-hidden flex flex-col group"
@@ -2039,6 +2242,18 @@ export const ImageStudio: React.FC = () => {
                         </span>
                       </div>
 
+                      <div className="flex flex-wrap items-center gap-1.5 text-[10px]">
+                        <span className="px-1.5 py-0.5 rounded border z-border z-canvas z-text-muted">{galleryCategoryLabel(item.category)}</span>
+                        <span className="px-1.5 py-0.5 rounded border z-border z-canvas z-text-muted">{GALLERY_SOURCE_LABELS[item.source || "image_studio"] || item.source || "图像工坊"}</span>
+                        {item.projectTitle && <span className="truncate max-w-40 z-text-muted" title={item.projectTitle}>{item.projectTitle}</span>}
+                        {item.roleName && <span className="truncate max-w-32 z-text-muted" title={item.roleName}>{item.roleName}{item.shotIndex ? ` · 镜头 ${item.shotIndex}` : ""}</span>}
+                      </div>
+                      {!!item.tags?.length && (
+                        <div className="flex flex-wrap gap-1">
+                          {item.tags.slice(0, 5).map((tag) => <span key={tag} className="px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 text-[10px]">#{tag}</span>)}
+                        </div>
+                      )}
+
                       <p className="line-clamp-2 z-text-sec leading-relaxed">
                         {item.revisedPrompt || item.prompt}
                       </p>
@@ -2054,6 +2269,15 @@ export const ImageStudio: React.FC = () => {
                           <Download size={12} />
                           <span>下载原图</span>
                         </a>
+                        <button
+                          type="button"
+                          onClick={() => void handleUseAsReference(item)}
+                          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl border border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/20 cursor-pointer transition"
+                          title="加载为左侧图生图参考底图（可叠加多张爬虫参考图）"
+                        >
+                          <Layers size={12} />
+                          <span>设为参考图</span>
+                        </button>
                         <button
                           type="button"
                           onClick={() => handleRemix(item)}
@@ -2107,7 +2331,7 @@ export const ImageStudio: React.FC = () => {
                   </div>
                 ))}
               </div>
-            )}
+            ))}
           </>
         )}
       </div>
@@ -2264,6 +2488,49 @@ export const ImageStudio: React.FC = () => {
                     </div>
                   </div>
                 </div>
+
+                <div className="space-y-2.5 border-t z-border pt-3">
+                  <div className="font-medium">作品归类</div>
+                  <label className="block space-y-1">
+                    <span className="z-text-muted">用途分类</span>
+                    <select
+                      value={metadataCategoryDraft}
+                      onChange={(e) => setMetadataCategoryDraft(e.target.value)}
+                      className="w-full p-input rounded-md px-2 py-1.5"
+                    >
+                      {GALLERY_CATEGORIES.filter((category) => category.value !== "all").map((category) => (
+                        <option key={category.value} value={category.value}>{category.label}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="block space-y-1">
+                    <span className="z-text-muted">标签</span>
+                    <input
+                      value={metadataTagsDraft}
+                      onChange={(e) => setMetadataTagsDraft(e.target.value)}
+                      placeholder="用逗号分隔，例如：女主, 定妆, 古装"
+                      className="w-full p-input rounded-md px-2 py-1.5"
+                    />
+                  </label>
+                  {(lightboxItem.projectTitle || lightboxItem.roleName || lightboxItem.source) && (
+                    <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] z-text-muted">
+                      <span>来源</span><span className="text-right">{GALLERY_SOURCE_LABELS[lightboxItem.source || ""] || lightboxItem.source || "图像工坊"}</span>
+                      {lightboxItem.projectTitle && <><span>短剧工程</span><span className="text-right truncate" title={lightboxItem.projectTitle}>{lightboxItem.projectTitle}</span></>}
+                      {lightboxItem.roleName && <><span>角色 / 镜头</span><span className="text-right truncate" title={lightboxItem.roleName}>{lightboxItem.roleName}{lightboxItem.shotIndex ? ` / ${lightboxItem.shotIndex}` : ""}</span></>}
+                    </div>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => void handleUpdateGalleryMetadata(lightboxItem, {
+                      category: metadataCategoryDraft,
+                      tags: metadataTagsDraft.split(/[,，\n]/).map((tag) => tag.trim()).filter(Boolean),
+                    })}
+                    className="w-full inline-flex items-center justify-center gap-1.5 py-2 rounded-lg z-primary-btn font-medium cursor-pointer"
+                  >
+                    <Check size={13} />
+                    <span>保存归类与标签</span>
+                  </button>
+                </div>
               </div>
 
               <div className="flex flex-wrap items-center gap-2 pt-3 border-t z-border">
@@ -2306,6 +2573,17 @@ export const ImageStudio: React.FC = () => {
           </div>
         </div>
       )}
+
+      <CloudKeyConfigModal
+        open={cloudKeyModalOpen}
+        onClose={() => setCloudKeyModalOpen(false)}
+        initialProvider="siliconflow"
+        allowedProviders={["siliconflow", "dashscope", "jimeng"]}
+        title="配置云端生图模型 API Key（纯云端无显卡部署）"
+        onSaved={(_prov, msg) => {
+          setNotice({ type: "success", text: msg });
+        }}
+      />
     </div>
   );
 };

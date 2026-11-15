@@ -49,6 +49,8 @@ func resolveExtForMime(category, mimeType string) string {
 		return ".wav"
 	case "audio/ogg":
 		return ".ogg"
+	case "application/json":
+		return ".json"
 	}
 	if exts, _ := mime.ExtensionsByType(lower); len(exts) > 0 && exts[0] != "" {
 		return exts[0]
@@ -56,8 +58,10 @@ func resolveExtForMime(category, mimeType string) string {
 	switch category {
 	case "videos":
 		return ".mp4"
-	case "audio":
+	case "audio", "voice_samples":
 		return ".mp3"
+	case "voices":
+		return ".json"
 	default:
 		return ".png"
 	}
@@ -69,6 +73,10 @@ func normalizeMediaCategory(category string) string {
 		return "videos"
 	case "audio", "audios":
 		return "audio"
+	case "voices":
+		return "voices"
+	case "voice_samples", "voices-samples":
+		return "voice_samples"
 	default:
 		return "images"
 	}

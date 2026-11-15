@@ -70,6 +70,7 @@ func (h *DramaHandler) Capabilities(c *gin.Context) {
 	_, sfActive := h.providerActive("siliconflow")
 	_, jmActive := h.providerActive("jimeng")
 	_, museActive := h.providerActive("meta_muse")
+	localConfigured, localActive := h.providerActive("local_tts")
 
 	imageProviders := map[string]gin.H{
 		"chatgpt": {
@@ -216,8 +217,9 @@ func (h *DramaHandler) Capabilities(c *gin.Context) {
 			"voice_design_available": dsActive > 0,
 			"voice_clone_available":  dsActive > 0,
 			"providers": gin.H{
+				"local_tts":   gin.H{"available": localActive > 0, "active": localActive, "configured": localConfigured},
 				"edge_tts":    gin.H{"available": true, "zero_config": true},
-				"jianying":    gin.H{"available": true, "zero_config": true},
+				"jianying":    gin.H{"available": false, "retired": true},
 				"dashscope":   gin.H{"available": dsActive > 0, "active": dsActive},
 				"siliconflow": gin.H{"available": sfActive > 0, "active": sfActive},
 				"chatgpt":     gin.H{"available": cgptActive > 0, "active": cgptActive},

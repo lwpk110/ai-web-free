@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { Play, Pause, Plus, Sparkles, Film, Loader2, CheckCircle2 } from "lucide-react";
+import { Play, Pause, Plus, Sparkles, Film, Loader2, CheckCircle2, RefreshCw, FolderOpen, Trash2 } from "lucide-react";
 import type { VideoCameraPreset } from "../data/videoCameraPresets";
 
 interface CameraMotionPreviewProps {
@@ -8,7 +8,11 @@ interface CameraMotionPreviewProps {
   museGenerating?: boolean;
   museProgress?: number;
   museError?: string | null;
+  canManageDemo?: boolean;
   onGenerateMusePreview?: (preset: VideoCameraPreset) => void;
+  onRegenerateMusePreview?: (preset: VideoCameraPreset) => void;
+  onPickVideoForPreview?: (preset: VideoCameraPreset) => void;
+  onClearMusePreview?: (preset: VideoCameraPreset) => void;
   onAppendClause?: (preset: VideoCameraPreset) => void;
   onApplyExample?: (preset: VideoCameraPreset) => void;
 }
@@ -178,7 +182,11 @@ export function CameraMotionPreview({
   museGenerating = false,
   museProgress = 0,
   museError = null,
+  canManageDemo = true,
   onGenerateMusePreview,
+  onRegenerateMusePreview,
+  onPickVideoForPreview,
+  onClearMusePreview,
   onAppendClause,
   onApplyExample,
 }: CameraMotionPreviewProps): React.JSX.Element {
@@ -394,10 +402,46 @@ export function CameraMotionPreview({
 
         <div className="flex flex-wrap items-center gap-2 pt-1">
           {museVideoUrl ? (
-            <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 font-medium text-[11px]">
-              <CheckCircle2 className="w-3 h-3" />
-              实拍示例已就绪
-            </span>
+            <div className="inline-flex items-center gap-1 rounded-md bg-emerald-500/10 border border-emerald-500/25 p-0.5 text-[11px]">
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 text-emerald-300 font-medium">
+                <CheckCircle2 className="w-3 h-3" />
+                实拍已就绪
+              </span>
+              {canManageDemo && onRegenerateMusePreview && (
+                <button
+                  type="button"
+                  disabled={museGenerating}
+                  onClick={() => onRegenerateMusePreview(preset)}
+                  title="用 Muse AI 重新生成 5 秒实拍替换当前示例"
+                  className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded hover:bg-white/10 text-slate-200 transition-colors cursor-pointer disabled:opacity-50"
+                >
+                  <RefreshCw className="w-3 h-3" />
+                  重拍
+                </button>
+              )}
+              {canManageDemo && onPickVideoForPreview && (
+                <button
+                  type="button"
+                  onClick={() => onPickVideoForPreview(preset)}
+                  title="从项目视频库选择其他视频替换此示例"
+                  className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded hover:bg-white/10 text-slate-200 transition-colors cursor-pointer"
+                >
+                  <FolderOpen className="w-3 h-3" />
+                  换视频
+                </button>
+              )}
+              {canManageDemo && onClearMusePreview && (
+                <button
+                  type="button"
+                  onClick={() => onClearMusePreview(preset)}
+                  title="移除当前匹配的示例视频，恢复默认运镜示意"
+                  className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded hover:bg-rose-500/20 text-rose-300 transition-colors cursor-pointer"
+                >
+                  <Trash2 className="w-3 h-3" />
+                  移除
+                </button>
+              )}
+            </div>
           ) : (
             onGenerateMusePreview && (
               <button

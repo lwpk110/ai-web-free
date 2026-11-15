@@ -80,13 +80,60 @@ export interface VoiceDescriptor {
   provider: string;
   category: string;
   gender: "female" | "male";
+  locale?: string;
   sample_text: string;
   tags: string[];
   preview_url?: string;
+  available?: boolean;
+  cached_local?: boolean;
+  status_reason?: string;
+}
+
+export interface TTSProviderSummary {
+  available: boolean;
+  configured?: boolean;
+  endpoint?: string;
+  healthy?: boolean;
+  zero_config?: boolean;
+  active?: number;
+  retired?: boolean;
+  last_error?: string;
+  reason?: string;
+}
+
+export interface VoicesCatalogResponse {
+  voices: VoiceDescriptor[];
+  total: number;
+  available_total?: number;
+  cached_local_total?: number;
+  providers?: Record<string, TTSProviderSummary>;
+}
+
+export interface SynthesizeSpeechMeta {
+  blob: Blob;
+  provider: string;
+  voice: string;
+  fallback: boolean;
+  fallbackReason?: string;
+}
+
+export interface PullLocalVoicesResult {
+  catalog_saved: boolean;
+  catalog_total: number;
+  available_total: number;
+  edge_live_synced: number;
+  pulled_samples: number;
+  already_cached: number;
+  failed_samples: number;
+  cached_total: number;
+  errors?: string[];
+  providers?: Record<string, TTSProviderSummary>;
 }
 
 export interface VideoTask {
   task_id: string;
+  vid_id?: string;
+  account_email?: string;
   provider: string;
   model: string;
   prompt: string;
@@ -98,6 +145,13 @@ export interface VideoTask {
   video_url?: string;
   local_url?: string;
   error_msg?: string;
+  upstream_session_id?: string;
+  upstream_msg_id?: string;
+  upstream_seq?: number;
+  upstream_asset_path?: string;
+  upstream_asset_url?: string;
+  expected_bytes?: number;
+  upstream_meta?: string;
   created_at: string;
   completed_at?: string;
 }
@@ -246,6 +300,70 @@ export interface AuditEntry {
   note?: string;
 }
 
+export interface ServerHealthSummary {
+  status: "healthy" | "degraded" | "unhealthy" | string;
+  services_total: number;
+  services_running: number;
+  services_disabled: number;
+  services_stopped: number;
+  subsystems_total: number;
+  subsystems_healthy: number;
+  subsystems_degraded: number;
+  goroutines: number;
+  mem_alloc_mb: number;
+}
+
+export interface BackgroundServiceStatus {
+  name: string;
+  label: string;
+  category: "worker" | "scheduler" | string;
+  enabled: boolean;
+  running: boolean;
+  status: "running" | "disabled" | "stopped" | string;
+  interval?: string;
+  started_at?: string;
+  last_tick_at?: string;
+  detail?: string;
+}
+
+export interface SubsystemHealth {
+  name: string;
+  label: string;
+  status: "healthy" | "degraded" | "disabled" | "unhealthy" | string;
+  detail: string;
+  meta?: Record<string, unknown>;
+}
+
+export interface RuntimeMetrics {
+  pid: number;
+  go_version: string;
+  os: string;
+  arch: string;
+  num_cpu: number;
+  goroutines: number;
+  mem_alloc_bytes: number;
+  mem_alloc_mb: number;
+  mem_sys_bytes: number;
+  mem_sys_mb: number;
+  heap_inuse_bytes: number;
+  heap_objects: number;
+  num_gc: number;
+  last_gc_at?: string;
+}
+
+export interface ServerStatusReport {
+  status: "healthy" | "degraded" | "unhealthy" | string;
+  service: string;
+  version: string;
+  uptime_seconds: number;
+  started_at: string;
+  checked_at: string;
+  summary: ServerHealthSummary;
+  runtime: RuntimeMetrics;
+  background_services: BackgroundServiceStatus[];
+  subsystems: SubsystemHealth[];
+}
+
 export interface OverviewResponse {
   service: string;
   version: string;
@@ -262,6 +380,7 @@ export interface OverviewResponse {
   login_task?: KamiLoginTask | null;
   probe_task?: ProbeTask | null;
   audit_summary?: AuditSummary;
+  server_health?: ServerHealthSummary;
   providers: ProviderSummary[];
 }
 
@@ -324,6 +443,12 @@ export async function fetchAuthStatus(
 export async function fetchOverview(): Promise<OverviewResponse> {
   const res = await adminFetch("/admin/api/v1/overview");
   if (!res.ok) throw new Error(`Overview failed: HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function fetchServerStatus(): Promise<ServerStatusReport> {
+  const res = await adminFetch("/admin/api/v1/system/status");
+  if (!res.ok) throw new Error(`Server status failed: HTTP ${res.status}`);
   return res.json();
 }
 
@@ -1158,12 +1283,14 @@ export interface VideoPromptExpandResponse {
 }
 
 export async function expandVideoPrompt(
-  req: VideoPromptExpandRequest
+  req: VideoPromptExpandRequest,
+  signal?: AbortSignal,
 ): Promise<VideoPromptExpandResponse> {
   const res = await adminFetch("/admin/api/v1/prompts/video-expand", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(req),
+    signal,
   });
   const data = await res.json();
   if (!res.ok) {
@@ -1182,6 +1309,13 @@ export interface ServerGalleryWork {
   size: string;
   quality?: string;
   mode?: "generations" | "edits";
+  category?: "general" | "character_portrait" | "scene_anchor" | "storyboard_frame" | "reference";
+  source?: string;
+  project_id?: string;
+  project_title?: string;
+  role_name?: string;
+  shot_index?: number;
+  tags?: string[];
   storage_type: "local" | "s3" | "blob" | "remote";
   file_path?: string;
   url: string;
@@ -1200,6 +1334,9 @@ export interface FetchGalleryOptions {
   model?: string;
   favorite?: boolean;
   q?: string;
+  category?: string;
+  source?: string;
+  projectId?: string;
 }
 
 export async function fetchServerGallery(
@@ -1211,6 +1348,9 @@ export async function fetchServerGallery(
   if (options?.model && options.model !== "all") params.set("model", options.model);
   if (options?.favorite) params.set("favorite", "true");
   if (options?.q?.trim()) params.set("q", options.q.trim());
+  if (options?.category && options.category !== "all") params.set("category", options.category);
+  if (options?.source && options.source !== "all") params.set("source", options.source);
+  if (options?.projectId) params.set("project_id", options.projectId);
 
   const query = params.toString();
   const res = await adminFetch(`/admin/api/v1/gallery${query ? `?${query}` : ""}`);
@@ -1229,6 +1369,13 @@ export async function saveServerGalleryWork(work: {
   size: string;
   quality?: string;
   mode?: "generations" | "edits";
+  category?: string;
+  source?: string;
+  project_id?: string;
+  project_title?: string;
+  role_name?: string;
+  shot_index?: number;
+  tags?: string[];
   b64_json?: string;
   url?: string;
   latency_ms?: number;
@@ -1255,6 +1402,13 @@ export async function batchMigrateServerGallery(items: Array<{
   size: string;
   quality?: string;
   mode?: "generations" | "edits";
+  category?: string;
+  source?: string;
+  project_id?: string;
+  project_title?: string;
+  role_name?: string;
+  shot_index?: number;
+  tags?: string[];
   b64_json?: string;
   url?: string;
   latency_ms?: number;
@@ -1270,6 +1424,20 @@ export async function batchMigrateServerGallery(items: Array<{
   if (!res.ok) {
     throw new Error(data?.error || `Batch migrate failed: HTTP ${res.status}`);
   }
+  return data;
+}
+
+export async function updateServerGalleryMetadata(
+  id: string,
+  metadata: { category?: string; tags?: string[] },
+): Promise<ServerGalleryWork> {
+  const res = await adminFetch(`/admin/api/v1/gallery/${encodeURIComponent(id)}/metadata`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(metadata),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data?.error || `Update gallery metadata failed: HTTP ${res.status}`);
   return data;
 }
 
@@ -1640,7 +1808,7 @@ export async function syncServerPromptFavorites(ids: string[]): Promise<string[]
 
 // ─── 免费多模态 API (TTS / 声音克隆 / 声音设计 / AI 视频生成) ─────────────
 
-export async function fetchVoices(): Promise<{ voices: VoiceDescriptor[]; total: number }> {
+export async function fetchVoices(): Promise<VoicesCatalogResponse> {
   const res = await fetch("/v1/audio/voices");
   const data = await res.json();
   if (!res.ok) {
@@ -1649,19 +1817,26 @@ export async function fetchVoices(): Promise<{ voices: VoiceDescriptor[]; total:
   return data;
 }
 
-export async function synthesizeSpeech(
+export async function synthesizeSpeechWithMeta(
   input: string,
-  voice = "zh_female_shuangkuai",
+  voice = "zh-CN-XiaoxiaoNeural",
   speed = 1.0,
   model = "tts-1",
   signal?: AbortSignal,
-): Promise<Blob> {
+  options?: { allowFallback?: boolean; preferProvider?: string },
+): Promise<SynthesizeSpeechMeta> {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+  if (options?.allowFallback) {
+    headers["X-Allow-Fallback"] = "true";
+  }
+  if (options?.preferProvider) {
+    headers["X-Prefer-Provider"] = options.preferProvider;
+  }
   const res = await fetch("/v1/audio/speech", {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Prefer-Tag": "permanent-free",
-    },
+    headers,
     signal,
     body: JSON.stringify({
       model: model || "tts-1",
@@ -1681,7 +1856,83 @@ export async function synthesizeSpeech(
     }
     throw new Error(errMsg);
   }
-  return await res.blob();
+  const blob = await res.blob();
+  return {
+    blob,
+    provider: res.headers.get("X-TTS-Provider") || "",
+    voice: res.headers.get("X-TTS-Voice") || voice,
+    fallback: res.headers.get("X-TTS-Fallback") === "true",
+    fallbackReason: res.headers.get("X-TTS-Fallback-Reason") || undefined,
+  };
+}
+
+export async function synthesizeSpeech(
+  input: string,
+  voice = "zh-CN-XiaoxiaoNeural",
+  speed = 1.0,
+  model = "tts-1",
+  signal?: AbortSignal,
+): Promise<Blob> {
+  const result = await synthesizeSpeechWithMeta(input, voice, speed, model, signal);
+  return result.blob;
+}
+
+export function getVoicePreviewUrl(voiceId: string): string {
+  const trimmed = voiceId.trim();
+  if (trimmed.includes("/")) {
+    return `/v1/audio/voice-preview?id=${encodeURIComponent(trimmed)}`;
+  }
+  return `/v1/audio/voices/${encodeURIComponent(trimmed)}/preview`;
+}
+
+export async function fetchVoicePreview(
+  voiceId: string,
+  previewUrl?: string,
+  signal?: AbortSignal,
+): Promise<{ blob: Blob; cacheStatus: string; provider: string; voice: string }> {
+  const targetUrl = previewUrl || getVoicePreviewUrl(voiceId);
+  const res = await fetch(targetUrl, { signal });
+  if (!res.ok) {
+    let errMsg = `试听请求失败: HTTP ${res.status}`;
+    try {
+      const errJson = await res.json();
+      errMsg = errJson?.error?.message || errJson?.error || errMsg;
+    } catch {
+      // ignore
+    }
+    throw new Error(errMsg);
+  }
+  return {
+    blob: await res.blob(),
+    cacheStatus: res.headers.get("X-Voice-Cache") || "miss",
+    provider: res.headers.get("X-TTS-Provider") || "",
+    voice: res.headers.get("X-TTS-Voice") || voiceId,
+  };
+}
+
+export async function pullLocalVoices(options?: {
+  voices?: string[];
+  include_samples?: boolean;
+  refresh_live?: boolean;
+  force?: boolean;
+  limit?: number;
+}): Promise<PullLocalVoicesResult> {
+  const res = await fetch("/v1/audio/voices/pull-local", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      include_samples: options?.include_samples ?? true,
+      refresh_live: options?.refresh_live ?? true,
+      force: options?.force ?? false,
+      limit: options?.limit ?? 24,
+      ...(options?.voices ? { voices: options.voices } : {}),
+    }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error?.message || data?.error || `Pull local voices failed: HTTP ${res.status}`);
+  }
+  return data;
 }
 
 export async function voiceDesign(
@@ -1805,6 +2056,20 @@ export async function clearFailedVideoTasks(): Promise<{ deleted_count: number }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     throw new Error(data?.error || `Clear failed video tasks failed: HTTP ${res.status}`);
+  }
+  return data;
+}
+
+export async function rescueVideoTask(
+  taskId: string
+): Promise<{ task: VideoTask; message?: string }> {
+  const res = await adminFetch(
+    `/admin/api/v1/multimodal/video-tasks/${encodeURIComponent(taskId)}/rescue`,
+    { method: "POST" }
+  );
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(data?.error || `Rescue video task failed: HTTP ${res.status}`);
   }
   return data;
 }
@@ -2047,6 +2312,153 @@ export async function transcribeAudio(
     throw new Error(data?.error?.message || `Transcribe audio failed: HTTP ${res.status}`);
   }
   return data;
+}
+
+// ─── 网页媒体爬虫与跨工坊系统资产库复用 API ─────────────────────────────
+
+export type CrawlerMediaKind = "auto" | "voice" | "image" | "video";
+
+export interface CrawledMediaCandidate {
+  id: string;
+  media_kind: "voice" | "image" | "video";
+  title: string;
+  media_url: string;
+  source_page?: string;
+  source_domain?: string;
+  mime_type?: string;
+  size_bytes?: number;
+  transcript?: string;
+  gender?: string;
+  locale?: string;
+  suggested_role?: string;
+  tags?: string[];
+}
+
+export interface UnifiedMediaCrawlResponse {
+  query: string;
+  target_url?: string;
+  media_kind: CrawlerMediaKind;
+  existing_voices?: VoiceDescriptor[];
+  existing_images?: ServerGalleryWork[];
+  existing_videos?: VideoTask[];
+  candidates: CrawledMediaCandidate[];
+  warnings?: string[];
+}
+
+export interface UnifiedMediaImportResponse {
+  media_kind: "voice" | "image" | "video";
+  id: string;
+  local_url: string;
+  status: string;
+  target_view?: string;
+  voice?: VoiceDescriptor;
+  custom_voice?: {
+    id: string;
+    name: string;
+    role?: string;
+    clone_status: string;
+    clone_engine?: string;
+    cloned_voice_id?: string;
+    error?: string;
+  };
+  work?: ServerGalleryWork;
+  task?: VideoTask;
+}
+
+export interface SystemAssetsResponse {
+  query?: string;
+  kind?: string;
+  custom_voices?: VoiceDescriptor[];
+  short_drama_voices?: VoiceDescriptor[];
+  images?: ServerGalleryWork[];
+  videos?: VideoTask[];
+}
+
+export async function crawlMedia(params: {
+  query?: string;
+  url?: string;
+  media_kind?: CrawlerMediaKind;
+  limit?: number;
+}): Promise<UnifiedMediaCrawlResponse> {
+  const res = await adminFetch("/admin/api/v1/media/crawl", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      query: params.query || "",
+      url: params.url || "",
+      media_kind: params.media_kind || "auto",
+      limit: params.limit ?? 12,
+    }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error?.message || `Media crawl failed: HTTP ${res.status}`);
+  }
+  return data;
+}
+
+export async function importCrawledMedia(params: {
+  media_kind: "voice" | "image" | "video";
+  url: string;
+  source_page?: string;
+  title?: string;
+  role?: string;
+  transcript?: string;
+  gender?: string;
+  locale?: string;
+  tags?: string[];
+  clone_engine?: "auto" | "siliconflow" | "dashscope" | "cache_only";
+}): Promise<UnifiedMediaImportResponse> {
+  const res = await adminFetch("/admin/api/v1/media/crawl-import", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(params),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error?.message || `Import crawled media failed: HTTP ${res.status}`);
+  }
+  return data;
+}
+
+export async function fetchSystemMediaAssets(
+  kind: CrawlerMediaKind = "auto",
+  query = "",
+): Promise<SystemAssetsResponse> {
+  const sp = new URLSearchParams({ kind });
+  if (query.trim()) sp.set("q", query.trim());
+  const res = await adminFetch(`/admin/api/v1/media/assets?${sp.toString()}`);
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error?.message || `Fetch system assets failed: HTTP ${res.status}`);
+  }
+  return data;
+}
+
+export async function cloneCustomVoice(
+  id: string,
+  params?: { clone_engine?: "auto" | "siliconflow" | "dashscope"; transcript?: string },
+): Promise<{ status: string; voice: VoiceDescriptor; custom_voice?: { error?: string } }> {
+  const res = await adminFetch(`/admin/api/v1/audio/voices/custom/${encodeURIComponent(id)}/clone`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(params || {}),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error?.message || `Clone custom voice failed: HTTP ${res.status}`);
+  }
+  return data;
+}
+
+export async function deleteCustomVoice(id: string): Promise<void> {
+  const res = await adminFetch(`/admin/api/v1/audio/voices/custom/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error?.message || `Delete custom voice failed: HTTP ${res.status}`);
+  }
 }
 
 

@@ -4,8 +4,10 @@ import {
   ArrowRight,
   Check,
   Copy,
+  Cpu,
   Download,
   RefreshCw,
+  Server,
   Shield,
   Zap,
 } from "lucide-react";
@@ -14,9 +16,11 @@ import {
   fetchLogs,
   fetchOverview,
   fetchProxies,
+  fetchServerStatus,
   type AuditEntry,
   type OverviewResponse,
   type ProxyNodeStatus,
+  type ServerStatusReport,
 } from "../api/client";
 import {
   DualThroughputChart,
@@ -95,11 +99,26 @@ function buildThroughputSeries(logs: AuditEntry[]) {
   };
 }
 
+function formatUptime(seconds?: number): string {
+  const s = Math.max(0, Math.floor(seconds ?? 0));
+  const days = Math.floor(s / 86400);
+  const hours = Math.floor((s % 86400) / 3600);
+  const mins = Math.floor((s % 3600) / 60);
+  const secs = s % 60;
+  if (days > 0) return `${days}天 ${hours}小时 ${mins}分`;
+  if (hours > 0) return `${hours}小时 ${mins}分 ${secs}秒`;
+  if (mins > 0) return `${mins}分 ${secs}秒`;
+  return `${secs}秒`;
+}
+
 export const OverviewView: React.FC<{
   onNavigate: (route: RouteKey) => void;
   onOpenExport: () => void;
 }> = ({ onNavigate, onOpenExport }) => {
   const [overview, setOverview] = useState<OverviewResponse | null>(null);
+  const [serverStatus, setServerStatus] = useState<ServerStatusReport | null>(
+    null
+  );
   const [recentLogs, setRecentLogs] = useState<AuditEntry[]>([]);
   const [trendLogs, setTrendLogs] = useState<AuditEntry[]>([]);
   const [proxyNodes, setProxyNodes] = useState<ProxyNodeStatus[]>([]);
@@ -121,12 +140,14 @@ export const OverviewView: React.FC<{
     setLoading(true);
     setError(null);
     try {
-      const [ov, logsRes, proxiesRes] = await Promise.all([
+      const [ov, logsRes, proxiesRes, sysRes] = await Promise.all([
         fetchOverview(),
         fetchLogs({ filter: "all", limit: 60 }),
         fetchProxies(),
+        fetchServerStatus().catch(() => null),
       ]);
       setOverview(ov);
+      if (sysRes) setServerStatus(sysRes);
       const entries = logsRes.entries || [];
       setTrendLogs(entries);
       setRecentLogs(entries.slice(0, 6));
@@ -550,6 +571,245 @@ export const OverviewView: React.FC<{
           </div>
         </div>
       </div>
+
+      {/* Server Status & Background Services Health */}
+      {serverStatus && (
+        <div className="p-card rounded-2xl p-4 space-y-4 text-xs">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <Server size={15} />
+              <h2 className="text-sm font-semibold">
+                服务器状态与后台健康监控
+              </h2>
+              <span
+                className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full border font-medium ${
+                  serverStatus.status === "healthy"
+                    ? "z-pill-success"
+                    : serverStatus.status === "degraded"
+                      ? "z-pill-warn"
+                      : "z-pill-danger"
+                }`}
+              >
+                <span
+                  className={
+                    serverStatus.status === "healthy"
+                      ? "status-dot-green"
+                      : serverStatus.status === "degraded"
+                        ? "status-dot-amber"
+                        : "status-dot-red"
+                  }
+                />
+                <span>
+                  {serverStatus.status === "healthy"
+                    ? "系统健康运行"
+                    : serverStatus.status === "degraded"
+                      ? "部分服务降级"
+                      : "存在异常"}
+                </span>
+              </span>
+            </div>
+            <div className="flex flex-wrap items-center gap-3 z-text-muted font-mono-num">
+              <span>已运行 {formatUptime(serverStatus.uptime_seconds)}</span>
+              <span>PID {serverStatus.runtime.pid}</span>
+              <span>
+                {serverStatus.runtime.go_version} · {serverStatus.runtime.os}/
+                {serverStatus.runtime.arch}
+              </span>
+              <span>检测于 {formatClockTime(serverStatus.checked_at)}</span>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+            <div
+              className="p-2.5 rounded-xl"
+              style={{
+                background: "var(--bg-input)",
+                border: "1px solid var(--hairline)",
+              }}
+            >
+              <div className="z-text-muted flex items-center gap-1">
+                <Cpu size={12} />
+                <span>后台服务运行</span>
+              </div>
+              <div className="mt-1 font-mono-num text-sm font-semibold">
+                {serverStatus.summary.services_running} /{" "}
+                {serverStatus.summary.services_total}
+                <span className="ml-1.5 text-xs font-normal z-text-muted">
+                  ({serverStatus.summary.services_disabled} 禁用 ·{" "}
+                  {serverStatus.summary.services_stopped} 停止)
+                </span>
+              </div>
+            </div>
+            <div
+              className="p-2.5 rounded-xl"
+              style={{
+                background: "var(--bg-input)",
+                border: "1px solid var(--hairline)",
+              }}
+            >
+              <div className="z-text-muted">Goroutines 协程</div>
+              <div className="mt-1 font-mono-num text-sm font-semibold">
+                {serverStatus.runtime.goroutines}
+                <span className="ml-1.5 text-xs font-normal z-text-muted">
+                  {serverStatus.runtime.num_cpu} vCPU
+                </span>
+              </div>
+            </div>
+            <div
+              className="p-2.5 rounded-xl"
+              style={{
+                background: "var(--bg-input)",
+                border: "1px solid var(--hairline)",
+              }}
+            >
+              <div className="z-text-muted">堆内存占用 (Alloc / Sys)</div>
+              <div className="mt-1 font-mono-num text-sm font-semibold">
+                {serverStatus.runtime.mem_alloc_mb} MB
+                <span className="ml-1.5 text-xs font-normal z-text-muted">
+                  / {serverStatus.runtime.mem_sys_mb} MB
+                </span>
+              </div>
+            </div>
+            <div
+              className="p-2.5 rounded-xl"
+              style={{
+                background: "var(--bg-input)",
+                border: "1px solid var(--hairline)",
+              }}
+            >
+              <div className="z-text-muted">核心子系统 & GC</div>
+              <div className="mt-1 font-mono-num text-sm font-semibold">
+                {serverStatus.summary.subsystems_healthy}/
+                {serverStatus.summary.subsystems_total} 健康
+                <span className="ml-1.5 text-xs font-normal z-text-muted">
+                  · GC {serverStatus.runtime.num_gc} 次
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            {/* Background Services */}
+            <div className="space-y-2">
+              <div className="font-medium z-text-muted">
+                后台协程与定时调度 ({serverStatus.background_services.length})
+              </div>
+              <div className="divide-y z-divide">
+                {serverStatus.background_services.map((svc) => {
+                  const dotCls =
+                    svc.status === "running"
+                      ? "status-dot-green"
+                      : svc.status === "disabled"
+                        ? "status-dot-amber"
+                        : "status-dot-red";
+                  const pillCls =
+                    svc.status === "running"
+                      ? "z-pill-success"
+                      : svc.status === "disabled"
+                        ? "z-muted z-text-muted"
+                        : "z-pill-danger";
+                  const statusText =
+                    svc.status === "running"
+                      ? "已启动 · 运行中"
+                      : svc.status === "disabled"
+                        ? "未启用"
+                        : "已停止";
+
+                  return (
+                    <div
+                      key={svc.name}
+                      className="py-2 flex items-center justify-between gap-3"
+                    >
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className={dotCls} />
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-1.5">
+                            <span className="font-medium truncate">
+                              {svc.label}
+                            </span>
+                            {svc.interval && (
+                              <span className="px-1.5 py-0.5 rounded border z-border z-muted z-text-muted font-mono-num">
+                                {svc.interval}
+                              </span>
+                            )}
+                          </div>
+                          {svc.detail && (
+                            <div className="z-text-muted truncate mt-0.5">
+                              {svc.detail}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                      <span
+                        className={`px-2 py-0.5 rounded-full border font-medium shrink-0 ${pillCls}`}
+                      >
+                        {statusText}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Subsystems Health */}
+            <div className="space-y-2">
+              <div className="font-medium z-text-muted">
+                核心子系统健康检查 ({serverStatus.subsystems.length})
+              </div>
+              <div className="divide-y z-divide">
+                {serverStatus.subsystems.map((sub) => {
+                  const dotCls =
+                    sub.status === "healthy"
+                      ? "status-dot-green"
+                      : sub.status === "degraded" || sub.status === "disabled"
+                        ? "status-dot-amber"
+                        : "status-dot-red";
+                  const pillCls =
+                    sub.status === "healthy"
+                      ? "z-pill-success"
+                      : sub.status === "degraded"
+                        ? "z-pill-warn"
+                        : sub.status === "disabled"
+                          ? "z-muted z-text-muted"
+                          : "z-pill-danger";
+                  const statusText =
+                    sub.status === "healthy"
+                      ? "健康"
+                      : sub.status === "degraded"
+                        ? "降级"
+                        : sub.status === "disabled"
+                          ? "未启用"
+                          : "异常";
+
+                  return (
+                    <div
+                      key={sub.name}
+                      className="py-2 flex items-center justify-between gap-3"
+                    >
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className={dotCls} />
+                        <div className="min-w-0">
+                          <div className="font-medium truncate">
+                            {sub.label}
+                          </div>
+                          <div className="z-text-muted truncate mt-0.5">
+                            {sub.detail}
+                          </div>
+                        </div>
+                      </div>
+                      <span
+                        className={`px-2 py-0.5 rounded-full border font-medium shrink-0 ${pillCls}`}
+                      >
+                        {statusText}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Main Grid: Throughput Area Chart + Event Feed vs Endpoint & Capabilities */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">

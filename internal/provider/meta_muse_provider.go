@@ -3,7 +3,9 @@ package provider
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,13 +33,16 @@ var (
 )
 
 type museVideoTask struct {
-	TaskID    string
-	Prompt    string
-	Status    string // "PENDING" | "RUNNING" | "SUCCEEDED" | "FAILED"
-	Progress  int
-	VideoURL  string
-	ErrorMsg  string
-	CreatedAt time.Time
+	TaskID       string
+	VidID        string
+	AccountEmail string
+	Prompt       string
+	Status       string // "PENDING" | "RUNNING" | "SUCCEEDED" | "FAILED"
+	Progress     int
+	VideoURL     string
+	ErrorMsg     string
+	UpstreamMeta MuseUpstreamMeta
+	CreatedAt    time.Time
 }
 
 type metaMuseSession struct {
@@ -65,8 +70,11 @@ type MetaMuseProvider struct {
 	activeTaskID string
 	skipDB       bool
 
-	videoTasksMu sync.RWMutex
-	videoTasks   map[string]*museVideoTask
+	videoTasksMu       sync.RWMutex
+	videoTasks         map[string]*museVideoTask
+	claimedVideoHashes map[string]string
+	sessionLocksMu     sync.Mutex
+	sessionLocks       map[string]*sync.Mutex
 }
 
 // NewMetaMuseProvider 创建 Meta Muse Provider 实例
@@ -973,22 +981,121 @@ func (p *MetaMuseProvider) SubmitVideoTask(ctx context.Context, model, prompt, i
 
 	// 真实生产环境：通过纯 Go 自动化 CDP 驱动官方 Web 渲染出片
 	taskID := fmt.Sprintf("muse_%s", uuid.New().String()[:8])
+	vidID := "VID-" + strings.ToUpper(strings.TrimPrefix(taskID, "muse_"))
 	vTask := &museVideoTask{
-		TaskID:    taskID,
-		Prompt:    prompt,
-		Status:    "RUNNING",
-		Progress:  15,
-		CreatedAt: time.Now(),
+		TaskID:       taskID,
+		VidID:        vidID,
+		AccountEmail: sess.Email,
+		Prompt:       prompt,
+		Status:       "RUNNING",
+		Progress:     15,
+		CreatedAt:    time.Now(),
 	}
 
 	p.videoTasksMu.Lock()
+	if p.videoTasks == nil {
+		p.videoTasks = make(map[string]*museVideoTask)
+	}
 	p.videoTasks[taskID] = vTask
 	p.videoTasksMu.Unlock()
 
 	// 异步启动 CDP 自动化出片
-	go p.runCDPVideoGeneration(taskID, prompt, imageURL, duration, sess, sessIdx)
+	go p.runCDPVideoGeneration(taskID, vidID, prompt, imageURL, duration, sess, sessIdx)
 
 	return taskID, nil
+}
+
+// GetTaskVidID 返回任务对应的唯一动态视频ID（如 VID-1874E85D）
+func (p *MetaMuseProvider) GetTaskVidID(taskID string) string {
+	vidID, _ := p.GetTaskMeta(taskID)
+	return vidID
+}
+
+// GetTaskMeta 返回任务对应的唯一动态视频ID与绑定的账号邮箱
+func (p *MetaMuseProvider) GetTaskMeta(taskID string) (string, string) {
+	p.videoTasksMu.RLock()
+	defer p.videoTasksMu.RUnlock()
+	if t, ok := p.videoTasks[taskID]; ok && t != nil {
+		return t.VidID, t.AccountEmail
+	}
+	return "", ""
+}
+
+// GetTaskFullMeta 返回任务对应的完整上游协议关联元数据
+func (p *MetaMuseProvider) GetTaskFullMeta(taskID string) MuseUpstreamMeta {
+	p.videoTasksMu.RLock()
+	defer p.videoTasksMu.RUnlock()
+	if t, ok := p.videoTasks[taskID]; ok && t != nil {
+		meta := t.UpstreamMeta
+		if meta.VidID == "" {
+			meta.VidID = t.VidID
+		}
+		if meta.AccountEmail == "" {
+			meta.AccountEmail = t.AccountEmail
+		}
+		return meta
+	}
+	return MuseUpstreamMeta{}
+}
+
+func (p *MetaMuseProvider) setTaskUpstreamMeta(taskID string, meta MuseUpstreamMeta) {
+	p.videoTasksMu.Lock()
+	defer p.videoTasksMu.Unlock()
+	if t, ok := p.videoTasks[taskID]; ok && t != nil {
+		t.UpstreamMeta = meta
+	}
+}
+
+func (p *MetaMuseProvider) findSessionByEmail(email string) (*metaMuseSession, int, error) {
+	p.loadFromDatabase()
+	target := strings.TrimSpace(email)
+	if target != "" {
+		p.mu.RLock()
+		for i, s := range p.sessions {
+			if s != nil && strings.EqualFold(strings.TrimSpace(s.Email), target) && s.Cookie != "" {
+				p.mu.RUnlock()
+				return s, i, nil
+			}
+		}
+		p.mu.RUnlock()
+	}
+	return p.nextSession()
+}
+
+func (p *MetaMuseProvider) acquireSessionLock(email string) func() {
+	key := strings.TrimSpace(email)
+	if key == "" {
+		key = "_default"
+	}
+	p.sessionLocksMu.Lock()
+	if p.sessionLocks == nil {
+		p.sessionLocks = make(map[string]*sync.Mutex)
+	}
+	lk, ok := p.sessionLocks[key]
+	if !ok {
+		lk = &sync.Mutex{}
+		p.sessionLocks[key] = lk
+	}
+	p.sessionLocksMu.Unlock()
+	lk.Lock()
+	return lk.Unlock
+}
+
+// claimVideoHash 对视频内容计算 SHA-256 指纹并原子认领，防止多个近距离任务拿到同一个视频产物
+func (p *MetaMuseProvider) claimVideoHash(taskID, b64 string) (string, bool) {
+	sum := sha256.Sum256([]byte(b64))
+	hashHex := hex.EncodeToString(sum[:])
+
+	p.videoTasksMu.Lock()
+	defer p.videoTasksMu.Unlock()
+	if p.claimedVideoHashes == nil {
+		p.claimedVideoHashes = make(map[string]string)
+	}
+	if owner, exists := p.claimedVideoHashes[hashHex]; exists && owner != "" && owner != taskID {
+		return owner, false
+	}
+	p.claimedVideoHashes[hashHex] = taskID
+	return taskID, true
 }
 
 // QueryVideoTask 轮询 Meta Muse 任务进度与成片 URL
@@ -1227,7 +1334,11 @@ func prepareMuseReferenceImageFile(ctx context.Context, imageURL string) (string
 	return tmpPath, func() { _ = os.Remove(tmpPath) }, nil
 }
 
-func (p *MetaMuseProvider) runCDPVideoGeneration(taskID, prompt, imageURL string, duration int, sess *metaMuseSession, sessIdx int) {
+func (p *MetaMuseProvider) runCDPVideoGeneration(taskID, vidID, prompt, imageURL string, duration int, sess *metaMuseSession, sessIdx int) {
+	// 同一个 Muse 账号串行进入官网对话流，避免多提示词近距离并发时互相抢占同一会话与 WebSocket 出片
+	unlockSess := p.acquireSessionLock(sess.Email)
+	defer unlockSess()
+
 	chromePath, err := resolveChromeExecutable()
 	if err != nil {
 		errMsg := "未检测到系统 Chrome 浏览器: " + err.Error()
@@ -1293,7 +1404,8 @@ func (p *MetaMuseProvider) runCDPVideoGeneration(taskID, prompt, imageURL string
 		}
 	}
 
-	// 3. 载入已认证页面
+	// 3. 载入已认证页面（提前注入协议级 Hook 拦截 Noise-XX 解密事件与 Blob 分配）
+	installMuseProtoHook(ctx)
 	p.updateCDPTask(taskID, "RUNNING", 40, "", "")
 	if _, err := chromedp.Run(ctx, chromedp.Navigate("https://muse.ai/")); err != nil {
 		errMsg := "载入已认证页面失败: " + err.Error()
@@ -1301,6 +1413,7 @@ func (p *MetaMuseProvider) runCDPVideoGeneration(taskID, prompt, imageURL string
 		p.reportStatus(sessIdx, false, false, errMsg)
 		return
 	}
+	ensureMuseProtoHook(ctx)
 
 	// 等待 WebSocket / React 水合，并校验登录态与输入框就绪
 	inputSelector := `textarea[aria-label="消息"], textarea[aria-label="Message"], textarea[placeholder], main textarea, textarea`
@@ -1396,8 +1509,10 @@ func (p *MetaMuseProvider) runCDPVideoGeneration(taskID, prompt, imageURL string
 		time.Sleep(2 * time.Second)
 	}
 
-	// 5. 生成动态视频ID并注入提示词（要求创建/使用 muse video 工作空间、指定时长，并在回复中必须包含该动态视频ID）
-	vidID := "VID-" + strings.ToUpper(strings.TrimPrefix(taskID, "muse_"))
+	// 5. 注入包含唯一动态视频ID的提示词（要求创建/使用 muse video 工作空间、指定时长，并在回复中必须包含该动态视频ID）
+	if vidID == "" {
+		vidID = "VID-" + strings.ToUpper(strings.TrimPrefix(taskID, "muse_"))
+	}
 	submitPrompt := buildMuseVideoPrompt(prompt, vidID, duration, hasRefImage)
 
 	// 聚焦输入框并注入提示词，模拟点击发送（兼容中英文 aria-label）
@@ -1472,18 +1587,25 @@ func (p *MetaMuseProvider) runCDPVideoGeneration(taskID, prompt, imageURL string
 			p.updateCDPTask(taskID, "RUNNING", progress, "", "")
 		}
 
-		// 防串号新视频检测（基于动态视频ID精准匹配）：
-		// 1) 前 90 秒 (i < 45) 严格要求助手回复气泡已输出动态 vidID (replyVidNode)，未出现前绝不抓取任何视频
-		// 2) 命中 replyVidNode 后，仅从 <main> 内且属于该回复气泡或紧随其后的新 <video> 提取产物
-		// 3) 90 秒后若模型偶发漏写 vidID，才兜底允许 <main> 内排在 userPromptNode 之后的新 <video> 或 >1MB 拦截 Blob
-		allowFallback := i >= 45
+		// 严格按唯一动态视频ID（vidID）匹配各自产物，绝不串号：
+		// 1) 必须同时定位到包含本任务 vidID 的用户气泡 (userPromptNode) 和助手回复节点 (replyVidNode)
+		// 2) 未出现 replyVidNode 前绝不抓取任何视频（防止抢抓上一轮或相邻任务的视频）
+		// 3) 命中 replyVidNode 后，优先在其所属独立回复容器 turnBox 内取首个视频（排除包含其他 VID- 的容器）
+		// 4) 若跨容器，则严格限定在 replyVidNode 之后、下一个不同 VID-* 节点之前，且取首个紧随的视频 ([0])
 		checkExpr := fmt.Sprintf(`(() => {
 			const vid = %s;
-			const allowFallback = %t;
 			const initial = window.__muse_initial_blobs || [];
+			const ignored = window.__muse_ignored_urls || [];
 			const sendTs = window.__muse_send_ts || 0;
+			const vidRe = /\bVID-[A-Z0-9]{6,}\b/g;
 
-			// 查找包含动态 vidID 的最小文本节点（排除侧栏与输入框）
+			const hasOtherVid = (text) => {
+				if (!text) return false;
+				const matches = text.match(vidRe);
+				return matches ? matches.some(m => m !== vid) : false;
+			};
+
+			// 查找包含本任务动态 vidID 的最小文本节点（排除侧栏与输入框）
 			const vidNodes = Array.from(document.querySelectorAll('p, span, div')).filter(el => {
 				if (el.closest('aside') || el.tagName === 'TEXTAREA' || el.closest('textarea')) return false;
 				const t = (el.innerText || '').trim();
@@ -1503,8 +1625,8 @@ func (p *MetaMuseProvider) runCDPVideoGeneration(taskID, prompt, imageURL string
 				}
 			}
 
-			// 助手尚未在回复中输出动态 vidID 时，继续等待，避免误抓右侧吉祥物待机/思考动画
-			if (!replyVidNode && !allowFallback) {
+			// 助手尚未在回复中输出本任务的动态 vidID 时，继续等待，绝不盲抓其他任务的视频
+			if (!replyVidNode) {
 				return '';
 			}
 
@@ -1517,70 +1639,96 @@ func (p *MetaMuseProvider) runCDPVideoGeneration(taskID, prompt, imageURL string
 					return false;
 				}
 				const s = v.src || v.currentSrc || '';
-				if (!s || initial.includes(s)) return false;
+				if (!s || initial.includes(s) || ignored.includes(s)) return false;
 				return (s.startsWith('blob:') || s.startsWith('https://')) && (v.duration > 0 || v.readyState >= 1);
 			};
 
-			// 优先策略 A: 仅从主聊天区 (<main>) 查找新视频，绝不扫描右侧吉祥物面板
-			const mainVideos = Array.from(document.querySelectorAll('main video, [role="main"] video')).filter(isCandidateVideo);
-
-			if (replyVidNode) {
-				let replyContainer = replyVidNode.parentElement;
-				if (replyContainer && replyContainer.parentElement && !replyContainer.parentElement.contains(userPromptNode)) {
-					replyContainer = replyContainer.parentElement;
+			// 策略 A1: 从 replyVidNode 向上寻找仅属于本条回复的最小容器（包含候选视频，且不含 userPromptNode 与其他 VID）
+			let turnBox = replyVidNode.parentElement;
+			for (let hop = 0; hop < 6 && turnBox && turnBox.tagName !== 'MAIN' && turnBox.tagName !== 'BODY'; hop++) {
+				if (turnBox.contains(userPromptNode) || hasOtherVid(turnBox.innerText || '')) {
+					break;
 				}
-				const pool = mainVideos.length > 0 ? mainVideos : Array.from(document.querySelectorAll('video')).filter(isCandidateVideo);
-				const matchedInReply = pool.filter(v =>
-					(replyContainer && replyContainer.contains(v)) ||
-					(replyVidNode.compareDocumentPosition(v) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0
-				);
-				if (matchedInReply.length > 0) {
-					const v = matchedInReply[matchedInReply.length - 1];
-					return v.src || v.currentSrc || '';
+				const turnVideos = Array.from(turnBox.querySelectorAll('video')).filter(isCandidateVideo);
+				if (turnVideos.length > 0) {
+					return turnVideos[0].src || turnVideos[0].currentSrc || '';
 				}
+				turnBox = turnBox.parentElement;
 			}
 
-			if (allowFallback && mainVideos.length > 0) {
-				const last = mainVideos[mainVideos.length - 1];
-				return last.src || last.currentSrc || '';
+			// 策略 A2: 在主对话区（无 <main> 时回退全页非侧栏视频）限定边界（位于 replyVidNode 之后、且在下一个不同 VID-* 节点之前），取紧随其后的首个视频
+			const mainEl = document.querySelector('main, [role="main"]');
+			const rawMainVideos = mainEl
+				? Array.from(mainEl.querySelectorAll('video'))
+				: Array.from(document.querySelectorAll('video'));
+			const mainVideos = rawMainVideos.filter(isCandidateVideo);
+			const otherVidNodes = Array.from(document.querySelectorAll('p, span, div')).filter(el => {
+				if (el.closest('aside') || el.tagName === 'TEXTAREA' || el.closest('textarea')) return false;
+				if ((replyVidNode.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING) === 0) return false;
+				const t = (el.innerText || '').trim();
+				return t.length < 1500 && hasOtherVid(t);
+			});
+			const nextOtherVidNode = otherVidNodes.length > 0 ? otherVidNodes[0] : null;
+
+			const boundedVideos = mainVideos.filter(v => {
+				if ((replyVidNode.compareDocumentPosition(v) & Node.DOCUMENT_POSITION_FOLLOWING) === 0) return false;
+				if (nextOtherVidNode && (v.compareDocumentPosition(nextOtherVidNode) & Node.DOCUMENT_POSITION_FOLLOWING) === 0) return false;
+				return true;
+			});
+			if (boundedVideos.length > 0) {
+				return boundedVideos[0].src || boundedVideos[0].currentSrc || '';
 			}
 
-			// 策略 B: 仅在已收到回复ID或超时兜底阶段，才读取 >1MB 的拦截 Blob
-			if (replyVidNode || allowFallback) {
-				const intercepted = window.__muse_intercepted_blobs || [];
-				for (let idx = intercepted.length - 1; idx >= 0; idx--) {
-					const item = intercepted[idx];
-					if (item && item.size > 1000000 && item.url && item.ts >= sendTs && !initial.includes(item.url)) {
-						return item.url;
-					}
+			// 策略 B: 已确认本任务 replyVidNode 出现后，才读取 >1MB 的新拦截 Blob（排除已忽略 URL）
+			const intercepted = window.__muse_intercepted_blobs || [];
+			for (let idx = intercepted.length - 1; idx >= 0; idx--) {
+				const item = intercepted[idx];
+				if (item && item.size > 1000000 && item.url && item.ts >= sendTs && !initial.includes(item.url) && !ignored.includes(item.url)) {
+					return item.url;
 				}
 			}
 
 			return '';
-		})()`, string(vidBytes), allowFallback)
+		})()`, string(vidBytes))
 
-		targetBlobURL, _ := chromedp.Run(ctx, chromedp.Evaluate[string](checkExpr))
+		var targetBlobURL string
+		var matchedExpectedBytes int64
+		if protoRes, pErr := resolveMuseProtoVideo(ctx, MuseUpstreamMeta{
+			VidID:        vidID,
+			AccountEmail: sess.Email,
+		}, ""); pErr == nil && protoRes != nil && protoRes.Found {
+			p.setTaskUpstreamMeta(taskID, toMuseUpstreamMeta(protoRes, vidID, sess.Email))
+			if protoRes.Asset != nil {
+				matchedExpectedBytes = protoRes.Asset.ByteLen
+			}
+			if protoRes.BlobURL != "" {
+				targetBlobURL = protoRes.BlobURL
+				log.Printf("[MetaMuse CDP %s] 协议层精准命中成片 (%s, seq=%d, bytes=%d): %s",
+					taskID, protoRes.Tier, protoRes.Asset.Seq, protoRes.Asset.ByteLen, targetBlobURL)
+			}
+		}
+		if targetBlobURL == "" {
+			targetBlobURL, _ = chromedp.Run(ctx, chromedp.Evaluate[string](checkExpr))
+		}
 
 		if targetBlobURL != "" {
 			log.Printf("[MetaMuse CDP %s] 命中新生成视频 Blob: %s (耗时 %s)，正在无损转储 Base64...", taskID, targetBlobURL, elapsed)
 			p.updateCDPTask(taskID, "RUNNING", 96, "", "")
 
-			extractedB64, err := chromedp.Run(ctx, chromedp.Evaluate[string](fmt.Sprintf(`(() => {
-				return fetch(%q).then(r => r.blob()).then(b => {
-					// 过滤掉小于 100KB 的异常空片段（已通过 main / avatar / data-muse-old 排除吉祥物头像）
-					if (b.size < 100000) return 'too_small:' + b.size;
-					return new Promise((resolve) => {
-						const reader = new FileReader();
-						reader.onloadend = () => resolve(reader.result || '');
-						reader.onerror = () => resolve('');
-						reader.readAsDataURL(b);
-					});
-				}).catch(() => '');
-			})()`, targetBlobURL), chromedp.EvalAwaitPromise))
+			extractedB64, err := extractMuseVideoBase64(ctx, targetBlobURL, matchedExpectedBytes)
 
 			if err == nil && strings.HasPrefix(extractedB64, "data:") {
+				if owner, ok := p.claimVideoHash(taskID, extractedB64); !ok {
+					log.Printf("[MetaMuse CDP %s] 视频内容指纹已被任务 %s 认领（防串号拦截），忽略 %s 并继续等待属于 %s 的产物...", taskID, owner, targetBlobURL, vidID)
+					_, _ = chromedp.Run(ctx, chromedp.Evaluate[string](fmt.Sprintf(`(() => {
+						window.__muse_ignored_urls = window.__muse_ignored_urls || [];
+						window.__muse_ignored_urls.push(%q);
+						return 'ok';
+					})()`, targetBlobURL)))
+					continue
+				}
 				newVideoBase64 = extractedB64
-				log.Printf("[MetaMuse CDP %s] 成功无损提取真实成片 Base64 视频流，大小: %d 字符", taskID, len(newVideoBase64))
+				log.Printf("[MetaMuse CDP %s] 成功无损提取并认领真实成片 Base64 视频流 [VID=%s]，大小: %d 字符", taskID, vidID, len(newVideoBase64))
 				break
 			} else if strings.HasPrefix(extractedB64, "too_small:") {
 				log.Printf("[MetaMuse CDP %s] 抓取到视频数据过小 (%s)，疑似吉祥物 Avatar 动作，继续等待真实成片...", taskID, extractedB64)
@@ -1601,33 +1749,353 @@ func (p *MetaMuseProvider) runCDPVideoGeneration(taskID, prompt, imageURL string
 		return
 	}
 
-	b64Parts := strings.SplitN(newVideoBase64, ",", 2)
-	if len(b64Parts) != 2 {
-		p.updateCDPTask(taskID, "FAILED", 0, "", "视频 Base64 格式解析异常")
-		p.reportStatus(sessIdx, false, false, "视频 Base64 格式解析异常")
+	videoURL, saveErr := saveMuseBase64VideoFile(taskID, newVideoBase64)
+	if saveErr != nil {
+		p.updateCDPTask(taskID, "FAILED", 0, "", saveErr.Error())
+		p.reportStatus(sessIdx, false, false, saveErr.Error())
 		return
 	}
 
-	videoBytes, decErr := base64.StdEncoding.DecodeString(b64Parts[1])
-	if decErr != nil || len(videoBytes) == 0 {
-		errMsg := "视频二进制解码异常: " + decErr.Error()
-		p.updateCDPTask(taskID, "FAILED", 0, "", errMsg)
-		p.reportStatus(sessIdx, false, false, errMsg)
-		return
-	}
-
-	// 7. 持久化存储到 data/videos/{taskID}.mp4
-	outDir := filepath.Join("data", "videos")
-	_ = os.MkdirAll(outDir, 0755)
-	outPath := filepath.Join(outDir, taskID+".mp4")
-	if err := os.WriteFile(outPath, videoBytes, 0644); err != nil {
-		errMsg := "持久化视频文件失败: " + err.Error()
-		p.updateCDPTask(taskID, "FAILED", 0, "", errMsg)
-		p.reportStatus(sessIdx, false, false, errMsg)
-		return
-	}
-
-	videoURL := "/v1/videos/files/" + taskID
 	p.updateCDPTask(taskID, "SUCCEEDED", 100, videoURL, "")
 	p.reportStatus(sessIdx, true, false, "")
+}
+
+func saveMuseBase64VideoFile(saveTaskID, newVideoBase64 string) (string, error) {
+	b64Parts := strings.SplitN(newVideoBase64, ",", 2)
+	if len(b64Parts) != 2 {
+		return "", fmt.Errorf("视频 Base64 格式解析异常")
+	}
+	videoBytes, decErr := base64.StdEncoding.DecodeString(b64Parts[1])
+	if decErr != nil || len(videoBytes) == 0 {
+		if decErr != nil {
+			return "", fmt.Errorf("视频二进制解码异常: %w", decErr)
+		}
+		return "", fmt.Errorf("视频二进制内容为空")
+	}
+
+	outDir := filepath.Join("data", "videos")
+	_ = os.MkdirAll(outDir, 0755)
+	outPath := filepath.Join(outDir, saveTaskID+".mp4")
+	if err := os.WriteFile(outPath, videoBytes, 0644); err != nil {
+		return "", fmt.Errorf("持久化视频文件失败: %w", err)
+	}
+	return "/v1/videos/files/" + saveTaskID, nil
+}
+
+// RescueVideoTask 根据账号、动态 vidID（或提示词前缀）从 Muse 官方历史对话流中抢救拉取已出片但本地标记失败的视频产物
+func (p *MetaMuseProvider) RescueVideoTask(ctx context.Context, saveTaskID, vidID, accountEmail, prompt string) (string, error) {
+	u, _, err := p.RescueVideoTaskWithMeta(ctx, saveTaskID, MuseUpstreamMeta{
+		VidID:        vidID,
+		AccountEmail: accountEmail,
+	}, prompt)
+	return u, err
+}
+
+// RescueVideoTaskWithMeta 优先依据协议层报文及持久化上游元数据抢救拉取视频，DOM 匹配作为兜底
+func (p *MetaMuseProvider) RescueVideoTaskWithMeta(ctx context.Context, saveTaskID string, meta MuseUpstreamMeta, prompt string) (string, MuseUpstreamMeta, error) {
+	vidID := strings.TrimSpace(meta.VidID)
+	accountEmail := strings.TrimSpace(meta.AccountEmail)
+	sess, sessIdx, err := p.findSessionByEmail(accountEmail)
+	if err != nil {
+		return "", meta, fmt.Errorf("未找到可用的 Muse 账号会话 (%s): %w", accountEmail, err)
+	}
+	meta.AccountEmail = sess.Email
+
+	unlockSess := p.acquireSessionLock(sess.Email)
+	defer unlockSess()
+
+	chromePath, err := resolveChromeExecutable()
+	if err != nil {
+		return "", meta, fmt.Errorf("未检测到系统 Chrome 浏览器: %w", err)
+	}
+
+	opts := append(chromedp.DefaultExecAllocatorOptions[:],
+		chromedp.ExecPath(chromePath),
+		chromedp.NoFirstRun,
+		chromedp.NoDefaultBrowserCheck,
+		chromedp.Flag("incognito", true),
+		chromedp.Flag("disable-blink-features", "AutomationControlled"),
+		chromedp.Flag("no-sandbox", true),
+		chromedp.Flag("disable-dev-shm-usage", true),
+		chromedp.Flag("lang", "zh-CN"),
+		chromedp.Flag("headless", "new"),
+		chromedp.WindowSize(1440, 900),
+	)
+	if sess.Proxy != "" {
+		opts = append(opts, chromedp.ProxyServer(sess.Proxy))
+	}
+
+	allocCtx, allocCancel := chromedp.NewExecAllocator(ctx, opts...)
+	defer allocCancel()
+
+	bCtx, cancel := chromedp.NewContext(allocCtx)
+	defer cancel()
+
+	if _, err := chromedp.Run(bCtx, chromedp.Navigate("https://muse.ai/about")); err != nil {
+		return "", meta, fmt.Errorf("初始化浏览器域失败: %w", err)
+	}
+
+	for _, part := range strings.Split(sess.Cookie, ";") {
+		kv := strings.SplitN(strings.TrimSpace(part), "=", 2)
+		if len(kv) == 2 && kv[0] != "" {
+			name := strings.TrimSpace(kv[0])
+			val := strings.TrimSpace(kv[1])
+			params := network.SetCookieParams{
+				Name:  name,
+				Value: val,
+				Path:  "/",
+			}
+			if name == "__Host-hatch_one_tap" || name == "hatch_sess" || name == "hatch_gw" {
+				sec := true
+				params.Secure = &sec
+			}
+			if !strings.HasPrefix(name, "__Host-") && name != "hatch_native_auth_device" {
+				params.Domain = ".muse.ai"
+			}
+			_, _ = chromedp.Call(bCtx, network.SetCookie, params)
+		}
+	}
+
+	installMuseProtoHook(bCtx)
+	if _, err := chromedp.Run(bCtx, chromedp.Navigate("https://muse.ai/")); err != nil {
+		return "", meta, fmt.Errorf("载入 Muse 官方页面失败: %w", err)
+	}
+	ensureMuseProtoHook(bCtx)
+
+	inputSelector := `textarea[aria-label="消息"], textarea[aria-label="Message"], textarea[placeholder], main textarea, textarea`
+	ready := false
+	for w := 0; w < 15; w++ {
+		time.Sleep(1 * time.Second)
+		curURL, _ := chromedp.Run(bCtx, chromedp.Location())
+		if strings.Contains(curURL, "/login") || strings.Contains(curURL, "facebook.com/login") {
+			return "", meta, fmt.Errorf("Muse 会话 Cookie 已失效（跳转至登录页），请更新账号 %s 的 Cookie", sess.Email)
+		}
+		if found, _ := chromedp.Run(bCtx, chromedp.Evaluate[bool](fmt.Sprintf(`document.querySelector(%q) !== null`, inputSelector))); found {
+			ready = true
+			break
+		}
+	}
+	if !ready {
+		return "", meta, fmt.Errorf("Muse 页面未就绪，请检查账号 %s Cookie 或代理连通性", sess.Email)
+	}
+
+	// 等待历史对话气泡与视频资源水合完成
+	time.Sleep(5 * time.Second)
+
+	cleanPrefix := ""
+	if r := []rune(strings.TrimSpace(prompt)); len(r) > 0 {
+		cleanPrefix = string(r[:min(14, len(r))])
+	}
+	vidBytes, _ := json.Marshal(strings.TrimSpace(vidID))
+	prefixBytes, _ := json.Marshal(cleanPrefix)
+
+	rescueExpr := fmt.Sprintf(`(() => {
+		const vid = %s;
+		const prefix = %s;
+		const vidRe = /\bVID-[A-Z0-9]{6,}\b/g;
+
+		const hasOtherVid = (text) => {
+			if (!text || !vid) return false;
+			const matches = text.match(vidRe);
+			return matches ? matches.some(m => m !== vid) : false;
+		};
+
+		const getVideoSrc = (v) => {
+			if (!v) return '';
+			if (v.src) return v.src;
+			if (v.currentSrc) return v.currentSrc;
+			const srcEl = v.querySelector('source');
+			return srcEl ? (srcEl.src || '') : '';
+		};
+
+		const isCandidateVideo = (v) => {
+			const outer = v.outerHTML || '';
+			if (outer.includes('hatch-avatar') || outer.includes('avatar') || v.closest('[data-hatch-avatar]') || v.closest('aside')) {
+				return false;
+			}
+			const s = getVideoSrc(v);
+			return s.startsWith('blob:') || s.startsWith('https://');
+		};
+
+		const mainEl = document.querySelector('main, [role="main"]');
+		const rawVideos = mainEl
+			? Array.from(mainEl.querySelectorAll('video'))
+			: Array.from(document.querySelectorAll('video'));
+		const mainVideos = rawVideos.filter(isCandidateVideo);
+
+		if (vid) {
+			const vidNodes = Array.from(document.querySelectorAll('p, span, div')).filter(el => {
+				if (el.closest('aside') || el.tagName === 'TEXTAREA' || el.closest('textarea')) return false;
+				const t = (el.innerText || '').trim();
+				if (!t.includes(vid) || t.length >= 2000) return false;
+				return !Array.from(el.children).some(c => (c.innerText || '').includes(vid));
+			});
+			if (vidNodes.length === 0) {
+				return JSON.stringify({ url: '', reason: 'no_vid_nodes', totalVideos: rawVideos.length, candVideos: mainVideos.length, hasMain: !!mainEl });
+			}
+
+			const anchorNode = vidNodes[vidNodes.length - 1];
+			const userNode = vidNodes[0];
+			try { anchorNode.scrollIntoView({ block: 'center' }); } catch (e) {}
+
+			// 1) 优先从 anchorNode 所属独立回复容器找视频
+			let turnBox = anchorNode.parentElement;
+			for (let hop = 0; hop < 8 && turnBox && turnBox.tagName !== 'MAIN' && turnBox.tagName !== 'BODY'; hop++) {
+				if (turnBox !== anchorNode && vidNodes.length > 1 && turnBox.contains(userNode)) {
+					break;
+				}
+				if (hasOtherVid(turnBox.innerText || '')) {
+					break;
+				}
+				const turnVideos = Array.from(turnBox.querySelectorAll('video')).filter(isCandidateVideo);
+				if (turnVideos.length > 0) {
+					return JSON.stringify({ url: getVideoSrc(turnVideos[0]), reason: 'turn_box', vidNodes: vidNodes.length, candVideos: mainVideos.length });
+				}
+				turnBox = turnBox.parentElement;
+			}
+
+			// 2) 限定在 anchorNode 之后、下一个不同 VID-* 节点之前
+			const otherVidNodes = Array.from(document.querySelectorAll('p, span, div')).filter(el => {
+				if (el.closest('aside') || el.tagName === 'TEXTAREA' || el.closest('textarea')) return false;
+				if ((anchorNode.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING) === 0) return false;
+				const t = (el.innerText || '').trim();
+				return t.length < 2000 && hasOtherVid(t);
+			});
+			const nextOther = otherVidNodes.length > 0 ? otherVidNodes[0] : null;
+			const bounded = mainVideos.filter(v => {
+				if ((anchorNode.compareDocumentPosition(v) & Node.DOCUMENT_POSITION_FOLLOWING) === 0) return false;
+				if (nextOther && (v.compareDocumentPosition(nextOther) & Node.DOCUMENT_POSITION_FOLLOWING) === 0) return false;
+				return true;
+			});
+			if (bounded.length > 0) {
+				return JSON.stringify({ url: getVideoSrc(bounded[0]), reason: 'bounded', vidNodes: vidNodes.length, candVideos: mainVideos.length });
+			}
+
+			// 3) 若 anchorNode 之后暂无视频但容器内存在延迟加载视频，尝试滚动并触发加载
+			const allAfter = Array.from(document.querySelectorAll('video')).filter(v => {
+				const outer = v.outerHTML || '';
+				if (outer.includes('hatch-avatar') || outer.includes('avatar') || v.closest('[data-hatch-avatar]') || v.closest('aside')) return false;
+				if ((anchorNode.compareDocumentPosition(v) & Node.DOCUMENT_POSITION_FOLLOWING) === 0) return false;
+				if (nextOther && (v.compareDocumentPosition(nextOther) & Node.DOCUMENT_POSITION_FOLLOWING) === 0) return false;
+				return true;
+			});
+			if (allAfter.length > 0) {
+				try { allAfter[0].scrollIntoView({ block: 'center' }); } catch (e) {}
+				const u = getVideoSrc(allAfter[0]);
+				if (u) {
+					return JSON.stringify({ url: u, reason: 'after_all', vidNodes: vidNodes.length, candVideos: mainVideos.length });
+				}
+			}
+
+			return JSON.stringify({ url: '', reason: 'vid_found_no_video', vidNodes: vidNodes.length, totalVideos: rawVideos.length, candVideos: mainVideos.length, hasMain: !!mainEl });
+		}
+
+		// 兼容无 vidID 的历史任务：按提示词前缀锚定最后一次出现的位置
+		if (prefix) {
+			const promptNodes = Array.from(document.querySelectorAll('p, span, div')).filter(el => {
+				if (el.closest('aside') || el.tagName === 'TEXTAREA' || el.closest('textarea')) return false;
+				const t = (el.innerText || '').trim();
+				if (!t.includes(prefix) || t.length >= 2000) return false;
+				return !Array.from(el.children).some(c => (c.innerText || '').includes(prefix));
+			});
+			if (promptNodes.length > 0) {
+				const pNode = promptNodes[promptNodes.length - 1];
+				try { pNode.scrollIntoView({ block: 'center' }); } catch (e) {}
+				const after = mainVideos.filter(v => (pNode.compareDocumentPosition(v) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0);
+				if (after.length > 0) {
+					return JSON.stringify({ url: getVideoSrc(after[0]), reason: 'prefix_after' });
+				}
+			}
+		}
+
+		return JSON.stringify({ url: '', reason: 'not_found', totalVideos: rawVideos.length, candVideos: mainVideos.length, hasMain: !!mainEl });
+	})()`, string(vidBytes), string(prefixBytes))
+
+	var targetURL string
+	var lastDiag string
+
+	// 1) 协议层优先抢救：直接按持久化元数据 / chat_events 匹配资产，若离屏未水合 Blob 则滚动触发加载
+	if protoRes, pErr := resolveMuseProtoVideo(bCtx, meta, cleanPrefix); pErr == nil && protoRes != nil && protoRes.Found {
+		meta = toMuseUpstreamMeta(protoRes, vidID, sess.Email)
+		log.Printf("[MetaMuse Rescue %s] 协议层命中历史资产 (%s, path=%q, expectedBytes=%d, blob=%q)",
+			saveTaskID, protoRes.Tier, meta.UpstreamAssetPath, meta.ExpectedBytes, protoRes.BlobURL)
+		if protoRes.BlobURL != "" {
+			targetURL = protoRes.BlobURL
+		} else {
+			scrollToMuseProtoHint(bCtx, meta, cleanPrefix)
+			for waitBlob := 0; waitBlob < 8; waitBlob++ {
+				time.Sleep(2 * time.Second)
+				if retryRes, rErr := resolveMuseProtoVideo(bCtx, meta, cleanPrefix); rErr == nil && retryRes != nil && retryRes.BlobURL != "" {
+					targetURL = retryRes.BlobURL
+					log.Printf("[MetaMuse Rescue %s] 滚动触发水合成功，命中 Blob: %s", saveTaskID, targetURL)
+					break
+				}
+				if waitBlob == 2 {
+					scrollToMuseProtoHint(bCtx, meta, cleanPrefix)
+				}
+			}
+		}
+	}
+
+	// 2) DOM 匹配兜底（仅当协议层未获取到 Blob URL 时启用）
+	for retry := 0; retry < 10 && targetURL == ""; retry++ {
+		rawRes, _ := chromedp.Run(bCtx, chromedp.Evaluate[string](rescueExpr))
+		if rawRes != "" {
+			var parsed struct {
+				URL         string `json:"url"`
+				Reason      string `json:"reason"`
+				TotalVideos int    `json:"totalVideos"`
+				CandVideos  int    `json:"candVideos"`
+				HasMain     bool   `json:"hasMain"`
+			}
+			if jErr := json.Unmarshal([]byte(rawRes), &parsed); jErr == nil {
+				lastDiag = rawRes
+				if parsed.URL != "" {
+					targetURL = parsed.URL
+					log.Printf("[MetaMuse Rescue %s] 命中目标视频 (%s): %s", saveTaskID, parsed.Reason, targetURL)
+					break
+				}
+				// 若尚未找到 vid 节点，尝试向上滚动历史对话流或切换至 "muse video" 工作空间
+				if parsed.Reason == "no_vid_nodes" {
+					if retry == 2 {
+						_, _ = chromedp.Run(bCtx, chromedp.Evaluate[bool](`(() => {
+							const ws = Array.from(document.querySelectorAll('a, button, div, span')).find(el => {
+								const t = (el.innerText || '').trim().toLowerCase();
+								return (t === 'muse video' || t === 'muse viedio') && el.offsetParent !== null;
+							});
+							if (ws) { ws.click(); return true; }
+							return false;
+						})()`))
+					} else {
+						_, _ = chromedp.Run(bCtx, chromedp.Evaluate[string](`(() => {
+							document.querySelectorAll('div, main').forEach(el => {
+								if (el.scrollHeight > el.clientHeight + 50) {
+									el.scrollTop = Math.max(0, el.scrollTop - 1200);
+								}
+							});
+							return 'scrolled';
+						})()`))
+					}
+				}
+			}
+		}
+		time.Sleep(2 * time.Second)
+	}
+	if targetURL == "" {
+		log.Printf("[MetaMuse Rescue %s] 抢救未命中: account=%s vid=%s diag=%s", saveTaskID, sess.Email, vidID, lastDiag)
+		return "", meta, fmt.Errorf("未在账号 %s 的 Muse 对话流中找到匹配视频 (vid=%s, diag=%s)", sess.Email, vidID, lastDiag)
+	}
+
+	extractedB64, evalErr := extractMuseVideoBase64(bCtx, targetURL, meta.ExpectedBytes)
+	if evalErr != nil || !strings.HasPrefix(extractedB64, "data:") {
+		return "", meta, fmt.Errorf("抢救提取视频流失败 (target=%s, err=%v, detail=%s)", targetURL, evalErr, extractedB64[:min(80, len(extractedB64))])
+	}
+
+	videoURL, saveErr := saveMuseBase64VideoFile(saveTaskID, extractedB64)
+	if saveErr != nil {
+		return "", meta, saveErr
+	}
+	log.Printf("[MetaMuse Rescue %s] 成功从账号 %s 抢救拉取视频 [VID=%s] -> %s", saveTaskID, sess.Email, vidID, videoURL)
+	p.reportStatus(sessIdx, true, false, "")
+	return videoURL, meta, nil
 }

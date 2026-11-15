@@ -30,5 +30,5 @@
 
 ## 3. Thesys OpenUI (`openui-lang`) 局部规范
 
-- **扩展组件库（`web/src/lib/openui-library.tsx`）**：在 `@openuidev/react-ui` 的 `openuiChatLibrary` 基础上通过 `zod/v4` 注册 `PoolOverviewCard`、`AccountDiagnosticTable`、`ImageStudioCard` 与 `PlatformDiagnosisCard`。
+- **扩展组件库（`web/src/lib/openui-library.tsx`）**：在 `@openuidev/react-ui` 的 `openuiChatLibrary` 基础上通过 `zod/v4` 注册 `PoolOverviewCard`、`AccountDiagnosticTable`、`ImageStudioCard`、`PlatformDiagnosisCard` 与 `MediaCrawlerCard`（跨工坊网页媒体检索/缓存入库/云端音色复刻工作卡），并在 Chat 中提供 `/voice`、`/crawl` 与自然语言爬虫快捷触发。
 - **对外 `/v1/chat/completions` 兼容**：默认保持标准 OpenAI Chat Completions 行为；携带请求头 `X-OpenUI-Lang: true` 时由 Go 网关自动前置注入内嵌的 `web/system-prompt.txt`。

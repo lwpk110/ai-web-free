@@ -33,6 +33,7 @@ export default defineConfig({
       "/v1": apiTarget,
       "/auth": apiTarget,
       "/backend-api": apiTarget,
+      "/storage": apiTarget,
     },
   },
 });

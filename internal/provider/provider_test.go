@@ -22,8 +22,8 @@ func TestProviderRegistry(t *testing.T) {
 	RegisterDefaultProviders(reg, chatgptPlugin)
 
 	descriptors := reg.ListDescriptors()
-	if len(descriptors) != 11 {
-		t.Fatalf("expected 11 descriptors, got %d", len(descriptors))
+	if len(descriptors) != 12 {
+		t.Fatalf("expected 12 descriptors, got %d", len(descriptors))
 	}
 
 	p, ok := reg.Get("chatgpt")
@@ -33,13 +33,18 @@ func TestProviderRegistry(t *testing.T) {
 
 	// 检查新增的免费多模态 provider
 	jy, ok := reg.Get("jianying")
-	if !ok || jy.Descriptor().ID != "jianying" || len(jy.Descriptor().Tags) == 0 {
-		t.Fatalf("expected valid jianying provider with tags")
+	if !ok || jy.Descriptor().ID != "jianying" || jy.Descriptor().Status != "disabled" || len(jy.Descriptor().Tags) == 0 {
+		t.Fatalf("expected retired disabled jianying provider with tags")
 	}
 
 	edge, ok := reg.Get("edge_tts")
 	if !ok || edge.Descriptor().ID != "edge_tts" || len(edge.Descriptor().Tags) == 0 {
 		t.Fatalf("expected valid edge_tts provider with tags")
+	}
+
+	localTTS, ok := reg.Get("local_tts")
+	if !ok || localTTS.Descriptor().ID != "local_tts" || len(localTTS.Descriptor().Tags) == 0 {
+		t.Fatalf("expected valid local_tts provider with tags")
 	}
 
 	sf, ok := reg.Get("siliconflow")

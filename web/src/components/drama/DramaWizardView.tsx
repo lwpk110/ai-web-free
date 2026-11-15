@@ -22,9 +22,17 @@ import {
   type ScriptNodeData,
   type ShotNodeData,
 } from "../../lib/dramaPresets";
-import { useDramaCanvasStore } from "../../stores/dramaCanvasStore";
 
 interface DramaWizardViewProps {
+  nodes: DramaFlowNode[];
+  updateNodeData: <T extends Record<string, unknown>>(
+    nodeId: string,
+    updater: Partial<T> | ((prev: T) => T),
+  ) => void;
+  updateScriptNode: (patch: Partial<ScriptNodeData>) => void;
+  addNode: (kind: "character" | "scene" | "shot") => void;
+  removeNode: (nodeId: string) => void;
+  onSelectShot: (nodeId: string) => void;
   onRunBreakdown: () => void;
   onRunPipeline: () => void;
   onGenerateCharacter: (nodeId: string) => void;
@@ -46,6 +54,12 @@ const STEPS = [
 ];
 
 export const DramaWizardView: React.FC<DramaWizardViewProps> = ({
+  nodes,
+  updateNodeData,
+  updateScriptNode,
+  addNode,
+  removeNode,
+  onSelectShot,
   onRunBreakdown,
   onRunPipeline,
   onGenerateCharacter,
@@ -58,8 +72,6 @@ export const DramaWizardView: React.FC<DramaWizardViewProps> = ({
   onExportZip,
 }) => {
   const [step, setStep] = useState(1);
-  const { nodes, updateNodeData, updateScriptNode, addNode, removeNode, setViewMode, setSelectedNodeId } =
-    useDramaCanvasStore();
 
   const scriptNode = nodes.find((n) => n.type === "script") as (DramaFlowNode & { data: ScriptNodeData }) | undefined;
   const composerNode = nodes.find((n) => n.type === "composer") as
@@ -309,8 +321,7 @@ export const DramaWizardView: React.FC<DramaWizardViewProps> = ({
                           <button
                             type="button"
                             onClick={() => {
-                              setSelectedNodeId(sh.id);
-                              setViewMode("canvas");
+                              onSelectShot(sh.id);
                             }}
                             className="text-indigo-500 hover:underline"
                           >

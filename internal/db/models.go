@@ -13,6 +13,13 @@ type GalleryWork struct {
 	Size          string    `gorm:"size:32" json:"size"`
 	Quality       string    `gorm:"size:32" json:"quality,omitempty"`
 	Mode          string    `gorm:"size:32;default:'generations'" json:"mode"`
+	Category      string    `gorm:"size:48;default:'general';index" json:"category"`
+	Source        string    `gorm:"size:48;default:'image_studio';index" json:"source"`
+	ProjectID     string    `gorm:"size:64;index" json:"project_id,omitempty"`
+	ProjectTitle  string    `gorm:"size:255;index" json:"project_title,omitempty"`
+	RoleName      string    `gorm:"size:128;index" json:"role_name,omitempty"`
+	ShotIndex     int       `gorm:"default:0;index" json:"shot_index,omitempty"`
+	Tags          []string  `gorm:"serializer:json;type:text" json:"tags,omitempty"`
 	StorageType   string    `gorm:"size:32;default:'local'" json:"storage_type"` // local, s3, blob, remote
 	FilePath      string    `gorm:"size:255" json:"file_path,omitempty"`
 	URL           string    `gorm:"type:text;not null" json:"url"`
@@ -81,9 +88,11 @@ type PromptFavorite struct {
 
 // VideoTaskRecord 视频生成任务持久化模型
 type VideoTaskRecord struct {
-	ID          string     `gorm:"primaryKey;size:64" json:"id"`
-	TaskID      string     `gorm:"size:64;index" json:"task_id"`
-	Provider    string     `gorm:"size:64;index" json:"provider"`
+	ID           string     `gorm:"primaryKey;size:64" json:"id"`
+	TaskID       string     `gorm:"size:64;index" json:"task_id"`
+	VidID        string     `gorm:"size:64;index" json:"vid_id,omitempty"`
+	AccountEmail string     `gorm:"size:128;index" json:"account_email,omitempty"`
+	Provider     string     `gorm:"size:64;index" json:"provider"`
 	Model       string     `gorm:"size:64;index" json:"model"`
 	Prompt      string     `gorm:"type:text;not null" json:"prompt"`
 	ImageURL    string     `gorm:"type:text" json:"image_url,omitempty"`
@@ -91,10 +100,17 @@ type VideoTaskRecord struct {
 	Duration    int        `gorm:"default:5" json:"duration"`
 	Status      string     `gorm:"size:32;index" json:"status"` // PENDING | RUNNING | SUCCEEDED | FAILED
 	Progress    int        `gorm:"default:0" json:"progress"`
-	VideoURL    string     `gorm:"type:text" json:"video_url,omitempty"`
-	ErrorMsg    string     `gorm:"type:text" json:"error_msg,omitempty"`
-	CreatedAt   time.Time  `gorm:"index" json:"created_at"`
-	CompletedAt *time.Time `json:"completed_at,omitempty"`
+	VideoURL          string     `gorm:"type:text" json:"video_url,omitempty"`
+	ErrorMsg          string     `gorm:"type:text" json:"error_msg,omitempty"`
+	UpstreamSessionID string     `gorm:"size:128;index" json:"upstream_session_id,omitempty"`
+	UpstreamMsgID     string     `gorm:"size:128;index" json:"upstream_msg_id,omitempty"`
+	UpstreamSeq       int64      `gorm:"default:0" json:"upstream_seq,omitempty"`
+	UpstreamAssetPath string     `gorm:"type:text" json:"upstream_asset_path,omitempty"`
+	UpstreamAssetURL  string     `gorm:"type:text" json:"upstream_asset_url,omitempty"`
+	ExpectedBytes     int64      `gorm:"default:0" json:"expected_bytes,omitempty"`
+	UpstreamMeta      string     `gorm:"type:text" json:"upstream_meta,omitempty"`
+	CreatedAt         time.Time  `gorm:"index" json:"created_at"`
+	CompletedAt       *time.Time `json:"completed_at,omitempty"`
 }
 
 // AccountRuntimeState 号池节点运行态持久化模型

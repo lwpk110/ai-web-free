@@ -112,8 +112,10 @@ var SupportedVideoModels = []VideoModelInfo{
 
 // VideoTask 视频生成任务模型（内存态与 API 响应）
 type VideoTask struct {
-	TaskID      string    `json:"task_id"`
-	Provider    string    `json:"provider"`
+	TaskID       string    `json:"task_id"`
+	VidID        string    `json:"vid_id,omitempty"`
+	AccountEmail string    `json:"account_email,omitempty"`
+	Provider     string    `json:"provider"`
 	Model       string    `json:"model"`
 	Prompt      string    `json:"prompt"`
 	ImageURL    string    `json:"image_url,omitempty"`
@@ -121,11 +123,18 @@ type VideoTask struct {
 	Duration    int       `json:"duration"`
 	Status      string    `json:"status"` // "PENDING" | "RUNNING" | "SUCCEEDED" | "FAILED"
 	Progress    int       `json:"progress"`
-	VideoURL    string    `json:"video_url,omitempty"`
-	LocalURL    string    `json:"local_url,omitempty"`
-	ErrorMsg    string    `json:"error_msg,omitempty"`
-	CreatedAt   time.Time `json:"created_at"`
-	CompletedAt time.Time `json:"completed_at,omitempty"`
+	VideoURL          string    `json:"video_url,omitempty"`
+	LocalURL          string    `json:"local_url,omitempty"`
+	ErrorMsg          string    `json:"error_msg,omitempty"`
+	UpstreamSessionID string    `json:"upstream_session_id,omitempty"`
+	UpstreamMsgID     string    `json:"upstream_msg_id,omitempty"`
+	UpstreamSeq       int64     `json:"upstream_seq,omitempty"`
+	UpstreamAssetPath string    `json:"upstream_asset_path,omitempty"`
+	UpstreamAssetURL  string    `json:"upstream_asset_url,omitempty"`
+	ExpectedBytes     int64     `json:"expected_bytes,omitempty"`
+	UpstreamMeta      string    `json:"upstream_meta,omitempty"`
+	CreatedAt         time.Time `json:"created_at"`
+	CompletedAt       time.Time `json:"completed_at,omitempty"`
 }
 
 // VideoHandler 处理 /v1/videos/* 视频生成、模型列表与任务轮询
@@ -158,24 +167,48 @@ func NewVideoHandler(reg *provider.Registry, auditLog *audit.RingBuffer) *VideoH
 		if err := gormDB.Order("created_at asc").Limit(200).Find(&records).Error; err == nil {
 			for _, r := range records {
 				task := &VideoTask{
-					TaskID:    r.TaskID,
-					Provider:  r.Provider,
-					Model:     r.Model,
+					TaskID:       r.TaskID,
+					VidID:        r.VidID,
+					AccountEmail: r.AccountEmail,
+					Provider:     r.Provider,
+					Model:        r.Model,
 					Prompt:    r.Prompt,
 					ImageURL:  r.ImageURL,
 					AudioURL:  r.AudioURL,
 					Duration:  r.Duration,
 					Status:    r.Status,
 					Progress:  r.Progress,
-					VideoURL:  r.VideoURL,
-					ErrorMsg:  r.ErrorMsg,
-					CreatedAt: r.CreatedAt,
+					VideoURL:          r.VideoURL,
+					ErrorMsg:          r.ErrorMsg,
+					UpstreamSessionID: r.UpstreamSessionID,
+					UpstreamMsgID:     r.UpstreamMsgID,
+					UpstreamSeq:       r.UpstreamSeq,
+					UpstreamAssetPath: r.UpstreamAssetPath,
+					UpstreamAssetURL:  r.UpstreamAssetURL,
+					ExpectedBytes:     r.ExpectedBytes,
+					UpstreamMeta:      r.UpstreamMeta,
+					CreatedAt:         r.CreatedAt,
 				}
 				if r.CompletedAt != nil {
 					task.CompletedAt = *r.CompletedAt
 				}
 				if r.Status == "SUCCEEDED" && r.VideoURL != "" {
 					task.LocalURL = "/v1/videos/files/" + r.TaskID
+				}
+				// 服务重启前遗留的 RUNNING/PENDING 任务无法继续后台执行，转为 FAILED 以便界面显示并支持「抢救拉取」
+				if r.Status == "RUNNING" || r.Status == "PENDING" {
+					task.Status = "FAILED"
+					task.Progress = 0
+					if task.ErrorMsg == "" {
+						task.ErrorMsg = "服务重启导致任务中断，若 Muse 已出片可点击「抢救拉取」恢复"
+					}
+					_ = gormDB.Model(&db.VideoTaskRecord{}).
+						Where("task_id = ? OR id = ?", r.TaskID, r.TaskID).
+						Updates(map[string]interface{}{
+							"status":    "FAILED",
+							"progress":  0,
+							"error_msg": task.ErrorMsg,
+						}).Error
 				}
 				h.tasks[r.TaskID] = task
 				h.order = append(h.order, r.TaskID)
@@ -513,6 +546,75 @@ func (h *VideoHandler) ClearTasks(c *gin.Context) {
 	})
 }
 
+// RescueTask 管理端抢救拉取 Muse 已出片但本地状态失败的视频产物: POST /admin/api/v1/multimodal/video-tasks/:id/rescue
+func (h *VideoHandler) RescueTask(c *gin.Context) {
+	id := strings.TrimSpace(c.Param("id"))
+	if id == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "missing task id"})
+		return
+	}
+
+	h.mu.RLock()
+	task, exists := h.tasks[id]
+	h.mu.RUnlock()
+	if !exists || task == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
+		return
+	}
+
+	if task.Provider != "meta_muse" && !strings.Contains(strings.ToLower(task.Model), "muse") {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "仅 Meta Muse 渠道任务支持从官方会话抢救拉取"})
+		return
+	}
+
+	muse := h.getMetaMuseProvider()
+	if muse == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Meta Muse Provider 未初始化"})
+		return
+	}
+
+	h.updateTaskStatus(id, "RUNNING", 25, "", "")
+
+	initMeta := provider.MuseUpstreamMeta{
+		VidID:             task.VidID,
+		AccountEmail:      task.AccountEmail,
+		UpstreamSessionID: task.UpstreamSessionID,
+		UpstreamMsgID:     task.UpstreamMsgID,
+		UpstreamSeq:       task.UpstreamSeq,
+		UpstreamAssetPath: task.UpstreamAssetPath,
+		UpstreamAssetURL:  task.UpstreamAssetURL,
+		ExpectedBytes:     task.ExpectedBytes,
+		UpstreamMeta:      task.UpstreamMeta,
+	}
+
+	go func(taskID string, meta provider.MuseUpstreamMeta, prompt string) {
+		ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+		defer cancel()
+
+		videoURL, updatedMeta, err := muse.RescueVideoTaskWithMeta(ctx, taskID, meta, prompt)
+		h.applyMuseUpstreamMeta(taskID, updatedMeta)
+		if err != nil {
+			h.updateTaskStatus(taskID, "FAILED", 0, "", "抢救拉取失败: "+err.Error())
+			return
+		}
+		h.mu.Lock()
+		if cur, ok := h.tasks[taskID]; ok && cur != nil {
+			cur.LocalURL = videoURL
+		}
+		h.mu.Unlock()
+		h.updateTaskStatus(taskID, "SUCCEEDED", 100, videoURL, "")
+	}(task.TaskID, initMeta, task.Prompt)
+
+	h.mu.RLock()
+	snap := *task
+	h.mu.RUnlock()
+
+	c.JSON(http.StatusAccepted, gin.H{
+		"task":    snap,
+		"message": "已启动 Muse 产物抢救拉取，请稍候自动刷新",
+	})
+}
+
 func (h *VideoHandler) executeVideoTask(task *VideoTask) {
 	h.updateTaskStatus(task.TaskID, "RUNNING", 30, "", "")
 
@@ -576,6 +678,22 @@ func (h *VideoHandler) executeVideoTask(task *VideoTask) {
 				h.updateTaskStatus(task.TaskID, "FAILED", 0, "", fmt.Sprintf("Meta Muse 上游调用失败: %v", err))
 				return
 			}
+			meta := muse.GetTaskFullMeta(reqID)
+			h.applyMuseUpstreamMeta(task.TaskID, meta)
+			if meta.VidID != "" || meta.AccountEmail != "" {
+				if h.auditLog != nil {
+					h.auditLog.Record(audit.Entry{
+						Kind:         "event",
+						Path:         "/v1/videos/generations",
+						Model:        task.Model,
+						AccountID:    task.TaskID,
+						AccountEmail: meta.AccountEmail,
+						Status:       http.StatusOK,
+						DurationMs:   time.Since(task.CreatedAt).Milliseconds(),
+						Note:         fmt.Sprintf("Muse 元数据绑定: vid_id=%s, account=%s, duration=%ds, prompt=%q", meta.VidID, meta.AccountEmail, task.Duration, task.Prompt),
+					})
+				}
+			}
 			if reqID != "" && !strings.HasPrefix(reqID, "mock-") {
 				ticker := time.NewTicker(2 * time.Second)
 				defer ticker.Stop()
@@ -583,10 +701,12 @@ func (h *VideoHandler) executeVideoTask(task *VideoTask) {
 				for {
 					select {
 					case <-ctx.Done():
+						h.applyMuseUpstreamMeta(task.TaskID, muse.GetTaskFullMeta(reqID))
 						h.updateTaskStatus(task.TaskID, "FAILED", 0, "", "Muse 视频生成超时 (上游生成耗时超出限制)")
 						return
 					case <-ticker.C:
 						st, vURL, prog, qErr := muse.QueryVideoTask(ctx, reqID)
+						h.applyMuseUpstreamMeta(task.TaskID, muse.GetTaskFullMeta(reqID))
 						if qErr != nil {
 							h.updateTaskStatus(task.TaskID, "FAILED", 0, "", qErr.Error())
 							return
@@ -721,6 +841,62 @@ func matchSemanticDemoVideo(prompt, model string) string {
 	return "https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4"
 }
 
+func (h *VideoHandler) applyMuseUpstreamMeta(taskID string, meta provider.MuseUpstreamMeta) {
+	if meta.VidID == "" && meta.AccountEmail == "" && meta.UpstreamSessionID == "" &&
+		meta.UpstreamMsgID == "" && meta.UpstreamSeq == 0 && meta.UpstreamAssetPath == "" &&
+		meta.UpstreamAssetURL == "" && meta.ExpectedBytes == 0 && meta.UpstreamMeta == "" {
+		return
+	}
+
+	updates := map[string]interface{}{}
+	h.mu.Lock()
+	if cur, ok := h.tasks[taskID]; ok && cur != nil {
+		if meta.VidID != "" {
+			cur.VidID = meta.VidID
+			updates["vid_id"] = meta.VidID
+		}
+		if meta.AccountEmail != "" {
+			cur.AccountEmail = meta.AccountEmail
+			updates["account_email"] = meta.AccountEmail
+		}
+		if meta.UpstreamSessionID != "" {
+			cur.UpstreamSessionID = meta.UpstreamSessionID
+			updates["upstream_session_id"] = meta.UpstreamSessionID
+		}
+		if meta.UpstreamMsgID != "" {
+			cur.UpstreamMsgID = meta.UpstreamMsgID
+			updates["upstream_msg_id"] = meta.UpstreamMsgID
+		}
+		if meta.UpstreamSeq > 0 {
+			cur.UpstreamSeq = meta.UpstreamSeq
+			updates["upstream_seq"] = meta.UpstreamSeq
+		}
+		if meta.UpstreamAssetPath != "" {
+			cur.UpstreamAssetPath = meta.UpstreamAssetPath
+			updates["upstream_asset_path"] = meta.UpstreamAssetPath
+		}
+		if meta.UpstreamAssetURL != "" {
+			cur.UpstreamAssetURL = meta.UpstreamAssetURL
+			updates["upstream_asset_url"] = meta.UpstreamAssetURL
+		}
+		if meta.ExpectedBytes > 0 {
+			cur.ExpectedBytes = meta.ExpectedBytes
+			updates["expected_bytes"] = meta.ExpectedBytes
+		}
+		if meta.UpstreamMeta != "" {
+			cur.UpstreamMeta = meta.UpstreamMeta
+			updates["upstream_meta"] = meta.UpstreamMeta
+		}
+	}
+	h.mu.Unlock()
+
+	if len(updates) > 0 {
+		if gormDB := db.GetDB(); gormDB != nil {
+			_ = gormDB.Model(&db.VideoTaskRecord{}).Where("task_id = ? OR id = ?", taskID, taskID).Updates(updates).Error
+		}
+	}
+}
+
 func (h *VideoHandler) updateTaskStatus(taskID, status string, progress int, videoURL, errorMsg string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -767,16 +943,20 @@ func (h *VideoHandler) updateTaskStatus(taskID, status string, progress int, vid
 		if status == "FAILED" {
 			stCode = http.StatusInternalServerError
 		}
+		acctEmail := task.AccountEmail
+		if acctEmail == "" {
+			acctEmail = task.Provider
+		}
 		h.auditLog.Record(audit.Entry{
 			Kind:         "event",
 			Path:         "/v1/videos/generations",
 			Model:        task.Model,
 			AccountID:    task.TaskID,
-			AccountEmail: task.Provider,
+			AccountEmail: acctEmail,
 			Status:       stCode,
 			DurationMs:   time.Since(task.CreatedAt).Milliseconds(),
 			Error:        errorMsg,
-			Note:         fmt.Sprintf("视频出片状态变更: status=%s, url=%s", status, task.VideoURL),
+			Note:         fmt.Sprintf("视频元数据结果: status=%s, vid_id=%s, account=%s, provider=%s, duration=%ds, seq=%d, msg_id=%s, bytes=%d, asset=%q, url=%s, prompt=%q", status, task.VidID, task.AccountEmail, task.Provider, task.Duration, task.UpstreamSeq, task.UpstreamMsgID, task.ExpectedBytes, task.UpstreamAssetPath, task.VideoURL, task.Prompt),
 		})
 	}
 }
@@ -952,4 +1132,80 @@ func (h *VideoHandler) StreamVideoFile(c *gin.Context) {
 	}
 
 	c.Redirect(http.StatusFound, "https://vjs.zencdn.net/v/oceans.mp4")
+}
+
+// RegisterImportedVideo 将通过 Chat 爬虫/外链抓取并本地缓存的视频片段写入系统视频库（兼供视频工坊与短剧工坊复用）。
+func (h *VideoHandler) RegisterImportedVideo(taskID, title, sourceURL string) *VideoTask {
+	cleanID := strings.TrimSpace(taskID)
+	if cleanID == "" {
+		cleanID = "crawl-vid-" + uuid.NewString()[:8]
+	}
+	now := time.Now().UTC()
+	task := &VideoTask{
+		TaskID:      cleanID,
+		VidID:       cleanID,
+		Provider:    "crawler",
+		Model:       "crawled-ref",
+		Prompt:      strings.TrimSpace(title),
+		Duration:    5,
+		Status:      "SUCCEEDED",
+		Progress:    100,
+		VideoURL:    strings.TrimSpace(sourceURL),
+		LocalURL:    "/v1/videos/files/" + cleanID,
+		CreatedAt:   now,
+		CompletedAt: now,
+	}
+
+	h.mu.Lock()
+	if _, exists := h.tasks[cleanID]; !exists {
+		h.order = append(h.order, cleanID)
+	}
+	h.tasks[cleanID] = task
+	h.mu.Unlock()
+
+	if gormDB := db.GetDB(); gormDB != nil {
+		completedAt := now
+		rec := db.VideoTaskRecord{
+			ID:          cleanID,
+			TaskID:      cleanID,
+			VidID:       cleanID,
+			Provider:    task.Provider,
+			Model:       task.Model,
+			Prompt:      task.Prompt,
+			Duration:    task.Duration,
+			Status:      "SUCCEEDED",
+			Progress:    100,
+			VideoURL:    task.VideoURL,
+			CreatedAt:   now,
+			CompletedAt: &completedAt,
+		}
+		_ = gormDB.Save(&rec).Error
+	}
+	return task
+}
+
+// ListTasksSnapshot 线程安全地按时间倒序返回系统中的视频任务/缓存视频列表。
+func (h *VideoHandler) ListTasksSnapshot(query string, limit int) []*VideoTask {
+	if limit <= 0 {
+		limit = 30
+	}
+	q := strings.ToLower(strings.TrimSpace(query))
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	out := make([]*VideoTask, 0, limit)
+	for i := len(h.order) - 1; i >= 0; i-- {
+		t, ok := h.tasks[h.order[i]]
+		if !ok || t == nil {
+			continue
+		}
+		if q != "" && !strings.Contains(strings.ToLower(t.Prompt+" "+t.Model+" "+t.Provider), q) {
+			continue
+		}
+		out = append(out, t)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
 }

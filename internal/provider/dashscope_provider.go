@@ -13,6 +13,10 @@ import (
 	"time"
 
 	"ai-web-free/internal/accounts"
+
+	fhttp "github.com/bogdanfinn/fhttp"
+	"github.com/bogdanfinn/websocket"
+	"github.com/google/uuid"
 )
 
 var (
@@ -486,58 +490,352 @@ func (p *DashScopeProvider) VoiceCloning(ctx context.Context, audioURL, prefix s
 	return res.Output.VoiceID, nil
 }
 
-// SynthesizeSpeech 使用 CosyVoice 或定制音色合成语音
+// GetDashScopeVoices 返回阿里云百炼 CosyVoice 官方精选音色列表。
+func GetDashScopeVoices(available bool, statusReason string) []VoiceDescriptor {
+	presets := []struct {
+		id     string
+		name   string
+		gender string
+		locale string
+		sample string
+	}{
+		{"longanyang", "百炼龙安洋 (V3 阳光男声 · CosyVoice3)", "male", "zh-CN", "你好，我是阿里云百炼龙安洋，支持流畅自然的情绪表达与多场景配音。"},
+		{"longanhuan_v3", "百炼龙安欢 (V3 元气女声 · 多方言)", "female", "zh-CN", "嗨！我是龙安欢，支持多种生动语气与方言切换，让配音更有感染力。"},
+		{"longxiaochun", "百炼龙小春 (知性女声 · CosyVoice)", "female", "zh-CN", "你好，我是阿里云百炼龙小春，适合高质量女声旁白与解说。"},
+		{"longxiaoxia", "百炼龙小夏 (温柔女声 · CosyVoice)", "female", "zh-CN", "微风拂过窗边，我是龙小夏，为你读一段温柔的对白。"},
+		{"longlaotie", "百炼龙老铁 (幽默男声 · 东北特色)", "male", "zh-CN", "老铁没毛病，这段解说交给我龙老铁包你满意！"},
+		{"longshu", "百炼龙书 (儒雅评书 · 男声)", "male", "zh-CN", "话说天下大势，且听我龙书为你细细道来。"},
+		{"longshuo", "百炼龙硕 (阳光男声 · CosyVoice)", "male", "zh-CN", "大家好，我是龙硕，支持短剧配音与多情感对话。"},
+	}
+	out := make([]VoiceDescriptor, 0, len(presets))
+	for _, item := range presets {
+		out = append(out, VoiceDescriptor{
+			ID:           item.id,
+			Name:         item.name,
+			Provider:     "dashscope",
+			Category:     "百炼精品",
+			Gender:       item.gender,
+			Locale:       item.locale,
+			SampleText:   item.sample,
+			Tags:         []string{"阿里云百炼", "CosyVoice", "声音复刻"},
+			Available:    available,
+			StatusReason: statusReason,
+		})
+	}
+	return out
+}
+
+// IsDashScopeVoice 判断音色 ID 是否属于百炼 CosyVoice 音色或定制复刻音色。
+func IsDashScopeVoice(voice string) bool {
+	lower := strings.ToLower(strings.TrimSpace(voice))
+	return strings.HasPrefix(lower, "dashscope:") ||
+		strings.HasPrefix(lower, "long") ||
+		strings.HasPrefix(lower, "cosyvoice-")
+}
+
+func resolveDashScopeTTSModel(voice string) string {
+	lower := strings.ToLower(strings.TrimSpace(voice))
+	switch {
+	case strings.Contains(lower, "cosyvoice-v2"), strings.HasSuffix(lower, "_v2"):
+		return "cosyvoice-v2"
+	case strings.Contains(lower, "cosyvoice-v1"):
+		return "cosyvoice-v1"
+	case strings.Contains(lower, "cosyvoice-v3"),
+		strings.HasSuffix(lower, "_v3"),
+		strings.HasPrefix(lower, "longanyang"),
+		strings.HasPrefix(lower, "longanhuan"),
+		strings.HasPrefix(lower, "longhuhu"),
+		strings.HasPrefix(lower, "longpaopao"),
+		strings.HasPrefix(lower, "longjielidou"),
+		strings.HasPrefix(lower, "designed_"),
+		strings.HasPrefix(lower, "custom_"):
+		return "cosyvoice-v3-flash"
+	default:
+		return "cosyvoice-v1"
+	}
+}
+
+func resolveDashScopeWSEndpoint(baseURL string) (string, bool) {
+	lower := strings.ToLower(strings.TrimSpace(baseURL))
+	switch {
+	case strings.HasPrefix(lower, "ws://"), strings.HasPrefix(lower, "wss://"):
+		return strings.TrimSpace(baseURL), true
+	case strings.Contains(lower, "dashscope-intl.aliyuncs.com"):
+		return "wss://dashscope-intl.aliyuncs.com/api-ws/v1/inference", true
+	case strings.Contains(lower, "dashscope.aliyuncs.com"):
+		return "wss://dashscope.aliyuncs.com/api-ws/v1/inference", true
+	default:
+		return "", false
+	}
+}
+
+// SynthesizeSpeech 使用 CosyVoice 或定制音色合成语音（默认语速 1.0）。
 func (p *DashScopeProvider) SynthesizeSpeech(ctx context.Context, text, voice string) ([]byte, error) {
+	return p.SynthesizeSpeechWithRate(ctx, text, voice, 1.0)
+}
+
+// SynthesizeSpeechWithRate 使用百炼 CosyVoice（WebSocket 实时流或 REST 兜底）合成 MP3 音频并支持语速控制。
+func (p *DashScopeProvider) SynthesizeSpeechWithRate(ctx context.Context, text, voice string, rate float64) ([]byte, error) {
 	k, keyIdx, err := p.nextKey()
 	if err != nil {
 		return nil, err
 	}
 
+	voice = strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(voice, "dashscope:"), "DashScope:"))
 	if voice == "" {
-		voice = "longxiaochun"
+		voice = "longanyang"
+	}
+	if rate <= 0 {
+		rate = 1.0
+	} else if rate < 0.5 {
+		rate = 0.5
+	} else if rate > 2.0 {
+		rate = 2.0
 	}
 
+	model := resolveDashScopeTTSModel(voice)
+	if wsURL, useWS := resolveDashScopeWSEndpoint(p.baseURL); useWS {
+		audioBytes, wsErr := p.synthesizeSpeechWS(ctx, wsURL, k, model, text, voice, rate)
+		if wsErr == nil && len(audioBytes) > 0 {
+			p.reportStatus(keyIdx, true, false)
+			return audioBytes, nil
+		}
+		// 若 WebSocket 握手被代理阻断，回退尝试 HTTP REST（非官方 custom endpoint 则直接走 REST）
+		if !strings.HasPrefix(strings.ToLower(p.baseURL), "http") {
+			p.reportStatus(keyIdx, false, isDashScopeQuotaError(wsErr))
+			return nil, wsErr
+		}
+		if httpAudio, httpErr := p.synthesizeSpeechHTTP(ctx, k, model, text, voice, rate); httpErr == nil && len(httpAudio) > 0 {
+			p.reportStatus(keyIdx, true, false)
+			return httpAudio, nil
+		}
+		p.reportStatus(keyIdx, false, isDashScopeQuotaError(wsErr))
+		return nil, wsErr
+	}
+
+	audioBytes, httpErr := p.synthesizeSpeechHTTP(ctx, k, model, text, voice, rate)
+	if httpErr != nil {
+		p.reportStatus(keyIdx, false, isDashScopeQuotaError(httpErr))
+		return nil, httpErr
+	}
+	p.reportStatus(keyIdx, true, false)
+	return audioBytes, nil
+}
+
+func isDashScopeQuotaError(err error) bool {
+	if err == nil {
+		return false
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "arrears") ||
+		strings.Contains(lower, "quota") ||
+		strings.Contains(lower, "exhausted") ||
+		strings.Contains(lower, "insufficient")
+}
+
+func (p *DashScopeProvider) synthesizeSpeechWS(ctx context.Context, wsURL string, k *dashScopeKey, model, text, voice string, rate float64) ([]byte, error) {
+	dialer := websocket.Dialer{
+		HandshakeTimeout: 10 * time.Second,
+		Proxy:            fhttp.ProxyFromEnvironment,
+	}
+	header := fhttp.Header{}
+	header.Set("Authorization", "Bearer "+k.Key)
+	if k.WorkspaceID != "" {
+		header.Set("X-DashScope-WorkSpace", k.WorkspaceID)
+	}
+
+	conn, resp, err := dialer.DialContext(ctx, wsURL, header)
+	if err != nil {
+		status := 0
+		if resp != nil {
+			status = resp.StatusCode
+		}
+		return nil, fmt.Errorf("dashscope ws connect failed (status=%d): %w", status, err)
+	}
+	defer conn.Close()
+	stopCancel := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stopCancel()
+
+	taskID := uuid.New().String()
+	runTask := map[string]interface{}{
+		"header": map[string]interface{}{
+			"action":    "run-task",
+			"task_id":   taskID,
+			"streaming": "duplex",
+		},
+		"payload": map[string]interface{}{
+			"task_group": "audio",
+			"task":       "tts",
+			"function":   "SpeechSynthesizer",
+			"model":      model,
+			"input":      map[string]interface{}{},
+			"parameters": map[string]interface{}{
+				"text_type":   "PlainText",
+				"voice":       voice,
+				"format":      "mp3",
+				"sample_rate": 22050,
+				"volume":      50,
+				"rate":        rate,
+				"pitch":       1.0,
+			},
+		},
+	}
+	if err := conn.WriteJSON(runTask); err != nil {
+		return nil, fmt.Errorf("dashscope ws run-task failed: %w", err)
+	}
+
+	var audioBuf bytes.Buffer
+	sentContinue := false
+	for {
+		msgType, msg, err := conn.ReadMessage()
+		if err != nil {
+			return nil, fmt.Errorf("dashscope ws read failed: %w", err)
+		}
+		if msgType == websocket.BinaryMessage {
+			audioBuf.Write(msg)
+			continue
+		}
+		var ev struct {
+			Header struct {
+				Event        string `json:"event"`
+				ErrorCode    string `json:"error_code"`
+				ErrorMessage string `json:"error_message"`
+			} `json:"header"`
+		}
+		if err := json.Unmarshal(msg, &ev); err != nil {
+			continue
+		}
+		switch ev.Header.Event {
+		case "task-started":
+			if !sentContinue {
+				sentContinue = true
+				continueMsg := map[string]interface{}{
+					"header": map[string]interface{}{
+						"action":    "continue-task",
+						"task_id":   taskID,
+						"streaming": "duplex",
+					},
+					"payload": map[string]interface{}{
+						"input": map[string]interface{}{
+							"text": text,
+						},
+					},
+				}
+				if err := conn.WriteJSON(continueMsg); err != nil {
+					return nil, fmt.Errorf("dashscope ws continue-task failed: %w", err)
+				}
+				finishMsg := map[string]interface{}{
+					"header": map[string]interface{}{
+						"action":    "finish-task",
+						"task_id":   taskID,
+						"streaming": "duplex",
+					},
+					"payload": map[string]interface{}{},
+				}
+				if err := conn.WriteJSON(finishMsg); err != nil {
+					return nil, fmt.Errorf("dashscope ws finish-task failed: %w", err)
+				}
+			}
+		case "task-finished":
+			if audioBuf.Len() == 0 {
+				return nil, errors.New("dashscope ws finished without audio output")
+			}
+			return audioBuf.Bytes(), nil
+		case "task-failed":
+			return nil, fmt.Errorf("dashscope ws task failed (%s): %s", ev.Header.ErrorCode, ev.Header.ErrorMessage)
+		}
+	}
+}
+
+func (p *DashScopeProvider) synthesizeSpeechHTTP(ctx context.Context, k *dashScopeKey, model, text, voice string, rate float64) ([]byte, error) {
 	reqBody := map[string]interface{}{
-		"model": "cosyvoice-v3-flash",
+		"model": model,
 		"input": map[string]interface{}{
-			"text":  text,
-			"voice": voice,
+			"text":   text,
+			"voice":  voice,
+			"format": "mp3",
+			"rate":   rate,
 		},
 		"parameters": map[string]interface{}{
 			"format": "mp3",
+			"rate":   rate,
 		},
 	}
-	bodyBytes, _ := json.Marshal(reqBody)
+	bodyBytes, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, err
+	}
 
-	reqURL := p.baseURL + "/services/audio/tts/SpeechSynthesizer"
+	reqURL := strings.TrimRight(p.baseURL, "/") + "/services/audio/tts/SpeechSynthesizer"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return nil, err
 	}
-
 	httpReq.Header.Set("Authorization", "Bearer "+k.Key)
 	httpReq.Header.Set("Content-Type", "application/json")
+	if k.WorkspaceID != "" {
+		httpReq.Header.Set("X-DashScope-WorkSpace", k.WorkspaceID)
+	}
 
 	resp, err := p.client.Do(httpReq)
 	if err != nil {
-		p.reportStatus(keyIdx, false, false)
 		return nil, err
 	}
 	defer resp.Body.Close()
 
-	audioBytes, err := io.ReadAll(resp.Body)
+	respBytes, err := io.ReadAll(io.LimitReader(resp.Body, 25*1024*1024))
 	if err != nil {
-		p.reportStatus(keyIdx, false, false)
 		return nil, err
 	}
-
 	if resp.StatusCode != http.StatusOK {
-		p.reportStatus(keyIdx, false, false)
-		return nil, fmt.Errorf("dashscope speech synthesis error (status %d): %s", resp.StatusCode, string(audioBytes))
+		return nil, fmt.Errorf("dashscope speech synthesis error (status %d): %s", resp.StatusCode, strings.TrimSpace(string(respBytes)))
 	}
 
-	p.reportStatus(keyIdx, true, false)
-	return audioBytes, nil
+	ctype := strings.ToLower(resp.Header.Get("Content-Type"))
+	trimmed := bytes.TrimSpace(respBytes)
+	if strings.Contains(ctype, "application/json") || (len(trimmed) > 0 && trimmed[0] == '{') {
+		var parsed struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+			Output  struct {
+				Audio struct {
+					URL string `json:"url"`
+				} `json:"audio"`
+			} `json:"output"`
+		}
+		if err := json.Unmarshal(trimmed, &parsed); err != nil {
+			return nil, fmt.Errorf("dashscope json parse error: %w", err)
+		}
+		audioURL := strings.TrimSpace(parsed.Output.Audio.URL)
+		if audioURL == "" {
+			if parsed.Message != "" {
+				return nil, fmt.Errorf("dashscope speech error (%s): %s", parsed.Code, parsed.Message)
+			}
+			return nil, errors.New("dashscope response missing output.audio.url")
+		}
+		dlReq, err := http.NewRequestWithContext(ctx, http.MethodGet, audioURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		dlResp, err := p.client.Do(dlReq)
+		if err != nil {
+			return nil, err
+		}
+		defer dlResp.Body.Close()
+		audioData, err := io.ReadAll(io.LimitReader(dlResp.Body, 25*1024*1024))
+		if err != nil {
+			return nil, err
+		}
+		if dlResp.StatusCode != http.StatusOK || len(audioData) == 0 {
+			return nil, fmt.Errorf("dashscope download audio failed (status %d)", dlResp.StatusCode)
+		}
+		return audioData, nil
+	}
+
+	if len(respBytes) == 0 {
+		return nil, errors.New("dashscope returned empty audio body")
+	}
+	return respBytes, nil
 }
 
 // SubmitVideoTask 提交阿里云百炼通义万相异步视频生成任务（支持文生视频与首帧图生视频）

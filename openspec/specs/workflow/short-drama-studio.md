@@ -37,7 +37,10 @@
 
 ### 2.2 纯 Go Edge-TTS 引擎规格
 
-- **协议实现**：纯 Go 实现微软 Edge 浏览器大声朗读 WebSocket 协议（`wss://speech.platform.bing.com/consumer/speech/synthesize/readaheadwork/v1`），支持直接流式接收或缓冲为完整音频响应。
+- **协议实现**：
+  - **微软 Edge-TTS（主免费通道）**：纯 Go 实现 `readaloud/edge/v1` WebSocket 协议（`Sec-MS-GEC` v2 签名 + `MUID` Cookie + 51+ 实时音色目录同步），支持长文本智能分句并缓冲输出完整 MP3。
+  - **本地自托管 OpenAI 兼容 TTS（零外网长期推荐）**：支持配置 `LOCAL_TTS_BASE_URL` 接入本地 Docker Kokoro-FastAPI（`docker compose --profile local-tts up -d`）或 OpenedAI-Speech，实现无公网风控、音色固定一致的本地配音合成。
+  - **本地音色与样音缓存**：通过 `StorageEngine` 将 `voices/catalog.json` 与 `voice_samples/*.mp3` 缓存在本地，支持 `POST /v1/audio/voices/pull-local` 批量拉取与 `GET /v1/audio/voices/:id/preview` 秒开试听。
 - **输出格式**：支持 `mp3`（默认 `audio/mpeg`）、`aac`（`audio/aac`）、`wav`、`opus`。
 - **短剧主力音色表**：
   - `zh-CN-XiaoxiaoNeural`（晓晓）：短剧大女主、温柔知性、旁白解说首选。
@@ -230,6 +233,8 @@
    - 支持开关「断点检查点模式」（在角色定妆或分镜首帧完成时自动暂停等待创作者微调，确认后续跑下游），任意单节点支持局部重生成与 A/B 多版本平行分支对比。
 3. **跨镜头视觉与声线连贯性保障**：
    - 使用 `/v1/images/generations` 生成角色正面定妆图与场景参考图，并入库 `/admin/api/v1/gallery`。
+   - 画廊作品统一记录用途分类（角色设定、场景设定、分镜首帧、参考素材、通用生图）、来源、短剧工程、角色/镜头及可编辑标签；作品集支持按分类、来源、工程筛选，并可按提示词、工程、角色和标签搜索。
+   - 短剧画布生成的角色定妆图、场景锚点和分镜首帧登记为 `drama_canvas` 来源，关联工程及角色/镜头信息；作品详情可调整分类与标签，标签变更写回服务端图库。
    - 分镜首帧优先经 `/v1/images/edits` 传入「角色定妆图 + 场景锚点图（及前序镜头衔接参考）」生成高度一致的分镜关键帧；无参考编辑渠道时自动降级为外貌圣经 + 风格锁 Prompt 注入。
    - 视频阶段将分镜首帧与真实配音分别传入 `muse-talk`（对白口型同步）或 `jimeng-video-2.0` / `THUDM/CogVideoX-5b` / `muse-video` / `wan-video-v1`（I2V 图生视频）。
 4. **全平台能力节点与跨工坊联动**：
@@ -242,3 +247,5 @@
    - 新增 GORM `DramaProjectRecord` 表与 `/admin/api/v1/drama/*` 接口持久化多工程与画布拓扑 `graph_json`，刷新页面可恢复视频任务轮询。
    - 后端 `StorageEngine` 与 `/v1/videos/files/:id` 提供图片/视频同源代理与本地落盘缓存（支持本地 `/storage/images/...` 参考图直接解码传递与 CORS 安全输出）。
    - 前端成片终端节点支持多轨音画同步连播、纯前端 `Canvas + AudioContext + MediaRecorder` 合成单个完整连续视频文件，以及打包真实 `.mp4` / `.mp3` / `.png` / `.srt` / `draft_content.json` 的 ZIP 下载包。
+7. **短剧全套音色池、纯云端密钥即配与 Chat 爬虫资产联动**：
+   - `BUILTIN_VOICE_OPTIONS` 与 `GET /v1/audio/voices` 覆盖霸总、大女主、战神、甜宠千金、反派、悬疑旁白、方言喜剧、粤语港风、台偶与出海多语种音色；通过 `#/chat` (`/voice` / `/crawl`) 抓取并缓存/克隆的 `custom_*` 系统音色、角色立绘与视频片段同步出现在角色检视器与全平台导入抽屉中，可直接点击顶栏「配置云端 API Key」激活 `SILICONFLOW_API_KEY` / `DASHSCOPE_API_KEY` / `JIMENG` / `META_COOKIE`（纯云端，无本地 GPU/模型部署依赖）。

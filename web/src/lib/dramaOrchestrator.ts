@@ -7,6 +7,7 @@ import {
   streamChatCompletion,
   submitVideo,
   synthesizeSpeech,
+  saveServerGalleryWork,
   transcribeAudio,
   voiceClone,
   voiceDesign,
@@ -83,6 +84,17 @@ function pickVideoModel(script: ScriptNodeData, caps: DramaCapabilities | null, 
 async function persistGeneratedImage(
   result: { data: Array<{ url?: string; b64_json?: string }> },
   categoryIdHint: string,
+  metadata: {
+    prompt: string;
+    model: string;
+    size: string;
+    category: "character_portrait" | "scene_anchor" | "storyboard_frame";
+    projectId: string;
+    projectTitle: string;
+    roleName?: string;
+    shotIndex?: number;
+    tags: string[];
+  },
 ): Promise<string> {
   const first = result.data?.[0];
   if (!first) {
@@ -92,17 +104,40 @@ async function persistGeneratedImage(
   if (!raw) {
     throw new Error("未返回有效图片 URL 或 Base64 数据");
   }
-  if (raw.startsWith("/storage/")) return raw;
-  try {
-    const cached = await cacheDramaMedia({
-      ...(raw.startsWith("data:") ? { data_url: raw } : { url: raw }),
-      category: "images",
-      id: categoryIdHint,
-    });
-    return cached.local_url || raw;
-  } catch {
-    return raw;
+  let localUrl = raw;
+  if (!raw.startsWith("/storage/")) {
+    try {
+      const cached = await cacheDramaMedia({
+        ...(raw.startsWith("data:") ? { data_url: raw } : { url: raw }),
+        category: "images",
+        id: categoryIdHint,
+      });
+      localUrl = cached.local_url || raw;
+    } catch {
+      localUrl = raw;
+    }
   }
+  try {
+    await saveServerGalleryWork({
+      id: categoryIdHint,
+      prompt: metadata.prompt,
+      model: metadata.model,
+      size: metadata.size,
+      quality: "standard",
+      mode: "generations",
+      url: localUrl,
+      category: metadata.category,
+      source: "drama_canvas",
+      project_id: metadata.projectId,
+      project_title: metadata.projectTitle,
+      role_name: metadata.roleName,
+      shot_index: metadata.shotIndex,
+      tags: metadata.tags,
+    });
+  } catch {
+    // Gallery indexing is best effort; a saved canvas image remains usable.
+  }
+  return localUrl;
 }
 
 async function blobToDataUrl(blob: Blob): Promise<string> {
@@ -318,7 +353,16 @@ export async function generateCharacterPortrait(charNodeId: string): Promise<voi
       quality: "standard",
       n: 1,
     });
-    const localUrl = await persistGeneratedImage(res, `char_${node.data.charId}_${Date.now()}`);
+    const localUrl = await persistGeneratedImage(res, `char_${node.data.charId}_${Date.now()}`, {
+      prompt,
+      model,
+      size: "1024x1024",
+      category: "character_portrait",
+      projectId: store.projectId,
+      projectTitle: script.title,
+      roleName: node.data.name,
+      tags: ["短剧画布", "角色设定", node.data.role].filter(Boolean),
+    });
     store.updateNodeData<CharacterNodeData>(charNodeId, {
       portraitUrl: localUrl,
       portraitPrompt: prompt,
@@ -354,7 +398,17 @@ export async function generateSceneAnchor(sceneNodeId: string): Promise<void> {
       quality: "standard",
       n: 1,
     });
-    const localUrl = await persistGeneratedImage(res, `scene_${node.data.sceneId}_${Date.now()}`);
+    const size = aspectToImageSize(script.aspectRatio);
+    const localUrl = await persistGeneratedImage(res, `scene_${node.data.sceneId}_${Date.now()}`, {
+      prompt,
+      model,
+      size,
+      category: "scene_anchor",
+      projectId: store.projectId,
+      projectTitle: script.title,
+      roleName: node.data.name,
+      tags: ["短剧画布", "场景设定"],
+    });
     store.updateNodeData<SceneNodeData>(sceneNodeId, {
       imageUrl: localUrl,
       status: "ready",
@@ -467,6 +521,7 @@ export async function generateShotKeyframeNode(shotNodeId: string, versionId?: s
   const caps = await ensureCapabilities();
   const size = aspectToImageSize(script.aspectRatio);
   const { charNodes, sceneNodes, prevShot } = collectIncomingContext(shotNode);
+  const primarySpeaker = charNodes.find((c) => c.data.charId === shotNode.data.speakerId) || charNodes[0];
 
   store.updateShotBranch(shotNodeId, branch.id, { keyframeStatus: "running", error: undefined });
 
@@ -514,7 +569,17 @@ export async function generateShotKeyframeNode(shotNodeId: string, versionId?: s
             size,
             files,
           });
-          localUrl = await persistGeneratedImage(editRes, `shot_kf_${shotNode.data.shotId}_${branch.id}_${Date.now()}`);
+          localUrl = await persistGeneratedImage(editRes, `shot_kf_${shotNode.data.shotId}_${branch.id}_${Date.now()}`, {
+            prompt: compositePrompt,
+            model: "gpt-image-1 (refs-lock)",
+            size,
+            category: "storyboard_frame",
+            projectId: store.projectId,
+            projectTitle: script.title,
+            roleName: primarySpeaker?.data.name,
+            shotIndex: shotNode.data.index,
+            tags: ["短剧画布", "分镜首帧", `第${shotNode.data.index}镜`],
+          });
           usedModel = "gpt-image-1 (refs-lock)";
         } catch {
           // 降级为文生图强一致性提示词注入
@@ -530,7 +595,17 @@ export async function generateShotKeyframeNode(shotNodeId: string, versionId?: s
         quality: "standard",
         n: 1,
       });
-      localUrl = await persistGeneratedImage(genRes, `shot_kf_${shotNode.data.shotId}_${branch.id}_${Date.now()}`);
+      localUrl = await persistGeneratedImage(genRes, `shot_kf_${shotNode.data.shotId}_${branch.id}_${Date.now()}`, {
+        prompt: compositePrompt,
+        model: usedModel,
+        size,
+        category: "storyboard_frame",
+        projectId: store.projectId,
+        projectTitle: script.title,
+        roleName: primarySpeaker?.data.name,
+        shotIndex: shotNode.data.index,
+        tags: ["短剧画布", "分镜首帧", `第${shotNode.data.index}镜`],
+      });
     }
 
     useDramaCanvasStore.getState().updateShotBranch(shotNodeId, branch.id, {
@@ -595,6 +670,13 @@ export async function pollShotVideoTaskUntilDone(
       });
     });
   }
+
+  useDramaCanvasStore.getState().updateShotBranch(shotNodeId, versionId, {
+    videoStatus: "ken_burns",
+    renderMode: "ken_burns",
+    progress: 100,
+    statusNote: "视频任务轮询超时，已降级为 Ken Burns 动效",
+  });
 }
 
 export async function generateShotVideoNode(shotNodeId: string, versionId?: string, signal?: AbortSignal): Promise<void> {
@@ -609,7 +691,7 @@ export async function generateShotVideoNode(shotNodeId: string, versionId?: stri
     : getActiveShotBranch(shotNode.data);
 
   // 确保首帧图片与音频存在
-  if (!branch.imageUrl) {
+  if (branch.keyframeStatus !== "ready" || !branch.imageUrl) {
     await generateShotKeyframeNode(shotNodeId, branch.id);
   }
   const latestNode = useDramaCanvasStore.getState().nodes.find((n) => n.id === shotNodeId && n.type === "shot") as
@@ -617,7 +699,7 @@ export async function generateShotVideoNode(shotNodeId: string, versionId?: stri
     | undefined;
   const latestBranch = latestNode?.data.versions.find((v) => v.id === branch.id) || branch;
 
-  if (!latestBranch.audioUrl && shotNode.data.dialogue.trim()) {
+  if ((latestBranch.audioStatus !== "ready" || !latestBranch.audioUrl) && shotNode.data.dialogue.trim()) {
     await generateShotAudioNode(shotNodeId, branch.id, signal);
   }
 
@@ -650,6 +732,10 @@ export async function generateShotVideoNode(shotNodeId: string, versionId?: stri
   }
 
   let videoPrompt = `${shotNode.data.cameraMove}, ${shotNode.data.sceneAction}, ${script.stylePreset}`;
+  const promptController = new AbortController();
+  const abortPrompt = () => promptController.abort();
+  signal?.addEventListener("abort", abortPrompt, { once: true });
+  const promptTimeout = window.setTimeout(() => promptController.abort(), 20_000);
   try {
     const expanded = await expandVideoPrompt({
       prompt: `${shotNode.data.sceneAction}；运镜：${shotNode.data.cameraMove}`,
@@ -658,13 +744,17 @@ export async function generateShotVideoNode(shotNodeId: string, versionId?: stri
       model: videoModel,
       duration: Math.max(4, Math.min(10, Math.round(shotNode.data.estimatedDuration || 5))),
       has_image: Boolean(finalBranch.imageUrl),
-    });
+    }, promptController.signal);
     if (expanded.prompt_en || expanded.prompt_zh) {
       videoPrompt = expanded.prompt_en || expanded.prompt_zh;
       useDramaCanvasStore.getState().updateNodeData<ShotNodeData>(shotNodeId, { polishedVideoPrompt: videoPrompt });
     }
   } catch {
+    if (signal?.aborted) throw new Error("一键制片流程已中止");
     /* keep base prompt */
+  } finally {
+    window.clearTimeout(promptTimeout);
+    signal?.removeEventListener("abort", abortPrompt);
   }
 
   try {
@@ -762,9 +852,24 @@ export async function resumeInflightDramaTasks(signal?: AbortSignal): Promise<vo
   for (const node of nodes) {
     if (node.type !== "shot") continue;
     for (const ver of node.data.versions) {
-      if (ver.videoStatus === "running" && ver.videoTaskId) {
-        tasks.push(pollShotVideoTaskUntilDone(node.id, ver.id, ver.videoTaskId, signal).catch(() => {}));
+      if (ver.videoStatus !== "running") continue;
+      if (!ver.videoTaskId) {
+        useDramaCanvasStore.getState().updateShotBranch(node.id, ver.id, {
+          videoStatus: "idle",
+          progress: 0,
+          error: undefined,
+          statusNote: "上次运行未提交视频任务，可重试",
+        });
+        continue;
       }
+      tasks.push(
+        pollShotVideoTaskUntilDone(node.id, ver.id, ver.videoTaskId, signal).catch((err) => {
+          useDramaCanvasStore.getState().updateShotBranch(node.id, ver.id, {
+            videoStatus: "error",
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }),
+      );
     }
   }
   if (tasks.length > 0) {
@@ -789,6 +894,11 @@ export async function runAutoDramaPipeline(options?: {
       if (options?.breakScript) {
         store.setPipelineState("running", "正在调用 AI 导演大模型拆解剧本、角色与分镜...");
         await runScriptBreakdownToCanvas(signal);
+      } else {
+        const scriptNode = useDramaCanvasStore.getState().nodes.find((n) => n.type === "script");
+        if (scriptNode?.type === "script" && scriptNode.data.status === "error") {
+          store.updateNodeData<ScriptNodeData>(scriptNode.id, { status: "ready", error: undefined });
+        }
       }
 
       const nodesNow = useDramaCanvasStore.getState().nodes;
@@ -827,10 +937,10 @@ export async function runAutoDramaPipeline(options?: {
         const branch = getActiveShotBranch(shot.data);
         store.setPipelineState("running", `正在生成第 ${shot.data.index}/${shots.length} 镜关键帧与精确对白配音...`);
         const tasks: Promise<void>[] = [];
-        if (!branch.imageUrl) {
+        if (branch.keyframeStatus !== "ready" || !branch.imageUrl) {
           tasks.push(generateShotKeyframeNode(shot.id, branch.id));
         }
-        if (!branch.audioUrl && shot.data.dialogue.trim()) {
+        if ((branch.audioStatus !== "ready" || !branch.audioUrl) && shot.data.dialogue.trim()) {
           tasks.push(generateShotAudioNode(shot.id, branch.id, signal));
         }
         if (tasks.length > 0) {

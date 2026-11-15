@@ -17,13 +17,13 @@ type JianYingProvider struct {
 	stats     accounts.PoolStats
 }
 
-// NewJianYingProvider 创建剪映 TTS 插件实例
 func NewJianYingProvider(proxyPool *proxy.Pool) *JianYingProvider {
 	return &JianYingProvider{
 		proxyPool: proxyPool,
 		stats: accounts.PoolStats{
 			Total:       1,
-			Active:      1,
+			Active:      0,
+			Disabled:    1,
 			NoAuthCount: 1,
 		},
 	}
@@ -43,11 +43,11 @@ func (p *JianYingProvider) Descriptor() ProviderDescriptor {
 
 	return ProviderDescriptor{
 		ID:                    "jianying",
-		Name:                  "JianYing TTS (剪映语音)",
+		Name:                  "JianYing TTS (剪映语音 · 已退役)",
 		Vendor:                "ByteDance",
-		Status:                "enabled",
+		Status:                "disabled",
 		Version:               "15.0.0",
-		Description:           "剪映 200+ 热门爆款音色免密逆向合成引擎（支持影视解说小帅/小美、猴哥、方言、长文本智能分句流式拼接）",
+		Description:           "剪映旧免密接口（api-normal-c-lq.zijieapi.com 已下线返回 NXDOMAIN），已停止默认调度；请改用微软 Edge-TTS 或本地 Kokoro TTS",
 		SupportedAccountTypes: []string{"noauth", "anonymous"},
 		CredentialFormats:     []string{"none"},
 		Capabilities: []string{
@@ -73,9 +73,9 @@ func (p *JianYingProvider) ListAccounts(typeFilter, statusFilter, search string)
 			ID:           "jianying-anonymous-default",
 			Email:        "jianying-tts@anonymous.local",
 			Type:         "noauth",
-			Status:       "active",
+			Status:       "disabled",
 			PlanType:     "permanent_free",
-			TokenPreview: "anonymous-token-free",
+			TokenPreview: "anonymous-token-retired",
 		},
 	}
 }

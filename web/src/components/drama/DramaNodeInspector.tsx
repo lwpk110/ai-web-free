@@ -230,10 +230,21 @@ export const DramaNodeInspector: React.FC<DramaNodeInspectorProps> = ({
   if (selectedNode.type === "character") {
     const d = selectedNode.data;
     const mergedVoiceList = [
+      ...voices
+        .filter((v) => v.provider === "custom")
+        .map((v) => ({
+          id: v.id,
+          name: `⭐ ${v.name} (系统克隆库${v.available === false ? " · 需云端Key复刻" : ""})`,
+          engine: "edge-tts" as CharacterNodeData["voiceEngine"],
+        })),
       ...BUILTIN_VOICE_OPTIONS,
       ...voices
-        .filter((v) => !BUILTIN_VOICE_OPTIONS.some((b) => b.id === v.id))
-        .map((v) => ({ id: v.id, name: `${v.name} (${v.provider})`, engine: (v.provider as CharacterNodeData["voiceEngine"]) || "edge-tts" })),
+        .filter((v) => v.provider !== "custom" && !BUILTIN_VOICE_OPTIONS.some((b) => b.id === v.id))
+        .map((v) => ({
+          id: v.id,
+          name: `${v.name} (${v.provider === "siliconflow" ? "硅基CosyVoice2" : v.provider === "dashscope" ? "百炼CosyVoice" : v.provider})`,
+          engine: (v.provider as CharacterNodeData["voiceEngine"]) || "edge-tts",
+        })),
     ];
 
     return (
