@@ -52,6 +52,7 @@ web/node_modules/
 .agents/hooks/.state/
 !/docs/
 /docs/*
+!/docs/*.md
 !/docs/adr/
 !/docs/adr/**
 __pycache__/

@@ -15,3 +15,4 @@
 | ADR-0007 | 当前项目使用了很多临时数据库，应该更改为持久化数据库，比如 图片工坊里我的作品，换浏览器后就没有了 | Accepted | 2026-11-14 | [ADR-0007-20261114-当前项目使用了很多临时数据库-应该更改为持久化数据库-比如-图片工坊里我.md](./ADR-0007-20261114-当前项目使用了很多临时数据库-应该更改为持久化数据库-比如-图片工坊里我.md) |
 | ADR-0008 | chat 现在比较简单 | Accepted | 2026-11-14 | [ADR-0008-20261114-chat-现在比较简单.md](./ADR-0008-20261114-chat-现在比较简单.md) |
 | ADR-0009 | 详细整理和设计这些免费额度api 需求 | Accepted | 2026-11-14 | [ADR-0009-20261114-详细整理和设计这些免费额度api-需求.md](./ADR-0009-20261114-详细整理和设计这些免费额度api-需求.md) |
+| ADR-0010 | Meta Muse Web 逆向工程、多模态视频生成与抗串号架构 | Accepted | 2026-11-15 | [ADR-0010-20261115-meta-muse-web-reverse-proxy-and-anti-collision-architecture.md](./ADR-0010-20261115-meta-muse-web-reverse-proxy-and-anti-collision-architecture.md) |
