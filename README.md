@@ -101,24 +101,60 @@ AI Web Free 将 ChatGPT Web 后端能力转换为类 OpenAI API，支持聊天�
    python3 -m unittest discover -s scripts -p "test_*.py" -v
    ```
 
-### Docker 部署
+### 生产部署（单二进制 / Docker）与两级缓存灾备
+
+> 📖 详尽生产部署指南、Systemd 服务守护配置与多机器迁移手册请参阅：[docs/deployment-guide.md](docs/deployment-guide.md)
+
+#### 1. 纯静态单二进制部署（生产推荐）
+
+本项目前端（React/TypeScript UI）与系统 Prompt 完全内嵌打包在单一 Go 二进制内，**目标服务器不需要安装 Node.js、npm 或 Nginx**：
+
+```bash
+# 1. 开发机编译 Linux 64 位纯静态单二进制
+cd web && npm run build && cd ..
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o ai-web-free .
+
+# 2. 上传 ai-web-free 与 .env 至服务器运行 (默认端口 18080)
+chmod +x ai-web-free
+./ai-web-free
+```
+
+#### 2. 七牛云两级缓存与跨机灾备恢复
+
+系统支持**本地磁盘（一级毫秒级缓存）+ 七牛云对象存储（二级持久仓）**两级分层缓存引擎：
+- **生成资源**：自动写入本地 `data/` 并异步备份至七牛云。
+- **用户访问**：优先读本地；新服务器缺失的文件在浏览时**自动从七牛云拉取并回填**保存在本地。
+- **跨机一键恢复**：
+  ```bash
+  # 二进制直接恢复 SQLite 数据库与环境凭据
+  ./ai-web-free restore
+
+  # 源码开发机快捷方式
+  make restore          # 等价于 make sync-pull
+  make backup           # 等价于 make sync-push，增量备份数据库与多媒体
+  ```
+- **冷启动全自动恢复**：新服务器部署时若本地没有数据库，只需配置七牛云凭据，首次启动 `./ai-web-free` 即可自动拉取最新数据库快照！
+
+#### 3. Docker 部署
 
 ```bash
 docker build -t ai-web-free:latest .
 docker run -d \
   --name ai-web-free \
   -p 18080:18080 \
+  -v $(pwd)/.env:/app/.env:ro \
+  -v $(pwd)/data:/app/data \
   -v $(pwd)/access_tokens.txt:/access_tokens.txt:ro \
   ai-web-free:latest
 ```
 
 > 准备 `access_tokens.txt` 到当前目录（一行一个 access_token），通过 `-v` 挂载进容器。其他文件同理：`-v $(pwd)/free_tokens.txt:/free_tokens.txt:ro`、`-v $(pwd)/proxies.txt:/proxies.txt:ro`。
 
-### Docker Compose 部署
+#### 4. Docker Compose 部署
 
 ```bash
-# 1. 准备好 access_tokens.txt（每行一个 token）
-# 2. docker-compose.yml 已包含 ./access_tokens.txt 的挂载，按需取消注释 free_tokens.txt 或 proxies.txt
+# 1. 准备好 .env 与 access_tokens.txt
+# 2. 启动容器编排
 docker-compose up -d --build
 ```
 
@@ -167,12 +203,23 @@ REFUSAL_RETRIES=3
 
 # 外部 access_token（接受外部传入的 ChatGPT access_token）
 ENABLE_EXTERNAL_TOKEN=true
+
+# 七牛云对象存储与两级缓存（换机热恢复与多媒体持久备份）
+QINIU_ACCESS_KEY=your_qiniu_access_key
+QINIU_SECRET_KEY=your_qiniu_secret_key
+QINIU_BUCKET=ai-web-free-storage
+QINIU_DOMAIN=your_bucket_domain.clouddn.com
+QINIU_REGION=z0
+QINIU_UPLOAD_URL=https://upload.qiniup.com
 ```
 
 说明：
 
 - `SERVER_HOST` / `SERVER_PORT`：服务监听地址和端口。`PORT` 为 `SERVER_PORT` 的 fallback。
 - `Authorization`：服务访问 key。配置后，请求头需携带 `Authorization: Bearer your_authorization`。
+- `QINIU_*`：七牛云对象存储配置。配置后自动开启**两级分层缓存引擎**，支持多媒体双写备份、无感按需回填及 SQLite 数据库冷启动自动恢复。
+- `DATABASE_URL`：SQLite/MySQL/PostgreSQL 连接串。默认 `data/ai-web-free.db`。
+- `STORAGE_DIR`：本地一级缓存多媒体目录。默认 `data/storage`。
 - `FREE_ACCOUNTS`：是否自动生成免费 UUID 账号，默认关闭。
 - `FREE_ACCOUNTS_NUM`：自动生成免费 UUID 账号数量，默认 1024。
 - `TLS_CERT` / `TLS_KEY`：同时配置时启用 HTTPS。

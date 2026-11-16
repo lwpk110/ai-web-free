@@ -47,6 +47,41 @@ CGO_ENABLED=0 go build -o ai-web-free .
 # SERVER_PORT=19080 ./ai-web-free
 ```
 
+### Production Deployment & Tiered Storage Disaster Recovery
+
+> 📖 For comprehensive production deployment, systemd service configuration, and disaster recovery guide, see: [docs/deployment-guide.md](docs/deployment-guide.md)
+
+#### 1. Pure Static Single-Binary Deployment (Recommended)
+
+The frontend React/TypeScript UI and system prompt are embedded directly into a single Go binary (`//go:embed`). **Target servers do not require Node.js, npm, or Nginx**:
+
+```bash
+# 1. Build Linux 64-bit pure static binary
+cd web && npm run build && cd ..
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o ai-web-free .
+
+# 2. Upload ai-web-free and .env to server and run (default port 18080)
+chmod +x ai-web-free
+./ai-web-free
+```
+
+#### 2. Qiniu Cloud Tiered Storage & Cross-Machine Disaster Recovery
+
+The service provides a **Local Disk (Tier-1 Cache) + Qiniu Kodo (Tier-2 Cloud Storage)** architecture:
+- **Generated Assets**: Saved to `./data/` instantly and asynchronously backed up to Qiniu Cloud.
+- **Client Access**: Read-through caching: missing historical assets are automatically fetched from Qiniu and cached locally on demand.
+- **Backup & Restore**:
+  ```bash
+  # Standalone binary subcommands
+  ./ai-web-free restore     # Restore SQLite DB and .env from Qiniu Cloud
+  ./ai-web-free backup      # Sync and backup SQLite DB and media to Qiniu Cloud
+
+  # Source code shortcuts
+  make restore              # Equivalent to make sync-pull
+  make backup               # Equivalent to make sync-push
+  ```
+- **Automatic Cold-Start Recovery**: When deploying to a fresh server with no local SQLite database, configuring Qiniu credentials will automatically restore the latest database snapshot upon first startup!
+
 ### Docker
 
 ```bash
@@ -54,6 +89,8 @@ docker build -t ai-web-free:latest .
 docker run -d \
   --name ai-web-free \
   -p 18080:18080 \
+  -v $(pwd)/.env:/app/.env:ro \
+  -v $(pwd)/data:/app/data \
   -v $(pwd)/access_tokens.txt:/access_tokens.txt:ro \
   ai-web-free:latest
 ```
@@ -63,8 +100,8 @@ docker run -d \
 ### Docker Compose
 
 ```bash
-# 1. Prepare access_tokens.txt (one token per line)
-# 2. docker-compose.yml already includes a ./access_tokens.txt mount; uncomment free_tokens.txt or proxies.txt as needed
+# 1. Prepare .env and access_tokens.txt
+# 2. Launch with docker-compose
 docker-compose up -d --build
 ```
 
@@ -113,12 +150,23 @@ REFUSAL_RETRIES=3
 
 # External access token (accept ChatGPT access_token from request header)
 ENABLE_EXTERNAL_TOKEN=true
+
+# Qiniu Cloud Object Storage & Tiered Cache (disaster recovery & media backup)
+QINIU_ACCESS_KEY=your_qiniu_access_key
+QINIU_SECRET_KEY=your_qiniu_secret_key
+QINIU_BUCKET=ai-web-free-storage
+QINIU_DOMAIN=your_bucket_domain.clouddn.com
+QINIU_REGION=z0
+QINIU_UPLOAD_URL=https://upload.qiniup.com
 ```
 
 Details:
 
 - `SERVER_HOST` / `SERVER_PORT`: Service listening address and port. `PORT` is a fallback for `SERVER_PORT`.
 - `Authorization`: Service access key. When configured, requests must include `Authorization: Bearer your_authorization` in the header.
+- `QINIU_*`: Qiniu Cloud object storage credentials. Automatically activates the **Tiered Storage Engine**, media async backup, read-through caching, and cold-start SQLite auto-restore.
+- `DATABASE_URL`: SQLite/MySQL/PostgreSQL connection string. Defaults to `data/ai-web-free.db`.
+- `STORAGE_DIR`: Local tier-1 storage directory. Defaults to `data/storage`.
 - `FREE_ACCOUNTS`: Whether to automatically generate free UUID accounts; disabled by default.
 - `FREE_ACCOUNTS_NUM`: Number of automatically generated free UUID accounts; default is 1024.
 - `TLS_CERT` / `TLS_KEY`: When both are configured, HTTPS is enabled.
