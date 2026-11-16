@@ -1,6 +1,7 @@
 package bootstrap
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -45,7 +46,7 @@ func Init() (*App, error) {
 	opsLog.InstallStdLogHook()
 
 	gin.SetMode(gin.ReleaseMode)
-	_ = godotenv.Load(".env")
+	loadDotEnv()
 	browserfp.Init()
 
 	cfg := config.Load()
@@ -300,13 +301,25 @@ func Init() (*App, error) {
 			false,
 		)
 	}
-	// 初始化持久化数据库与文件存储引擎（严格零 CGO，优雅降级）
+	// 初始化持久化数据库与文件存储引擎（严格零 CGO，优雅降级；支持七牛云两级分层缓存）
 	database, _ := db.InitDB(cfg.DatabaseURL)
 	var storageEngine storage.StorageEngine
 	var storageErr error
-	storageEngine, storageErr = storage.NewLocalStorageEngine(cfg.StorageDir)
+	localStorage, storageErr := storage.NewLocalStorageEngine(cfg.StorageDir)
 	if storageErr != nil {
 		storageEngine = storage.NewMemoryStorageEngine()
+	} else if cfg.QiniuAccessKey != "" && cfg.QiniuSecretKey != "" && cfg.QiniuBucket != "" {
+		qiniuClient := storage.NewQiniuClient(storage.QiniuConfig{
+			AccessKey: cfg.QiniuAccessKey,
+			SecretKey: cfg.QiniuSecretKey,
+			Bucket:    cfg.QiniuBucket,
+			Domain:    cfg.QiniuDomain,
+			Region:    cfg.QiniuRegion,
+			UploadURL: cfg.QiniuUploadURL,
+		})
+		storageEngine = storage.NewTieredStorageEngine(localStorage, qiniuClient)
+	} else {
+		storageEngine = localStorage
 	}
 
 	voiceStore := provider.NewVoiceCatalogStore(storageEngine)
@@ -552,4 +565,21 @@ func loadProxyList() []string {
 	}
 
 	return proxies
+}
+
+func loadDotEnv() {
+	content, err := os.ReadFile(".env")
+	if err != nil {
+		return
+	}
+	content = bytes.TrimPrefix(content, []byte("\xef\xbb\xbf"))
+	envMap, err := godotenv.Unmarshal(string(content))
+	if err != nil {
+		return
+	}
+	for k, v := range envMap {
+		if os.Getenv(k) == "" {
+			_ = os.Setenv(k, v)
+		}
+	}
 }

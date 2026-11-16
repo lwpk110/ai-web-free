@@ -104,6 +104,15 @@ else
 	rm -f $(BIN) *.log
 endif
 
+sync-push: ## 备份 SQLite 数据库、.env 与多媒体缓存全量同步到七牛云
+	@$(BASH_EXE) -c 'go run scripts/sync_qiniu.go push'
+
+sync-pull: ## 跨机一键恢复：从七牛云拉取最新 SQLite 数据库、.env 与多媒体快照
+	@$(BASH_EXE) -c 'go run scripts/sync_qiniu.go pull'
+
+backup: sync-push ## 别名：备份到云存储
+restore: sync-pull ## 别名：从云存储恢复
+
 docker-build: ## 构建 Docker 镜像
 	docker build -t $(IMAGE) .
 

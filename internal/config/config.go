@@ -46,6 +46,12 @@ type Config struct {
 	LocalTTSAPIKey          string
 	LocalTTSModel           string
 	RenderServiceURL        string
+	QiniuAccessKey          string
+	QiniuSecretKey          string
+	QiniuBucket             string
+	QiniuDomain             string
+	QiniuRegion             string
+	QiniuUploadURL          string
 }
 
 func Load() Config {
@@ -90,6 +96,12 @@ func Load() Config {
 		LocalTTSAPIKey:          getEnvWithFallback("LOCAL_TTS_API_KEY", "CUSTOM_TTS_API_KEY", ""),
 		LocalTTSModel:           getEnvWithFallback("LOCAL_TTS_MODEL", "CUSTOM_TTS_MODEL", "kokoro"),
 		RenderServiceURL:        os.Getenv("RENDER_SERVICE_URL"),
+		QiniuAccessKey:          os.Getenv("QINIU_ACCESS_KEY"),
+		QiniuSecretKey:          os.Getenv("QINIU_SECRET_KEY"),
+		QiniuBucket:             getEnv("QINIU_BUCKET", "ai-web-free-storage"),
+		QiniuDomain:             os.Getenv("QINIU_DOMAIN"),
+		QiniuRegion:             getEnv("QINIU_REGION", "z0"),
+		QiniuUploadURL:          getEnv("QINIU_UPLOAD_URL", "https://upload.qiniup.com"),
 	}
 }
 
