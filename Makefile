@@ -75,7 +75,14 @@ dev: stop ## 本地联调模式：自动停止已有进程，并同时启动 Go 
 		fi; \
 		cleanup() { \
 			kill $$BACKEND_PID 2>/dev/null || true; \
-			taskkill //F //IM $(BIN) 2>/dev/null || true; \
+			if command -v taskkill >/dev/null 2>&1; then \
+				taskkill //F //IM $(BIN) 2>/dev/null || true; \
+				taskkill //F //IM ai-web-free.exe 2>/dev/null || true; \
+			else \
+				kill -9 $$BACKEND_PID 2>/dev/null || true; \
+				pkill -P $$BACKEND_PID 2>/dev/null || true; \
+				pkill -x $(BIN) 2>/dev/null || true; \
+			fi; \
 		}; \
 		trap cleanup EXIT INT TERM; \
 		echo ">> 启动 Go 后端: http://localhost:$(PORT)"; \
@@ -87,13 +94,22 @@ dev: stop ## 本地联调模式：自动停止已有进程，并同时启动 Go 
 
 stop: ## 停止本项目的本地运行进程
 ifeq ($(OS),Windows_NT)
-	@$(BASH_EXE) -c 'taskkill //F //IM $(BIN) 2>/dev/null || taskkill //F //IM ai-web-free.exe 2>/dev/null || true'
-	@echo "已停止本地项目进程"
+	@$(BASH_EXE) -c '\
+		taskkill //F //IM $(BIN) 2>/dev/null || true; \
+		taskkill //F //IM ai-web-free.exe 2>/dev/null || true; \
+		powershell.exe -NoProfile -Command "Get-NetTCPConnection -LocalPort $(PORT),$(WEB_PORT),5174 -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object { Stop-Process -Id \$$_ -Force -ErrorAction SilentlyContinue }" 2>/dev/null || true; \
+		echo "已停止本地项目进程"; \
+	'
 else
 	@pkill -x "$(BIN)" 2>/dev/null || true
-	@pkill -f "[n]ode_modules/.bin/vite" 2>/dev/null || true
-	@pkill -f "[g]o run \." 2>/dev/null || true
-	@sleep 0.5
+	@pkill -f "vite" 2>/dev/null || true
+	@pkill -f "go run \." 2>/dev/null || true
+	@if command -v lsof >/dev/null 2>&1; then \
+		PIDS=$$(lsof -ti :$(PORT) -ti :$(WEB_PORT) -ti :5174 2>/dev/null); \
+		if [ -n "$$PIDS" ]; then echo "$$PIDS" | xargs kill -9 2>/dev/null || true; fi; \
+	elif command -v fuser >/dev/null 2>&1; then \
+		fuser -k $(PORT)/tcp $(WEB_PORT)/tcp 5174/tcp 2>/dev/null || true; \
+	fi
 	@echo "已停止本地项目进程"
 endif
 
@@ -101,7 +117,7 @@ clean: ## 清理编译产物与临时日志
 ifeq ($(OS),Windows_NT)
 	@$(BASH_EXE) -c 'rm -f $(BIN) ai-web-free.exe *.log'
 else
-	rm -f $(BIN) *.log
+	@rm -f $(BIN) ai-web-free *.log
 endif
 
 sync-push: ## 备份 SQLite 数据库、.env 与多媒体缓存全量同步到七牛云
