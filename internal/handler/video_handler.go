@@ -1068,10 +1068,17 @@ func (h *VideoHandler) StreamVideoFile(c *gin.Context) {
 	if !exists {
 		if gormDB := db.GetDB(); gormDB != nil {
 			var rec db.VideoTaskRecord
-			if err := gormDB.Where("task_id = ? OR id = ?", id, id).First(&rec).Error; err == nil {
+			vidQuery := "VID-" + strings.ToUpper(strings.TrimPrefix(id, "muse_"))
+			if err := gormDB.Where("task_id = ? OR id = ? OR vid_id = ? OR video_url LIKE ?", id, id, vidQuery, "%"+id+"%").First(&rec).Error; err == nil {
+				targetURL := rec.VideoURL
+				if targetURL == "" || strings.Contains(targetURL, "/v1/videos/files/"+id) {
+					if rec.UpstreamAssetURL != "" {
+						targetURL = rec.UpstreamAssetURL
+					}
+				}
 				task = &VideoTask{
 					TaskID:   rec.TaskID,
-					VideoURL: rec.VideoURL,
+					VideoURL: targetURL,
 					Status:   rec.Status,
 				}
 				exists = true
@@ -1131,7 +1138,7 @@ func (h *VideoHandler) StreamVideoFile(c *gin.Context) {
 		return
 	}
 
-	c.Redirect(http.StatusFound, "https://vjs.zencdn.net/v/oceans.mp4")
+	c.JSON(http.StatusNotFound, gin.H{"error": "video not found", "id": id})
 }
 
 // RegisterImportedVideo 将通过 Chat 爬虫/外链抓取并本地缓存的视频片段写入系统视频库（兼供视频工坊与短剧工坊复用）。

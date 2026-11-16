@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -98,16 +99,32 @@ func (t *TieredStorageEngine) Read(ctx context.Context, path string) ([]byte, er
 	// 2. 本地未命中（换机或本地缓存已清理），从七牛云按需回填
 	if t.qiniu != nil {
 		normalized := strings.ReplaceAll(strings.TrimSpace(path), "\\", "/")
-		qiniuKey := normalized
-		if !strings.HasPrefix(qiniuKey, "storage/") {
-			qiniuKey = "storage/" + normalized
+		keysToTry := []string{normalized}
+		if !strings.HasPrefix(normalized, "storage/") {
+			keysToTry = append(keysToTry, "storage/"+normalized)
+		} else {
+			keysToTry = append(keysToTry, strings.TrimPrefix(normalized, "storage/"))
 		}
 
-		data, err := t.qiniu.Download(ctx, qiniuKey)
-		if err == nil && len(data) > 0 {
+		var data []byte
+		var err error
+		for _, qKey := range keysToTry {
+			data, err = t.qiniu.Download(ctx, qKey)
+			if err == nil && len(data) > 0 {
+				break
+			}
+		}
+
+		if len(data) > 0 {
 			// 回写到本地磁盘，下次请求直接命中本地 L1！
 			cat, cleanID := splitCategoryAndID(normalized)
 			_, _, _ = t.local.SaveInCategory(ctx, cat, cleanID, data, "")
+			// 兼容 data/videos/ 传统直接文件访问路径
+			if strings.HasPrefix(normalized, "videos/") {
+				directPath := filepath.Join("data", normalized)
+				_ = os.MkdirAll(filepath.Dir(directPath), 0755)
+				_ = os.WriteFile(directPath, data, 0644)
+			}
 			return data, nil
 		}
 	}
@@ -119,8 +136,10 @@ func (t *TieredStorageEngine) Delete(ctx context.Context, path string) error {
 	_ = t.local.Delete(ctx, path)
 	if t.qiniu != nil {
 		normalized := strings.ReplaceAll(strings.TrimSpace(path), "\\", "/")
-		qiniuKey := "storage/" + normalized
-		_ = t.qiniu.Delete(ctx, qiniuKey)
+		_ = t.qiniu.Delete(ctx, normalized)
+		if !strings.HasPrefix(normalized, "storage/") {
+			_ = t.qiniu.Delete(ctx, "storage/"+normalized)
+		}
 	}
 	return nil
 }
@@ -131,8 +150,12 @@ func (t *TieredStorageEngine) Exists(ctx context.Context, path string) bool {
 	}
 	if t.qiniu != nil {
 		normalized := strings.ReplaceAll(strings.TrimSpace(path), "\\", "/")
-		qiniuKey := "storage/" + normalized
-		return t.qiniu.Exists(ctx, qiniuKey)
+		if t.qiniu.Exists(ctx, normalized) {
+			return true
+		}
+		if !strings.HasPrefix(normalized, "storage/") && t.qiniu.Exists(ctx, "storage/"+normalized) {
+			return true
+		}
 	}
 	return false
 }

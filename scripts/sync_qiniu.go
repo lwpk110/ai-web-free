@@ -4,7 +4,6 @@ package main
 
 import (
 	"bytes"
-	"flag"
 	"fmt"
 	"os"
 	"strings"
@@ -33,13 +32,15 @@ func loadDotEnv() {
 }
 
 func main() {
-	allMedia := flag.Bool("all", false, "pull 时是否全量下载所有多媒体文件")
-	flag.Parse()
-
-	args := flag.Args()
 	cmd := "push"
-	if len(args) > 0 {
-		cmd = strings.ToLower(args[0])
+	pullAll := false
+	for _, arg := range os.Args[1:] {
+		low := strings.ToLower(arg)
+		if low == "--all" || low == "-all" || low == "-a" {
+			pullAll = true
+		} else if !strings.HasPrefix(low, "-") {
+			cmd = low
+		}
 	}
 
 	loadDotEnv()
@@ -67,7 +68,7 @@ func main() {
 		}
 	case "pull", "restore":
 		fmt.Printf("🚀 开始从七牛云存储桶 [%s] 恢复数据...\n\n", cfg.QiniuBucket)
-		if err := storage.PullRestore(client, cfg.DatabaseURL, ".env", *allMedia); err != nil {
+		if err := storage.PullRestore(client, cfg.DatabaseURL, ".env", pullAll); err != nil {
 			fmt.Fprintf(os.Stderr, "拉取恢复失败: %v\n", err)
 			os.Exit(1)
 		}
