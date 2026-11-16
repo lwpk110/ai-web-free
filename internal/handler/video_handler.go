@@ -1209,3 +1209,113 @@ func (h *VideoHandler) ListTasksSnapshot(query string, limit int) []*VideoTask {
 	}
 	return out
 }
+
+// ErrNoVideoProvider 表示当前无可用视频算力凭据，需由调用方诚实降级。
+var ErrNoVideoProvider = fmt.Errorf("no_video_provider")
+
+func resolveVideoProviderName(model string) string {
+	lowerModel := strings.ToLower(model)
+	switch {
+	case strings.Contains(lowerModel, "muse") || strings.Contains(lowerModel, "meta"):
+		return "meta_muse"
+	case strings.Contains(lowerModel, "jimeng") || strings.Contains(lowerModel, "dreamina"):
+		return "jimeng"
+	case strings.Contains(lowerModel, "wan") || strings.Contains(lowerModel, "dashscope"):
+		return "dashscope"
+	default:
+		return "siliconflow"
+	}
+}
+
+// SubmitVideoTaskInternal 供短剧 DAG 引擎直接提交异步视频生成任务。
+func (h *VideoHandler) SubmitVideoTaskInternal(req VideoGenerationRequest) (*VideoTask, error) {
+	if strings.TrimSpace(req.Prompt) == "" && strings.TrimSpace(req.ImageURL) == "" {
+		return nil, fmt.Errorf("prompt or image_url is required")
+	}
+	if req.Model == "" {
+		req.Model = "THUDM/CogVideoX-5b"
+	}
+	if req.Duration <= 0 {
+		req.Duration = 5
+	}
+	providerName := resolveVideoProviderName(req.Model)
+	if req.NoMockFallback && !h.hasActiveCredentials(providerName) {
+		return nil, ErrNoVideoProvider
+	}
+
+	taskID := "vtask_" + uuid.New().String()[:12]
+	task := &VideoTask{
+		TaskID:    taskID,
+		Provider:  providerName,
+		Model:     req.Model,
+		Prompt:    req.Prompt,
+		ImageURL:  req.ImageURL,
+		AudioURL:  req.AudioURL,
+		Duration:  req.Duration,
+		Status:    "PENDING",
+		Progress:  10,
+		CreatedAt: time.Now(),
+	}
+
+	h.mu.Lock()
+	if len(h.order) >= 1000 {
+		oldest := h.order[0]
+		h.order = h.order[1:]
+		delete(h.tasks, oldest)
+	}
+	h.tasks[taskID] = task
+	h.order = append(h.order, taskID)
+	h.mu.Unlock()
+
+	if gormDB := db.GetDB(); gormDB != nil {
+		_ = gormDB.Create(&db.VideoTaskRecord{
+			ID:        taskID,
+			TaskID:    taskID,
+			Provider:  providerName,
+			Model:     req.Model,
+			Prompt:    req.Prompt,
+			ImageURL:  req.ImageURL,
+			AudioURL:  req.AudioURL,
+			Duration:  req.Duration,
+			Status:    "PENDING",
+			Progress:  10,
+			CreatedAt: task.CreatedAt,
+		}).Error
+	}
+
+	go h.executeVideoTask(task)
+	snap := *task
+	return &snap, nil
+}
+
+// GetVideoTaskInternal 供短剧 DAG 引擎查询视频任务最新状态（内存优先，兜底查库）。
+func (h *VideoHandler) GetVideoTaskInternal(taskID string) (*VideoTask, bool) {
+	h.mu.RLock()
+	if t, ok := h.tasks[taskID]; ok && t != nil {
+		snap := *t
+		h.mu.RUnlock()
+		return &snap, true
+	}
+	h.mu.RUnlock()
+
+	if gormDB := db.GetDB(); gormDB != nil {
+		var rec db.VideoTaskRecord
+		if err := gormDB.First(&rec, "task_id = ? OR id = ?", taskID, taskID).Error; err == nil {
+			return &VideoTask{
+				TaskID:    rec.TaskID,
+				Provider:  rec.Provider,
+				Model:     rec.Model,
+				Prompt:    rec.Prompt,
+				ImageURL:  rec.ImageURL,
+				AudioURL:  rec.AudioURL,
+				Duration:  rec.Duration,
+				Status:    rec.Status,
+				Progress:  rec.Progress,
+				VideoURL:  rec.VideoURL,
+				ErrorMsg:  rec.ErrorMsg,
+				CreatedAt: rec.CreatedAt,
+			}, true
+		}
+	}
+	return nil, false
+}

@@ -44,7 +44,9 @@ import {
   type PoolStats,
 } from "../api/client";
 import { MediaCrawlerCardWidget } from "../components/MediaCrawlerCardWidget";
+import { useBranchCardState } from "../components/chat/useBranchCardState";
 import { useModelsCatalog } from "./models";
+import { deepSanitizeOpenUIProps } from "./openui-html-sanitizer";
 
 function maskProxyHost(raw?: string): string {
   if (!raw) return "直连";
@@ -110,6 +112,7 @@ export const PoolOverviewCard = defineComponent({
     const [stats, setStats] = useState<PoolStats | null>(null);
     const [probing, setProbing] = useState(false);
     const triggerAction = useTriggerAction();
+    const { isActionLocked, isCommitted, committedSummary } = useBranchCardState();
 
     const loadStats = async () => {
       try {
@@ -159,14 +162,21 @@ export const PoolOverviewCard = defineComponent({
             <button
               type="button"
               className="btn-primary btn-sm"
-              onClick={() =>
+              disabled={isActionLocked}
+              title={
+                isCommitted
+                  ? `该轮交互已推进（${committedSummary || "已提交"}），切换或编辑分支后可重新触发`
+                  : "发起新一轮 AI 深度诊断分析"
+              }
+              onClick={() => {
+                if (isActionLocked) return;
                 triggerAction(
                   `请深入分析 ${providerId} 号池当前各账号状态并给出维护建议`
-                )
-              }
+                );
+              }}
             >
               <Sparkles size={14} />
-              <span>AI 诊断建议</span>
+              <span>{isCommitted ? "已触发后续分析" : "AI 诊断建议"}</span>
             </button>
           </div>
         </div>
@@ -876,31 +886,6 @@ export const PlatformDiagnosisCard = defineComponent({
   },
 });
 
-const baseCard = openuiChatLibrary.components.Card as any;
-const origChildrenOptions =
-  baseCard.props?.shape?.children?._zod?.def?.element?._zod?.def?.options || [];
-
-const ExtendedCard = defineComponent({
-  name: "Card",
-  description: baseCard.description,
-  props: z.object({
-    children: z.array(
-      z.union([
-        ...origChildrenOptions,
-        PoolOverviewCard.ref,
-        AccountDiagnosticTable.ref,
-        ImageStudioCard.ref,
-        PlatformDiagnosisCard.ref,
-      ])
-    ),
-    sources: baseCard.props.shape.sources,
-  }),
-  component: baseCard.component,
-});
-
-/**
- * 基于 @openuidev/react-ui 的 openuiChatLibrary 组合构建 aiWebFreeLibrary
- */
 export const MediaCrawlerCard = defineComponent({
   name: "MediaCrawlerCard",
   description:
@@ -921,12 +906,65 @@ export const MediaCrawlerCard = defineComponent({
   ),
 });
 
+const baseCard = openuiChatLibrary.components.Card as any;
+const origChildrenOptions =
+  baseCard.props?.shape?.children?._zod?.def?.element?._zod?.def?.options || [];
+
+const ExtendedCard = defineComponent({
+  name: "Card",
+  description: baseCard.description,
+  props: z.object({
+    children: z.array(
+      z.union([
+        ...origChildrenOptions,
+        PoolOverviewCard.ref,
+        AccountDiagnosticTable.ref,
+        ImageStudioCard.ref,
+        PlatformDiagnosisCard.ref,
+        MediaCrawlerCard.ref,
+      ])
+    ),
+    sources: baseCard.props.shape.sources,
+  }),
+  component: baseCard.component,
+});
+
+/**
+ * 基于 @openuidev/react-ui 的 openuiChatLibrary 组合构建 aiWebFreeLibrary
+ */
+
+const MARKDOWN_CAPABLE_OPENUI_COMPONENTS = new Set([
+  "TextContent",
+  "MarkDownRenderer",
+  "Callout",
+  "TextCallout",
+]);
+
+function wrapSanitizedOpenUIComponent(orig: any) {
+  const OrigComponent = orig.component;
+  const mode: "markdown" | "plain" = MARKDOWN_CAPABLE_OPENUI_COMPONENTS.has(orig.name)
+    ? "markdown"
+    : "plain";
+
+  return defineComponent({
+    name: orig.name,
+    description: orig.description,
+    props: orig.props,
+    component: (ctx: any) => (
+      <OrigComponent
+        {...ctx}
+        props={deepSanitizeOpenUIProps(ctx.props as Record<string, any>, mode)}
+      />
+    ),
+  });
+}
+
 export const aiWebFreeLibrary = createLibrary({
   root: "Card",
   components: [
-    ...Object.values(openuiChatLibrary.components).filter(
-      (c) => c.name !== "Card"
-    ),
+    ...Object.values(openuiChatLibrary.components)
+      .filter((c) => c.name !== "Card")
+      .map(wrapSanitizedOpenUIComponent),
     ExtendedCard,
     PoolOverviewCard,
     AccountDiagnosticTable,
@@ -959,6 +997,8 @@ export const aiWebFreePromptOptions: PromptOptions = {
     'When the user asks about account pool status, health metrics, or provider overview, include PoolOverviewCard("chatgpt", "ChatGPT 号池实时健康状态") and/or AccountDiagnosticTable("chatgpt") inside Card.',
     'When the user wants to generate or preview an image, include ImageStudioCard(prompt, "gpt-image-2.5-sunburst", "1024x1024", "hd") inside Card.',
     'When the user wants to search, crawl webpages/URLs, download, clone, or reuse voices/audio samples, reference images/portraits, or video clips from the web or system cache library, include MediaCrawlerCard(query, targetUrl, mediaKind, role) inside Card (mediaKind is "auto" | "voice" | "image" | "video").',
+    "NEVER output raw HTML tags (such as <br>, <span>, <div>, <b>, <strong>, <i>, <p>, <details>) inside OpenUI component strings (TextContent, Callout, Table Col) or Markdown. Always use pure Markdown syntax (newlines, **bold**, *italic*, `code`) or native OpenUI components (Tag, Stack, CardHeader).",
+    "NEVER wrap OpenUI Lang inside JSX/XML tags like <CodeBlock language=\"...\">...</CodeBlock> or <openui>...</openui>. Emit OpenUI Lang inside a ```openui fenced block starting with `root = Card([...])`, and use `CodeBlock(language, codeString)` ONLY as a child inside `Card([...])`.",
   ],
   examples: [
     ...(openuiChatPromptOptions.examples || []),
@@ -1020,6 +1060,228 @@ export const aiWebFreeToolProvider: Record<
         "auto",
     }),
 };
+
+export type OpenUIDisclosureTopic =
+  | "ops"
+  | "charts"
+  | "forms"
+  | "layout"
+  | "cards"
+  | "media";
+
+export interface OpenUIDisclosureContext {
+  userText: string;
+  skill?: string;
+  hasAttachments?: boolean;
+  openuiExplicit?: boolean;
+}
+
+const OPS_DISCLOSURE_RE =
+  /(诊断|熔断|封禁|停用|风控|拦截|403|401|429|号池|代理|报错|异常|不可用|失败|续期|卡密|测活|修复|自愈|健康|banned|expired|failover|waf|proxy|pool|health)/i;
+const CHARTS_DISCLOSURE_RE =
+  /(图表|柱状图|折线图|饼图|面积图|雷达图|散点图|漏斗|热力图|走势|趋势|占比|分布|统计|数据分析|指标|仪表盘|看板|可视化|chart|plot|graph|dashboard|metrics|csv|json|excel)/i;
+const FORMS_DISCLOSURE_RE =
+  /(表单|问卷|配置|筛选|录入|输入框|下拉|开关|提交|form|input|select|wizard|config|settings)/i;
+const LAYOUT_DISCLOSURE_RE =
+  /(标签页|选项卡|分步|步骤|手风琴|折叠|矩阵|对比|tabs|steps|accordion|matrix|compare)/i;
+const CARDS_DISCLOSURE_RE =
+  /(卡片|画廊|轮播|实体|时间线|列表|carousel|gallery|timeline|cards|feed)/i;
+const MEDIA_DISCLOSURE_RE =
+  /(生图|画一张|图片|音色|配音|爬虫|素材|克隆|视频|image|voice|crawl|video)/i;
+
+export function detectOpenUIDisclosureTopics(
+  ctx: OpenUIDisclosureContext
+): OpenUIDisclosureTopic[] {
+  const topics = new Set<OpenUIDisclosureTopic>();
+  const text = ctx.userText || "";
+  const skill = ctx.skill || "auto";
+
+  if (skill === "diagnose" || skill === "fix" || OPS_DISCLOSURE_RE.test(text)) {
+    topics.add("ops");
+  }
+  if (ctx.hasAttachments || CHARTS_DISCLOSURE_RE.test(text)) {
+    topics.add("charts");
+  }
+  if (FORMS_DISCLOSURE_RE.test(text)) {
+    topics.add("forms");
+  }
+  if (LAYOUT_DISCLOSURE_RE.test(text) || skill === "openui") {
+    topics.add("layout");
+  }
+  if (CARDS_DISCLOSURE_RE.test(text)) {
+    topics.add("cards");
+  }
+  if (skill === "image" || skill === "media_crawl" || MEDIA_DISCLOSURE_RE.test(text)) {
+    topics.add("media");
+  }
+
+  if (topics.size === 0 && (ctx.openuiExplicit || skill === "openui")) {
+    topics.add("charts");
+    topics.add("layout");
+  }
+
+  return Array.from(topics);
+}
+
+const progressivePromptCache = new Map<string, string>();
+
+const TIER1_CORE_GROUPS = ["Content", "Tables", "Data Display"];
+
+const TOPIC_TO_BUILTIN_GROUPS: Record<OpenUIDisclosureTopic, string[]> = {
+  ops: ["Tables", "Data Display"],
+  charts: ["Tables", "Charts (2D)", "Charts (1D)", "Charts (Scatter)"],
+  forms: ["Forms", "Buttons"],
+  layout: ["Layout", "Sections", "Lists & Follow-ups"],
+  cards: ["Cards", "Lists & Follow-ups"],
+  media: ["Cards"],
+};
+
+const COMPACT_CATALOG_INDEX = [
+  "Tier-1 Catalog Summary (only emit components whose signatures are listed above; for normal prose without UI widgets, plain Markdown is preferred):",
+  "- Content: CardHeader, TextContent, MarkDownRenderer, Callout, TextCallout, Image, ImageBlock, ImageGallery, CodeBlock, Separator",
+  "- Tables & Data: Table, Col, EditableTable, TagBlock, Tag, EntityList",
+  "- Charts (when data/metrics requested): BarChart, LineChart, AreaChart, PieChart, RadarChart, HorizontalBarChart, RadialChart, ScatterChart",
+  "- Interactive Layout & Forms (when forms/tabs/steps requested): Tabs, TabItem, Accordion, Steps, Form, Input, Select, Button",
+  "- AI-Web-Free Live Widgets: PlatformDiagnosisCard, PoolOverviewCard, AccountDiagnosticTable, ImageStudioCard, MediaCrawlerCard",
+].join("\n");
+
+/**
+ * 渐进式披露 OpenUI System Prompt：
+ * 前端 `<Renderer>` 始终全量注册 80+ 组件（零功能阉割），
+ * 仅按当前意图与附件类型动态披露对应分组的完整签名，将 Prompt 从 ~56KB 压缩至 ~6-14KB。
+ */
+export function getProgressiveOpenUISystemPrompt(
+  ctx: OpenUIDisclosureContext
+): string {
+  const topics = detectOpenUIDisclosureTopics(ctx);
+  if (topics.length === 0 && !ctx.openuiExplicit) {
+    return [
+      "You are the AI-Web-Free Copilot. Reply in clear, concise GitHub-flavored Markdown.",
+      "If structured UI cards are genuinely helpful, you may wrap an OpenUI Lang block inside ```openui ... ``` starting with `root = Card([CardHeader(title, subtitle), TextContent(text)])`.",
+      "STRICT RULE: NEVER output raw HTML tags (<br>, <span>, <div>, <b>) or pseudo-XML/JSX tags (<icon .../>, <CodeBlock>...</CodeBlock>). Always use pure Markdown or OpenUI assignment syntax.",
+    ].join("\n");
+  }
+
+  const cacheKey = topics.slice().sort().join(",") || "default";
+  const cached = progressivePromptCache.get(cacheKey);
+  if (cached) return cached;
+
+  const groupNames = new Set<string>(TIER1_CORE_GROUPS);
+  for (const t of topics) {
+    for (const g of TOPIC_TO_BUILTIN_GROUPS[t] || []) {
+      groupNames.add(g);
+    }
+  }
+
+  const builtinGroups = openuiChatComponentGroups.filter((g) =>
+    groupNames.has(g.name)
+  );
+  const componentMap = new Map<string, any>(
+    Object.values(openuiChatLibrary.components).map((c: any) => [c.name, c])
+  );
+
+  const selectedBuiltinNames = new Set<string>();
+  for (const g of builtinGroups) {
+    for (const name of g.components) {
+      if (name !== "Card" && componentMap.has(name)) {
+        selectedBuiltinNames.add(name);
+      }
+    }
+  }
+
+  const customWidgets: any[] = [];
+  if (topics.includes("ops")) {
+    customWidgets.push(
+      PlatformDiagnosisCard,
+      PoolOverviewCard,
+      AccountDiagnosticTable
+    );
+  }
+  if (topics.includes("media")) {
+    customWidgets.push(ImageStudioCard, MediaCrawlerCard);
+  }
+  if (customWidgets.length === 0) {
+    customWidgets.push(PoolOverviewCard, PlatformDiagnosisCard);
+  }
+
+  const selectedComponents = [
+    ...Array.from(selectedBuiltinNames).map((n) => componentMap.get(n)),
+    ...customWidgets,
+  ];
+
+  const scopedRefs = selectedComponents
+    .map((c) => c?.ref)
+    .filter(Boolean);
+
+  const ScopedCard = defineComponent({
+    name: "Card",
+    description: baseCard.description,
+    props: z.object({
+      children:
+        scopedRefs.length >= 2
+          ? z.array(z.union(scopedRefs as [any, any, ...any[]]))
+          : z.array(z.any()),
+      sources: baseCard.props.shape.sources,
+    }),
+    component: () => null,
+  });
+
+  const scopedGroups = [
+    ...builtinGroups,
+    {
+      name: "AI-Web-Free Pool & Studio Widgets",
+      components: customWidgets.map((w) => w.name),
+    },
+  ];
+
+  const scopedLib = createLibrary({
+    root: "Card",
+    components: [...selectedComponents, ScopedCard],
+    componentGroups: scopedGroups,
+  });
+
+  const curatedRules: string[] = [
+    "You may combine brief Markdown explanation outside and an OpenUI Lang UI card inside a ```openui fenced block starting with `root = Card([...])`.",
+    "STRICT SYNTAX: NEVER output raw HTML tags (<br>, <span>, <div>, <b>, <strong>) or pseudo-XML/JSX tags (<icon .../>, <badge>, <CodeBlock>...</CodeBlock>) inside Markdown or OpenUI strings. Use pure Markdown (**bold**, newlines, `code`) or OpenUI assignment syntax.",
+    "NEVER wrap OpenUI Lang inside <CodeBlock> or XML tags — always use ```openui fenced code blocks.",
+    COMPACT_CATALOG_INDEX,
+  ];
+
+  const curatedExamples: string[] = [];
+  if (topics.includes("ops")) {
+    curatedRules.push(
+      'For platform diagnostics or failures, include PlatformDiagnosisCard("全平台异常根因诊断与自愈台", "all") and AccountDiagnosticTable("chatgpt") inside Card.'
+    );
+    curatedExamples.push(`root = Card([header, diag, table])
+header = CardHeader("平台全链路异常诊断", "号池熔断、账号封禁、403 风控与一键自愈")
+diag = PlatformDiagnosisCard("全平台根因诊断与修复台", "all")
+table = AccountDiagnosticTable("chatgpt")`);
+  }
+  if (topics.includes("charts")) {
+    curatedRules.push(
+      "For uploaded CSV/JSON data or metric comparisons, visualize key dimensions with BarChart, LineChart, PieChart, and Table."
+    );
+    curatedExamples.push(`root = Card([header, chart, summary])
+header = CardHeader("数据趋势与分布分析", "关键维度统计")
+chart = BarChart(["Q1", "Q2", "Q3"], [Series("调用量", [120, 180, 240])])
+summary = TextContent("核心结论：Q3 增长显著。")`);
+  }
+  if (topics.includes("media")) {
+    curatedRules.push(
+      'For image generation include ImageStudioCard(prompt, "gpt-image-2.5-sunburst", "1024x1024", "hd"); for web media/voice crawling include MediaCrawlerCard(query, targetUrl, mediaKind, role).'
+    );
+  }
+
+  const prompt = scopedLib.prompt({
+    preamble:
+      "You are the AI-Web-Free Copilot powered by OpenUI Lang. When rendering interactive UI, emit valid OpenUI Lang inside ```openui starting with `root = Card([...])`.",
+    additionalRules: curatedRules,
+    examples: curatedExamples,
+  });
+
+  progressivePromptCache.set(cacheKey, prompt);
+  return prompt;
+}
 
 export function getOpenUISystemPrompt(): string {
   return aiWebFreeLibrary.prompt(aiWebFreePromptOptions);

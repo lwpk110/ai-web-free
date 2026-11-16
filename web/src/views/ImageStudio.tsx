@@ -2406,7 +2406,7 @@ export const ImageStudio: React.FC = () => {
               />
             </div>
 
-            <div className="p-5 flex flex-col justify-between gap-4 border-t md:border-t-0 md:border-l z-border text-xs">
+            <div className="p-5 flex flex-col justify-between gap-4 border-t md:border-t-0 md:border-l z-border text-xs max-h-[86vh] overflow-y-auto">
               <div className="space-y-4">
                 <div className="flex items-start justify-between gap-2 pb-3 border-b z-border">
                   <div>

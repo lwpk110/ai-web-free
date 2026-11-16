@@ -66,6 +66,19 @@ const PlatformDiagnosisCard = defineComponent({
   component: () => null,
 });
 
+const MediaCrawlerCard = defineComponent({
+  name: "MediaCrawlerCard",
+  description:
+    "Searches the existing local system asset library first, then crawls public web pages or media links to preview and cache/clone voices (短剧音色), reference images (参考图), or video clips (视频素材) into the reusable system library.",
+  props: z.object({
+    query: z.string().optional(),
+    targetUrl: z.string().optional(),
+    mediaKind: z.enum(["auto", "voice", "image", "video"]).optional(),
+    role: z.string().optional(),
+  }),
+  component: () => null,
+});
+
 const baseCard = openuiChatLibrary.components.Card;
 const origChildrenOptions =
   baseCard.props.shape.children._zod.def.element._zod.def.options;
@@ -81,6 +94,7 @@ const ExtendedCard = defineComponent({
         AccountDiagnosticTable.ref,
         ImageStudioCard.ref,
         PlatformDiagnosisCard.ref,
+        MediaCrawlerCard.ref,
       ])
     ),
     sources: baseCard.props.shape.sources,
@@ -99,6 +113,7 @@ const aiWebFreeLibrary = createLibrary({
     AccountDiagnosticTable,
     ImageStudioCard,
     PlatformDiagnosisCard,
+    MediaCrawlerCard,
   ],
   componentGroups: [
     ...openuiChatComponentGroups,
@@ -109,6 +124,7 @@ const aiWebFreeLibrary = createLibrary({
         "AccountDiagnosticTable",
         "ImageStudioCard",
         "PlatformDiagnosisCard",
+        "MediaCrawlerCard",
       ],
     },
   ],
@@ -117,12 +133,15 @@ const aiWebFreeLibrary = createLibrary({
 const prompt = aiWebFreeLibrary.prompt({
   ...openuiChatPromptOptions,
   preamble:
-    "You are the AI-Web-Free Generative UI & Operations Copilot powered by Thesys OpenUI Lang. Always respond with valid OpenUI Lang starting with `root = Card([...])`. Combine built-in OpenUI components (CardHeader, TextContent, BarChart, LineChart, PieChart, Table, Tabs, Form, Callout, CodeBlock) and custom AI-Web-Free components (PoolOverviewCard, AccountDiagnosticTable, ImageStudioCard, PlatformDiagnosisCard) to build rich, interactive interfaces.",
+    "You are the AI-Web-Free Generative UI & Operations Copilot powered by Thesys OpenUI Lang. Always respond with valid OpenUI Lang starting with `root = Card([...])`. Combine built-in OpenUI components (CardHeader, TextContent, BarChart, LineChart, PieChart, Table, Tabs, Form, Callout, CodeBlock) and custom AI-Web-Free components (PoolOverviewCard, AccountDiagnosticTable, ImageStudioCard, PlatformDiagnosisCard, MediaCrawlerCard) to build rich, interactive interfaces.",
   additionalRules: [
     ...(openuiChatPromptOptions.additionalRules || []),
     'When the user asks to diagnose platform issues, pool circuit-breakers, banned accounts, 403 WAF blocks, or 401 expiry, include PlatformDiagnosisCard("全平台异常根因诊断与自愈台", "all") inside Card.',
     'When the user asks about account pool status, health metrics, or provider overview, include PoolOverviewCard("chatgpt", "ChatGPT 免费号池实时健康大盘") and/or AccountDiagnosticTable("chatgpt") inside Card.',
     'When the user wants to generate or preview an image, include ImageStudioCard(prompt, "gpt-image-2.5-sunburst", "1024x1024", "hd") inside Card.',
+    'When the user wants to search, crawl webpages/URLs, download, clone, or reuse voices/audio samples, reference images/portraits, or video clips from the web or system cache library, include MediaCrawlerCard(query, targetUrl, mediaKind, role) inside Card (mediaKind is "auto" | "voice" | "image" | "video").',
+    "NEVER output raw HTML tags (such as <br>, <span>, <div>, <b>, <strong>, <i>, <p>, <details>) inside OpenUI component strings (TextContent, Callout, Table Col) or Markdown. Always use pure Markdown syntax (newlines, **bold**, *italic*, `code`) or native OpenUI components (Tag, Stack, CardHeader).",
+    "NEVER wrap OpenUI Lang inside JSX/XML tags like <CodeBlock language=\"...\">...</CodeBlock> or <openui>...</openui>. Emit OpenUI Lang inside a ```openui fenced block starting with `root = Card([...])`, and use `CodeBlock(language, codeString)` ONLY as a child inside `Card([...])`.",
   ],
 });
 

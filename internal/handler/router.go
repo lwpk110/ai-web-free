@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"io/fs"
 	"net/http"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"ai-web-free/internal/audit"
 	"ai-web-free/internal/chatgpt"
 	"ai-web-free/internal/config"
+	"ai-web-free/internal/drama"
 	"ai-web-free/internal/health"
 	"ai-web-free/internal/opslog"
 	"ai-web-free/internal/promptplaza"
@@ -117,7 +119,26 @@ func RegisterRouterWithDeps(deps RouterDeps) *gin.Engine {
 	videoHandler := NewVideoHandler(registry, deps.AuditLog)
 	videoHandler.SetStorageEngine(rt.StorageEngine)
 	dramaHandler := NewDramaHandler(rt.DB, accountPool, registry, rt.StorageEngine)
+	dramaExecutor := NewGatewayDramaExecutor(
+		rt.DB, accountPool, registry, rt.StorageEngine,
+		imageHandler, audioHandler, videoHandler,
+		NewPoolChatExecutor(rt, accountPool, cfg),
+	)
+	dramaEngine := drama.NewEngine(rt.DB, dramaExecutor, dramaExecutor.AvailableImageConcurrency)
+	dramaHandler.SetEngine(dramaEngine)
+	dramaEngine.ResumeInterruptedRuns(context.Background())
 	mediaLibraryHandler := NewMediaLibraryHandler(audioHandler, galleryHandler, videoHandler, rt.StorageEngine)
+	mcpHandler := NewMCPHandler(MCPDeps{
+		Admin:        adminHandler,
+		Drama:        dramaHandler,
+		Gallery:      galleryHandler,
+		Audio:        audioHandler,
+		Video:        videoHandler,
+		MediaLibrary: mediaLibraryHandler,
+		ChatWork:     chatWorkbenchHandler,
+		OpsLog:       opsLogBuf,
+	})
+	rt.MCPRegistry = mcpHandler.Registry()
 
 	// 初始化基础前置参数（DPL、BasicCookies 等）
 	proxyUrl := cfg.ProxyURL
@@ -241,6 +262,7 @@ func RegisterRouterWithDeps(deps RouterDeps) *gin.Engine {
 		adminGroup.PATCH("/chat/conversations/:id", chatWorkbenchHandler.UpdateConversation)
 		adminGroup.DELETE("/chat/conversations/:id", chatWorkbenchHandler.DeleteConversation)
 		adminGroup.POST("/chat/conversations/:id/messages", chatWorkbenchHandler.SaveConversationMessages)
+		adminGroup.POST("/chat/conversations/:id/messages/append", chatWorkbenchHandler.AppendConversationMessage)
 		adminGroup.DELETE("/chat/conversations/:id/messages/:msg_id", chatWorkbenchHandler.DeleteConversationMessage)
 		adminGroup.GET("/chat/conversations/:id/export", chatWorkbenchHandler.ExportConversation)
 		adminGroup.POST("/chat/conversations/import", chatWorkbenchHandler.ImportConversations)
@@ -268,8 +290,22 @@ func RegisterRouterWithDeps(deps RouterDeps) *gin.Engine {
 		adminGroup.POST("/drama/projects", dramaHandler.SaveProject)
 		adminGroup.GET("/drama/projects/:id", dramaHandler.GetProject)
 		adminGroup.PUT("/drama/projects/:id", dramaHandler.SaveProject)
+		adminGroup.PATCH("/drama/projects/:id", dramaHandler.PatchProject)
 		adminGroup.DELETE("/drama/projects/:id", dramaHandler.DeleteProject)
+		adminGroup.POST("/drama/projects/:id/runs", dramaHandler.StartRun)
+		adminGroup.GET("/drama/projects/:id/runs", dramaHandler.ListRuns)
+		adminGroup.GET("/drama/projects/:id/runs/:rid", dramaHandler.GetRun)
+		adminGroup.GET("/drama/projects/:id/runs/:rid/events", dramaHandler.StreamRunEvents)
+		adminGroup.POST("/drama/projects/:id/nodes/:nodeKey/lock", dramaHandler.LockNode)
+		adminGroup.POST("/drama/projects/:id/nodes/:nodeKey/unlock", dramaHandler.UnlockNode)
+		adminGroup.POST("/drama/projects/:id/nodes/:nodeKey/retry", dramaHandler.RetryNode)
+		adminGroup.POST("/drama/mcp", mcpHandler.HandleDramaMCP)
 		adminGroup.POST("/drama/media/cache", dramaHandler.CacheMedia)
+
+		// 统一 MCP 网关与内部 Copilot 工具桥（支持 ?scope=ops|studio|drama|all 与 ?mode=readonly|full）
+		adminGroup.POST("/mcp", mcpHandler.HandleMCP)
+		adminGroup.GET("/mcp/openai-tools", mcpHandler.ListOpenAITools)
+		adminGroup.POST("/mcp/execute", mcpHandler.ExecuteInternalTool)
 
 		// Chat Copilot 网页媒体爬虫与跨工坊系统资产库复用
 		adminGroup.POST("/media/crawl", mediaLibraryHandler.CrawlMedia)

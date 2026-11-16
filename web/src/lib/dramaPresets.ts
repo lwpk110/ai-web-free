@@ -1,9 +1,14 @@
 import type { Edge, Node } from "@xyflow/react";
-import type { DramaRoutingPolicy } from "../api/client";
+import type {
+  DramaLayoutData,
+  DramaNodeStateSchema,
+  DramaProjectSchema,
+  DramaRoutingPolicy,
+} from "../api/client";
 
 export type DramaNodeType = "script" | "character" | "scene" | "shot" | "audioImport" | "composer";
 
-export type NodeTaskStatus = "idle" | "running" | "ready" | "error";
+export type NodeTaskStatus = "idle" | "running" | "ready" | "stale" | "error";
 
 export interface ScriptNodeData extends Record<string, unknown> {
   kind: "script";
@@ -15,6 +20,10 @@ export interface ScriptNodeData extends Record<string, unknown> {
   routingPolicy: DramaRoutingPolicy;
   imageModelOverride?: string;
   videoModelOverride?: string;
+  allowedImageProviders?: string[];
+  allowedVideoProviders?: string[];
+  imageConcurrency?: number;
+  autoFallbackKenBurns?: boolean;
   bgmUrl?: string;
   status: NodeTaskStatus;
   error?: string;
@@ -35,6 +44,7 @@ export interface CharacterNodeData extends Record<string, unknown> {
   speed: number;
   pitch: number;
   status: NodeTaskStatus;
+  locked?: boolean;
   error?: string;
 }
 
@@ -46,6 +56,7 @@ export interface SceneNodeData extends Record<string, unknown> {
   lightingStyle: string;
   imageUrl?: string;
   status: NodeTaskStatus;
+  locked?: boolean;
   error?: string;
 }
 
@@ -61,6 +72,9 @@ export interface ShotVersionBranch {
   audioStatus: NodeTaskStatus;
   keyframeStatus: NodeTaskStatus;
   videoStatus: "idle" | "running" | "ready" | "ken_burns" | "error";
+  keyframeLocked?: boolean;
+  audioLocked?: boolean;
+  keyframeDegraded?: boolean;
   progress: number;
   statusNote?: string;
   error?: string;
@@ -72,6 +86,7 @@ export interface ShotNodeData extends Record<string, unknown> {
   index: number;
   speakerId: string;
   sceneId?: string;
+  continuous?: boolean;
   shotType: "全景" | "中景" | "特写" | "过肩" | string;
   cameraMove: string;
   dialogue: string;
@@ -610,4 +625,384 @@ export function layoutDramaNodesCleanly(nodes: DramaFlowNode[]): DramaFlowNode[]
       position: { x: 1290, y: Math.max(120, Math.round(Math.max(col1Y, col2Y) / 2 - 150)) },
     };
   });
+}
+
+function mapBackendNodeStatus(st?: DramaNodeStateSchema): NodeTaskStatus {
+  if (!st) return "idle";
+  switch (st.status) {
+    case "running":
+      return "running";
+    case "ready":
+    case "degraded":
+      return "ready";
+    case "stale":
+      return "stale";
+    case "failed":
+      return "error";
+    default:
+      return "idle";
+  }
+}
+
+export function flowGraphToLayout(
+  nodes: DramaFlowNode[],
+  flags: { checkpointAfterCast: boolean; checkpointAfterKeyframes: boolean },
+): DramaLayoutData {
+  const positions: Record<string, { x: number; y: number }> = {};
+  nodes.forEach((n) => {
+    positions[n.id] = { x: n.position.x, y: n.position.y };
+  });
+  return {
+    positions,
+    checkpoint_after_cast: flags.checkpointAfterCast,
+    checkpoint_after_keyframes: flags.checkpointAfterKeyframes,
+  };
+}
+
+export function flowGraphToSchemaProject(
+  projectId: string,
+  nodes: DramaFlowNode[],
+  prevProject?: DramaProjectSchema | null,
+): DramaProjectSchema {
+  const scriptNode = nodes.find((n) => n.type === "script") as (DramaFlowNode & { data: ScriptNodeData }) | undefined;
+  const composerNode = nodes.find((n) => n.type === "composer") as (DramaFlowNode & { data: ComposerNodeData }) | undefined;
+  const s = scriptNode?.data;
+
+  const assets: DramaProjectSchema["assets"] = { ...(prevProject?.assets || {}) };
+  const nodeStates: DramaProjectSchema["nodes"] = { ...(prevProject?.nodes || {}) };
+
+  const characters: DramaProjectSchema["characters"] = [];
+  const scenes: DramaProjectSchema["scenes"] = [];
+  const shots: DramaProjectSchema["shots"] = [];
+
+  for (const n of nodes) {
+    if (n.type === "character") {
+      const d = n.data;
+      let portraitId = prevProject?.characters.find((c) => c.id === d.charId)?.portrait || "";
+      if (d.portraitUrl && (!portraitId || assets[portraitId]?.url !== d.portraitUrl)) {
+        portraitId = `asset_portrait_${d.charId}`;
+        assets[portraitId] = { id: portraitId, kind: "image", url: d.portraitUrl, prompt: d.portraitPrompt };
+      }
+      if (!d.portraitUrl) portraitId = "";
+      const key = `image.portrait:${d.charId}`;
+      const existing = nodeStates[key];
+      nodeStates[key] = {
+        status: existing?.status || (d.portraitUrl ? "ready" : "pending"),
+        input_hash: existing?.input_hash || "",
+        output: portraitId || existing?.output,
+        locked: Boolean(d.locked),
+        attempts: existing?.attempts || 0,
+        error: d.error,
+      };
+      characters.push({
+        id: d.charId,
+        name: d.name,
+        role: d.role,
+        avatar_color: d.avatarColor,
+        appearance_bible: d.appearanceBible,
+        portrait_prompt: d.portraitPrompt,
+        voice: {
+          engine: d.voiceEngine,
+          id: d.voiceId,
+          name: d.voiceName,
+          speed: d.speed,
+          pitch: d.pitch,
+        },
+        portrait: portraitId || undefined,
+      });
+    } else if (n.type === "scene") {
+      const d = n.data;
+      let anchorId = prevProject?.scenes.find((sc) => sc.id === d.sceneId)?.anchor || "";
+      if (d.imageUrl && (!anchorId || assets[anchorId]?.url !== d.imageUrl)) {
+        anchorId = `asset_scene_${d.sceneId}`;
+        assets[anchorId] = { id: anchorId, kind: "image", url: d.imageUrl };
+      }
+      if (!d.imageUrl) anchorId = "";
+      const key = `image.scene:${d.sceneId}`;
+      const existing = nodeStates[key];
+      nodeStates[key] = {
+        status: existing?.status || (d.imageUrl ? "ready" : "pending"),
+        input_hash: existing?.input_hash || "",
+        output: anchorId || existing?.output,
+        locked: Boolean(d.locked),
+        attempts: existing?.attempts || 0,
+        error: d.error,
+      };
+      scenes.push({
+        id: d.sceneId,
+        name: d.name,
+        environment: d.environmentPrompt,
+        lighting: d.lightingStyle,
+        anchor: anchorId || undefined,
+      });
+    } else if (n.type === "shot") {
+      const d = n.data;
+      const br = getActiveShotBranch(d);
+      const prevShot = prevProject?.shots.find((sh) => sh.id === d.shotId);
+      let kfId = prevShot?.keyframe || "";
+      if (br.imageUrl && (!kfId || assets[kfId]?.url !== br.imageUrl)) {
+        kfId = `asset_kf_${d.shotId}`;
+        assets[kfId] = { id: kfId, kind: "image", url: br.imageUrl, model: br.modelUsed };
+      }
+      if (!br.imageUrl) kfId = "";
+
+      let audId = prevShot?.audio || "";
+      if (br.audioUrl && (!audId || assets[audId]?.url !== br.audioUrl)) {
+        audId = `asset_aud_${d.shotId}`;
+        assets[audId] = { id: audId, kind: "audio", url: br.audioUrl };
+      }
+      if (!br.audioUrl) audId = "";
+
+      const kfKey = `image.keyframe:${d.shotId}`;
+      const prevKf = nodeStates[kfKey];
+      nodeStates[kfKey] = {
+        status: prevKf?.status || (br.imageUrl ? "ready" : "pending"),
+        input_hash: prevKf?.input_hash || "",
+        output: kfId || prevKf?.output,
+        locked: Boolean(br.keyframeLocked),
+        attempts: prevKf?.attempts || 0,
+      };
+
+      const ttsKey = `tts.line:${d.shotId}`;
+      const prevTts = nodeStates[ttsKey];
+      nodeStates[ttsKey] = {
+        status: prevTts?.status || (br.audioUrl ? "ready" : "pending"),
+        input_hash: prevTts?.input_hash || "",
+        output: audId || prevTts?.output,
+        locked: Boolean(br.audioLocked),
+        attempts: prevTts?.attempts || 0,
+      };
+
+      shots.push({
+        id: d.shotId,
+        index: d.index,
+        scene_id: d.sceneId,
+        speaker_id: d.speakerId,
+        continuous: d.continuous,
+        shot_type: d.shotType,
+        camera_move: d.cameraMove,
+        action: d.sceneAction,
+        dialogue: d.dialogue,
+        continuity_notes: d.continuityNotes,
+        polished_video_prompt: d.polishedVideoPrompt,
+        transition: d.transition,
+        duration_sec: d.estimatedDuration,
+        actual_audio_duration: d.actualAudioDuration,
+        keyframe: kfId || undefined,
+        audio: audId || undefined,
+      });
+    }
+  }
+
+  return {
+    id: projectId,
+    schema_version: 1,
+    revision: prevProject?.revision || 1,
+    script: {
+      title: s?.title || "未命名短剧",
+      outline: s?.outline || "",
+      genre: s?.genre || "都市悬疑",
+      aspect_ratio: s?.aspectRatio || "9:16",
+      style: s?.stylePreset || "电影感写实",
+      routing_policy: s?.routingPolicy || "free_first",
+      image_model_override: s?.imageModelOverride,
+      video_model_override: s?.videoModelOverride,
+      allowed_image_providers: s?.allowedImageProviders,
+      allowed_video_providers: s?.allowedVideoProviders,
+      image_concurrency: s?.imageConcurrency,
+      auto_fallback_ken_burns: s?.autoFallbackKenBurns,
+      bgm_url: s?.bgmUrl || composerNode?.data.bgmUrl,
+      bgm_volume: composerNode?.data.bgmVolume,
+      show_subtitles: composerNode?.data.showSubtitles,
+    },
+    analysis: prevProject?.analysis,
+    characters,
+    scenes,
+    shots: shots.sort((a, b) => a.index - b.index),
+    assets,
+    nodes: nodeStates,
+    timeline: prevProject?.timeline,
+  };
+}
+
+export function applyBackendProjectToFlow(
+  proj: DramaProjectSchema,
+  existingNodes: DramaFlowNode[],
+  layout?: DramaLayoutData,
+): { nodes: DramaFlowNode[]; edges: Edge[] } {
+  const rebuilt = buildDramaGraphFromTemplate(
+    {
+      title: proj.script.title,
+      genre: proj.script.genre,
+      aspectRatio: (proj.script.aspect_ratio as "9:16" | "16:9" | "1:1") || "9:16",
+      stylePreset: proj.script.style,
+      outline: proj.script.outline,
+      characters: proj.characters.map((c) => ({
+        id: c.id,
+        name: c.name,
+        role: c.role,
+        avatarColor: c.avatar_color || "#2563eb",
+        appearanceBible: c.appearance_bible,
+        voiceEngine: (c.voice.engine as CharacterNodeData["voiceEngine"]) || "edge-tts",
+        voiceId: c.voice.id,
+        voiceName: c.voice.name || c.voice.id,
+      })),
+      scenes: proj.scenes.map((sc) => ({
+        id: sc.id,
+        name: sc.name,
+        environmentPrompt: sc.environment,
+        lightingStyle: sc.lighting,
+      })),
+      shots: proj.shots.map((sh) => ({
+        id: sh.id,
+        index: sh.index,
+        speakerId: sh.speaker_id || "",
+        sceneId: sh.scene_id || "",
+        shotType: sh.shot_type,
+        cameraMove: sh.camera_move,
+        dialogue: sh.dialogue,
+        sceneAction: sh.action,
+        continuityNotes: sh.continuity_notes,
+        estimatedDuration: sh.duration_sec,
+      })),
+    },
+    { routingPolicy: (proj.script.routing_policy as DramaRoutingPolicy) || "free_first" },
+  );
+
+  const existingById = new Map(existingNodes.map((n) => [n.id, n]));
+  const nodes = rebuilt.nodes.map((node) => {
+    const pos = layout?.positions?.[node.id] || existingById.get(node.id)?.position || node.position;
+    if (node.type === "script") {
+      return {
+        ...node,
+        position: pos,
+        data: {
+          ...node.data,
+          imageModelOverride: proj.script.image_model_override,
+          videoModelOverride: proj.script.video_model_override,
+          allowedImageProviders: proj.script.allowed_image_providers,
+          allowedVideoProviders: proj.script.allowed_video_providers,
+          imageConcurrency: proj.script.image_concurrency,
+          autoFallbackKenBurns: proj.script.auto_fallback_ken_burns,
+          bgmUrl: proj.script.bgm_url,
+        },
+      };
+    }
+    if (node.type === "character") {
+      const char = proj.characters.find((c) => c.id === node.data.charId);
+      const st = proj.nodes[`image.portrait:${node.data.charId}`];
+      const url = (char?.portrait && proj.assets[char.portrait]?.url) || (st?.output && proj.assets[st.output]?.url);
+      return {
+        ...node,
+        position: pos,
+        data: {
+          ...node.data,
+          portraitPrompt: char?.portrait_prompt,
+          speed: char?.voice.speed ?? 1.0,
+          pitch: char?.voice.pitch ?? 0,
+          portraitUrl: url,
+          status: mapBackendNodeStatus(st),
+          locked: Boolean(st?.locked),
+          error: st?.error,
+        },
+      };
+    }
+    if (node.type === "scene") {
+      const sc = proj.scenes.find((s) => s.id === node.data.sceneId);
+      const st = proj.nodes[`image.scene:${node.data.sceneId}`];
+      const url = (sc?.anchor && proj.assets[sc.anchor]?.url) || (st?.output && proj.assets[st.output]?.url);
+      return {
+        ...node,
+        position: pos,
+        data: {
+          ...node.data,
+          imageUrl: url,
+          status: mapBackendNodeStatus(st),
+          locked: Boolean(st?.locked),
+          error: st?.error,
+        },
+      };
+    }
+    if (node.type === "shot") {
+      const sh = proj.shots.find((s) => s.id === node.data.shotId);
+      const kfSt = proj.nodes[`image.keyframe:${node.data.shotId}`];
+      const ttsSt = proj.nodes[`tts.line:${node.data.shotId}`];
+      const vidSt = proj.nodes[`video.clip:${node.data.shotId}`];
+      const existingShot = existingById.get(node.id);
+      const existingBranch = existingShot?.type === "shot" ? getActiveShotBranch(existingShot.data) : undefined;
+
+      const kfUrl = (sh?.keyframe && proj.assets[sh.keyframe]?.url) || (kfSt?.output && proj.assets[kfSt.output]?.url) || existingBranch?.imageUrl;
+      const audUrl = (sh?.audio && proj.assets[sh.audio]?.url) || (ttsSt?.output && proj.assets[ttsSt.output]?.url) || existingBranch?.audioUrl;
+      const vidUrl = (sh?.video && proj.assets[sh.video]?.url) || (vidSt?.output && proj.assets[vidSt.output]?.url) || existingBranch?.videoUrl;
+
+      let mappedVideoStatus: ShotVersionBranch["videoStatus"] = existingBranch?.videoStatus || "idle";
+      let mappedRenderMode: ShotVersionBranch["renderMode"] = existingBranch?.renderMode || "ken_burns";
+      if (vidSt) {
+        if (vidSt.status === "ready") {
+          mappedVideoStatus = "ready";
+          mappedRenderMode = "video";
+        } else if (vidSt.status === "degraded") {
+          mappedVideoStatus = "ken_burns";
+          mappedRenderMode = "ken_burns";
+        } else if (vidSt.status === "running") {
+          mappedVideoStatus = "running";
+        } else if (vidSt.status === "failed") {
+          mappedVideoStatus = "error";
+        } else if (vidSt.status === "pending" || vidSt.status === "stale") {
+          mappedVideoStatus = "idle";
+        }
+      }
+
+      const baseBranch = existingBranch || getActiveShotBranch(node.data);
+      const updatedBranch: ShotVersionBranch = {
+        ...baseBranch,
+        imageUrl: kfUrl,
+        audioUrl: audUrl,
+        videoUrl: vidUrl,
+        videoTaskId: vidSt?.task_id || baseBranch.videoTaskId,
+        modelUsed: vidSt?.model_used || kfSt?.model_used || baseBranch.modelUsed,
+        keyframeStatus: mapBackendNodeStatus(kfSt),
+        audioStatus: mapBackendNodeStatus(ttsSt),
+        videoStatus: mappedVideoStatus,
+        renderMode: mappedRenderMode,
+        progress: mappedVideoStatus === "ready" || mappedVideoStatus === "ken_burns" ? 100 : baseBranch.progress,
+        keyframeLocked: Boolean(kfSt?.locked),
+        audioLocked: Boolean(ttsSt?.locked),
+        keyframeDegraded: kfSt?.status === "degraded",
+        statusNote: vidSt?.status_note || kfSt?.status_note || baseBranch.statusNote,
+        error: vidSt?.error || kfSt?.error || ttsSt?.error,
+      };
+      return {
+        ...node,
+        position: pos,
+        data: {
+          ...node.data,
+          continuous: sh?.continuous,
+          polishedVideoPrompt: sh?.polished_video_prompt,
+          actualAudioDuration: sh?.actual_audio_duration,
+          estimatedDuration: sh?.duration_sec || node.data.estimatedDuration,
+          versions: [updatedBranch, ...node.data.versions.filter((v) => v.id !== updatedBranch.id)],
+        },
+      };
+    }
+    if (node.type === "composer") {
+      const prevComp = existingById.get(node.id);
+      const tlSt = proj.nodes["timeline.assemble"];
+      return {
+        ...node,
+        position: pos,
+        data: {
+          ...node.data,
+          ...(prevComp?.type === "composer" ? prevComp.data : {}),
+          status: tlSt ? mapBackendNodeStatus(tlSt) : (prevComp?.type === "composer" ? prevComp.data.status : "idle"),
+          bgmUrl: proj.script.bgm_url ?? (prevComp?.type === "composer" ? prevComp.data.bgmUrl : undefined),
+          bgmVolume: proj.script.bgm_volume ?? (prevComp?.type === "composer" ? prevComp.data.bgmVolume : 0.25),
+          showSubtitles: proj.script.show_subtitles ?? (prevComp?.type === "composer" ? prevComp.data.showSubtitles : true),
+        },
+      };
+    }
+    return { ...node, position: pos };
+  });
+
+  return { nodes, edges: rebuilt.edges };
 }

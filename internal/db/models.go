@@ -35,35 +35,42 @@ type GalleryWork struct {
 
 // Conversation AI 对话工作台会话主模型
 type Conversation struct {
-	ID           string    `gorm:"primaryKey;size:64" json:"id"`
-	Title        string    `gorm:"size:255;index" json:"title"`
-	Model        string    `gorm:"size:64" json:"model"`
-	SystemPrompt string    `gorm:"type:text" json:"system_prompt,omitempty"`
-	PresetID     string    `gorm:"size:64;index" json:"preset_id,omitempty"`
-	IsPinned     bool      `gorm:"default:false;index" json:"is_pinned"`
-	IsArchived   bool      `gorm:"default:false;index" json:"is_archived"`
-	Tags         string    `gorm:"size:255" json:"tags,omitempty"`
-	ClientIP     string    `gorm:"size:64" json:"client_ip,omitempty"`
-	MessageCount int       `gorm:"default:0" json:"message_count"`
-	CreatedAt    time.Time `gorm:"index" json:"created_at"`
-	UpdatedAt    time.Time `gorm:"index" json:"updated_at"`
+	ID            string    `gorm:"primaryKey;size:64" json:"id"`
+	Title         string    `gorm:"size:255;index" json:"title"`
+	Model         string    `gorm:"size:64" json:"model"`
+	SystemPrompt  string    `gorm:"type:text" json:"system_prompt,omitempty"`
+	PresetID      string    `gorm:"size:64;index" json:"preset_id,omitempty"`
+	HeadMessageID string    `gorm:"size:64" json:"head_message_id,omitempty"`
+	CustomJSON    string    `gorm:"type:text" json:"custom_json,omitempty"`
+	IsPinned      bool      `gorm:"default:false;index" json:"is_pinned"`
+	IsArchived    bool      `gorm:"default:false;index" json:"is_archived"`
+	Tags          string    `gorm:"size:255" json:"tags,omitempty"`
+	ClientIP      string    `gorm:"size:64" json:"client_ip,omitempty"`
+	MessageCount  int       `gorm:"default:0" json:"message_count"`
+	CreatedAt     time.Time `gorm:"index" json:"created_at"`
+	UpdatedAt     time.Time `gorm:"index" json:"updated_at"`
 }
 
-// ChatMessageRecord AI 对话消息记录模型（归属于 Conversation 或旧版 SessionKey）
+// ChatMessageRecord AI 对话消息记录模型（支持基于 ParentID 的分支树与多模态 Parts）
 type ChatMessageRecord struct {
-	ID             string    `gorm:"primaryKey;size:64" json:"id"`
-	ConversationID string    `gorm:"size:64;index" json:"conversation_id"` // 对应 Conversation.ID
-	SessionKey     string    `gorm:"size:64;index;default:'default'" json:"session_key,omitempty"` // 兼容旧版单一会话
-	Role           string    `gorm:"size:32" json:"role"` // user, assistant, system
-	Content        string    `gorm:"type:text" json:"content"`
-	Model          string    `gorm:"size:64" json:"model,omitempty"`
-	OpenUIMode     bool      `gorm:"default:false" json:"openui_mode"`
-	Skill          string    `gorm:"size:32;default:'auto'" json:"skill,omitempty"`
-	TokensPrompt   int       `gorm:"default:0" json:"tokens_prompt,omitempty"`
-	TokensComp     int       `gorm:"default:0" json:"tokens_comp,omitempty"`
-	LatencyMs      int64     `gorm:"default:0" json:"latency_ms,omitempty"`
-	Citations      string    `gorm:"type:text" json:"citations,omitempty"` // 格式化 JSON 字符串存放引用来源
-	CreatedAt      time.Time `gorm:"index" json:"created_at"`
+	ID              string    `gorm:"primaryKey;size:64" json:"id"`
+	ConversationID  string    `gorm:"size:64;index" json:"conversation_id"` // 对应 Conversation.ID
+	ParentID        string    `gorm:"size:64;index" json:"parent_id,omitempty"`
+	SessionKey      string    `gorm:"size:64;index;default:'default'" json:"session_key,omitempty"` // 兼容旧版单一会话
+	Role            string    `gorm:"size:32" json:"role"`                                         // user, assistant, system
+	Content         string    `gorm:"type:text" json:"content"`
+	PartsJSON       string    `gorm:"type:text" json:"parts_json,omitempty"`
+	AttachmentsJSON string    `gorm:"type:text" json:"attachments_json,omitempty"`
+	MetadataJSON    string    `gorm:"type:text" json:"metadata_json,omitempty"`
+	StatusJSON      string    `gorm:"type:text" json:"status_json,omitempty"`
+	Model           string    `gorm:"size:64" json:"model,omitempty"`
+	OpenUIMode      bool      `gorm:"default:false" json:"openui_mode"`
+	Skill           string    `gorm:"size:32;default:'auto'" json:"skill,omitempty"`
+	TokensPrompt    int       `gorm:"default:0" json:"tokens_prompt,omitempty"`
+	TokensComp      int       `gorm:"default:0" json:"tokens_comp,omitempty"`
+	LatencyMs       int64     `gorm:"default:0" json:"latency_ms,omitempty"`
+	Citations       string    `gorm:"type:text" json:"citations,omitempty"` // 格式化 JSON 字符串存放引用来源
+	CreatedAt       time.Time `gorm:"index" json:"created_at"`
 }
 
 // ChatPreset AI 角色预设与系统提示词模板
@@ -179,9 +186,29 @@ type DramaProjectRecord struct {
 	StylePreset   string    `gorm:"size:64" json:"style_preset"`
 	RoutingPolicy string    `gorm:"size:32;default:'free_first'" json:"routing_policy"`
 	Outline       string    `gorm:"type:text" json:"outline"`
-	GraphJSON     string    `gorm:"type:text" json:"graph_json"`
+	SchemaVersion int       `gorm:"default:1" json:"schema_version"`
+	Revision      int64     `gorm:"default:1" json:"revision"`
+	ProjectJSON   string    `gorm:"type:text" json:"project_json,omitempty"`
+	LayoutJSON    string    `gorm:"type:text" json:"layout_json,omitempty"`
+	GraphJSON     string    `gorm:"type:text" json:"graph_json,omitempty"`
 	Status        string    `gorm:"size:32;default:'draft'" json:"status"`
 	ShotCount     int       `gorm:"default:0" json:"shot_count"`
 	CreatedAt     time.Time `gorm:"index" json:"created_at"`
 	UpdatedAt     time.Time `gorm:"index" json:"updated_at"`
+}
+
+// DramaRunRecord 短剧后台 DAG 执行 Run 记录
+type DramaRunRecord struct {
+	ID          string     `gorm:"primaryKey;size:64" json:"id"`
+	ProjectID   string     `gorm:"size:64;index" json:"project_id"`
+	Status      string     `gorm:"size:32;index" json:"status"` // running, completed, partial, failed, cancelled
+	TargetsJSON string     `gorm:"type:text" json:"targets_json,omitempty"`
+	ForceJSON   string     `gorm:"type:text" json:"force_json,omitempty"`
+	Until       string     `gorm:"size:64" json:"until,omitempty"`
+	SummaryJSON string     `gorm:"type:text" json:"summary_json,omitempty"`
+	LogsJSON    string     `gorm:"type:text" json:"logs_json,omitempty"`
+	Error       string     `gorm:"type:text" json:"error,omitempty"`
+	CreatedAt   time.Time  `gorm:"index" json:"created_at"`
+	UpdatedAt   time.Time  `gorm:"index" json:"updated_at"`
+	FinishedAt  *time.Time `json:"finished_at,omitempty"`
 }

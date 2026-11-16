@@ -930,7 +930,7 @@ export const ExportPoolModal: React.FC<{
       onClick={onClose}
     >
       <div
-        className="p-surface z-text rounded-2xl max-w-xl w-full p-5 shadow-2xl space-y-4 text-xs"
+        className="p-surface z-text rounded-2xl max-w-xl w-full max-h-[90vh] overflow-y-auto p-5 shadow-2xl space-y-4 text-xs"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-start justify-between gap-3 pb-3 border-b z-border">
@@ -1073,7 +1073,7 @@ export const AdminLockOverlay: React.FC<{
     <div className="fixed inset-0 z-50 bg-black/55 backdrop-blur-sm flex items-center justify-center p-4">
       <form
         onSubmit={handleSubmit}
-        className="p-surface z-text rounded-2xl p-6 max-w-sm w-full shadow-2xl space-y-4 text-xs"
+        className="p-surface z-text rounded-2xl p-6 max-w-sm w-full max-h-[90vh] overflow-y-auto shadow-2xl space-y-4 text-xs"
       >
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 rounded-xl z-muted border z-border flex items-center justify-center shrink-0">
@@ -1272,7 +1272,7 @@ export const LogDetailModal: React.FC<{
       onClick={onClose}
     >
       <div
-        className="max-w-lg w-full relative"
+        className="max-w-lg w-full relative max-h-[90vh] overflow-y-auto rounded-2xl"
         onClick={(e) => e.stopPropagation()}
       >
         <button

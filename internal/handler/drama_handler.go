@@ -3,16 +3,19 @@ package handler
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"ai-web-free/internal/accounts"
 	"ai-web-free/internal/db"
+	"ai-web-free/internal/drama"
 	"ai-web-free/internal/provider"
 	"ai-web-free/internal/storage"
 
@@ -27,6 +30,7 @@ type DramaHandler struct {
 	pool          *accounts.Pool
 	registry      *provider.Registry
 	storageEngine storage.StorageEngine
+	engine        *drama.Engine
 }
 
 func NewDramaHandler(database *gorm.DB, pool *accounts.Pool, reg *provider.Registry, engine storage.StorageEngine) *DramaHandler {
@@ -36,6 +40,10 @@ func NewDramaHandler(database *gorm.DB, pool *accounts.Pool, reg *provider.Regis
 		registry:      reg,
 		storageEngine: engine,
 	}
+}
+
+func (h *DramaHandler) SetEngine(eng *drama.Engine) {
+	h.engine = eng
 }
 
 func (h *DramaHandler) providerActive(id string) (bool, int) {
@@ -294,6 +302,45 @@ func (h *DramaHandler) GetProject(c *gin.Context) {
 		return
 	}
 	id := strings.TrimSpace(c.Param("id"))
+	if h.engine != nil {
+		proj, layout, rec, err := h.engine.LoadOrMigrateProject(id)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				c.JSON(http.StatusNotFound, gin.H{"error": "drama project not found"})
+				return
+			}
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		drama.SyncNodeHashesAndStates(proj, false)
+		var latestRun gin.H
+		var latestRec db.DramaRunRecord
+		if rErr := h.db.Where("project_id = ?", id).Order("created_at desc").First(&latestRec).Error; rErr == nil {
+			latestRun = hydrateRunRecord(latestRec)
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"id":             rec.ID,
+			"title":          rec.Title,
+			"genre":          rec.Genre,
+			"aspect_ratio":   rec.AspectRatio,
+			"style_preset":   rec.StylePreset,
+			"routing_policy": rec.RoutingPolicy,
+			"outline":        rec.Outline,
+			"schema_version": rec.SchemaVersion,
+			"revision":       proj.Revision,
+			"graph_json":     rec.GraphJSON,
+			"status":         rec.Status,
+			"shot_count":     len(proj.Shots),
+			"created_at":     rec.CreatedAt,
+			"updated_at":     rec.UpdatedAt,
+			"project":        proj,
+			"layout":         layout,
+			"active_run_id":  h.engine.GetActiveRunID(id),
+			"latest_run":     latestRun,
+		})
+		return
+	}
+
 	var rec db.DramaProjectRecord
 	if err := h.db.First(&rec, "id = ?", id).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -307,16 +354,18 @@ func (h *DramaHandler) GetProject(c *gin.Context) {
 }
 
 type saveDramaProjectRequest struct {
-	ID            string `json:"id"`
-	Title         string `json:"title"`
-	Genre         string `json:"genre"`
-	AspectRatio   string `json:"aspect_ratio"`
-	StylePreset   string `json:"style_preset"`
-	RoutingPolicy string `json:"routing_policy"`
-	Outline       string `json:"outline"`
-	GraphJSON     string `json:"graph_json"`
-	Status        string `json:"status"`
-	ShotCount     int    `json:"shot_count"`
+	ID            string              `json:"id"`
+	Title         string              `json:"title"`
+	Genre         string              `json:"genre"`
+	AspectRatio   string              `json:"aspect_ratio"`
+	StylePreset   string              `json:"style_preset"`
+	RoutingPolicy string              `json:"routing_policy"`
+	Outline       string              `json:"outline"`
+	GraphJSON     string              `json:"graph_json"`
+	Project       *drama.DramaProject `json:"project,omitempty"`
+	Layout        *drama.LayoutData   `json:"layout,omitempty"`
+	Status        string              `json:"status"`
+	ShotCount     int                 `json:"shot_count"`
 }
 
 // SaveProject POST /admin/api/v1/drama/projects 与 PUT /admin/api/v1/drama/projects/:id
@@ -351,8 +400,52 @@ func (h *DramaHandler) SaveProject(c *gin.Context) {
 		req.Status = "draft"
 	}
 
+	var projBytesStr, layoutBytesStr string
+	var schemaVer int = drama.CurrentSchemaVersion
+	var revision int64 = 1
+
 	var existing db.DramaProjectRecord
 	err := h.db.First(&existing, "id = ?", req.ID).Error
+
+	if req.Project != nil {
+		req.Project.ID = req.ID
+		req.Project.EnsureMaps()
+		drama.SyncNodeHashesAndStates(req.Project, false)
+		if err == nil {
+			req.Project.Revision = existing.Revision + 1
+		}
+		revision = req.Project.Revision
+		schemaVer = req.Project.SchemaVersion
+		req.Title = req.Project.Script.Title
+		req.Genre = req.Project.Script.Genre
+		req.AspectRatio = req.Project.Script.AspectRatio
+		req.StylePreset = req.Project.Script.Style
+		req.RoutingPolicy = req.Project.Script.RoutingPolicy
+		req.Outline = req.Project.Script.Outline
+		req.ShotCount = len(req.Project.Shots)
+		if b, mErr := json.Marshal(req.Project); mErr == nil {
+			projBytesStr = string(b)
+		}
+	} else if strings.TrimSpace(req.GraphJSON) != "" {
+		if migrated, migLayout, mErr := drama.MigrateGraphJSON(req.ID, req.Title, req.Genre, req.AspectRatio, req.StylePreset, req.RoutingPolicy, req.Outline, req.GraphJSON); mErr == nil {
+			if err == nil {
+				migrated.Revision = existing.Revision + 1
+			}
+			revision = migrated.Revision
+			if b, jErr := json.Marshal(migrated); jErr == nil {
+				projBytesStr = string(b)
+			}
+			if req.Layout == nil && migLayout != nil {
+				req.Layout = migLayout
+			}
+		}
+	}
+	if req.Layout != nil {
+		if lb, lErr := json.Marshal(req.Layout); lErr == nil {
+			layoutBytesStr = string(lb)
+		}
+	}
+
 	if err == nil {
 		existing.Title = req.Title
 		existing.Genre = req.Genre
@@ -360,7 +453,19 @@ func (h *DramaHandler) SaveProject(c *gin.Context) {
 		existing.StylePreset = req.StylePreset
 		existing.RoutingPolicy = req.RoutingPolicy
 		existing.Outline = req.Outline
-		existing.GraphJSON = req.GraphJSON
+		existing.SchemaVersion = schemaVer
+		if revision > existing.Revision {
+			existing.Revision = revision
+		}
+		if projBytesStr != "" {
+			existing.ProjectJSON = projBytesStr
+		}
+		if layoutBytesStr != "" {
+			existing.LayoutJSON = layoutBytesStr
+		}
+		if req.GraphJSON != "" {
+			existing.GraphJSON = req.GraphJSON
+		}
 		existing.Status = req.Status
 		existing.ShotCount = req.ShotCount
 		if saveErr := h.db.Save(&existing).Error; saveErr != nil {
@@ -379,6 +484,10 @@ func (h *DramaHandler) SaveProject(c *gin.Context) {
 		StylePreset:   req.StylePreset,
 		RoutingPolicy: req.RoutingPolicy,
 		Outline:       req.Outline,
+		SchemaVersion: schemaVer,
+		Revision:      revision,
+		ProjectJSON:   projBytesStr,
+		LayoutJSON:    layoutBytesStr,
 		GraphJSON:     req.GraphJSON,
 		Status:        req.Status,
 		ShotCount:     req.ShotCount,
@@ -578,4 +687,338 @@ func (h *DramaHandler) ServeCachedAudio(c *gin.Context) {
 		}
 	}
 	c.JSON(http.StatusNotFound, gin.H{"error": "audio not found"})
+}
+
+// PatchProject PATCH /admin/api/v1/drama/projects/:id
+// 支持 RFC 6902 JSON Patch 与 If-Match: <revision> 乐观锁，并触发下游连带 stale 传播。
+func (h *DramaHandler) PatchProject(c *gin.Context) {
+	if h.engine == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "drama engine not initialized"})
+		return
+	}
+	id := strings.TrimSpace(c.Param("id"))
+	rawBody, err := io.ReadAll(io.LimitReader(c.Request.Body, 4<<20))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	var ops []drama.PatchOperation
+	var bodyRevision int64
+	if len(rawBody) > 0 && rawBody[0] == '[' {
+		if err := json.Unmarshal(rawBody, &ops); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+	} else {
+		var wrapper struct {
+			Revision int64                  `json:"revision"`
+			Ops      []drama.PatchOperation `json:"ops"`
+		}
+		if err := json.Unmarshal(rawBody, &wrapper); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		ops = wrapper.Ops
+		bodyRevision = wrapper.Revision
+	}
+
+	proj, layout, _, err := h.engine.LoadOrMigrateProject(id)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "drama project not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	ifMatch := strings.TrimSpace(c.GetHeader("If-Match"))
+	expectedRev := bodyRevision
+	if ifMatch != "" {
+		cleaned := strings.Trim(ifMatch, `"W/ `)
+		if parsed, pErr := strconv.ParseInt(cleaned, 10, 64); pErr == nil {
+			expectedRev = parsed
+		}
+	}
+	if expectedRev > 0 && expectedRev != proj.Revision {
+		c.JSON(http.StatusConflict, gin.H{
+			"error":            "revision conflict",
+			"current_revision": proj.Revision,
+		})
+		return
+	}
+
+	updated, err := drama.ApplyJSONPatch(proj, ops)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if err := h.engine.SaveProjectState(id, updated, layout); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"revision": updated.Revision,
+		"project":  updated,
+		"layout":   layout,
+	})
+}
+
+// StartRun POST /admin/api/v1/drama/projects/:id/runs
+func (h *DramaHandler) StartRun(c *gin.Context) {
+	if h.engine == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "drama engine not initialized"})
+		return
+	}
+	id := strings.TrimSpace(c.Param("id"))
+	var opts drama.RunOptions
+	if c.Request.ContentLength > 0 {
+		if err := c.ShouldBindJSON(&opts); err != nil && !errors.Is(err, io.EOF) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+	}
+
+	runRec, alreadyRunning, err := h.engine.StartRun(c.Request.Context(), id, opts)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "drama project not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	status := http.StatusAccepted
+	if alreadyRunning {
+		status = http.StatusOK
+	}
+	c.JSON(status, gin.H{
+		"run":             runRec,
+		"already_running": alreadyRunning,
+	})
+}
+
+func hydrateRunRecord(rec db.DramaRunRecord) gin.H {
+	var logs []drama.RunLogEntry
+	if strings.TrimSpace(rec.LogsJSON) != "" {
+		_ = json.Unmarshal([]byte(rec.LogsJSON), &logs)
+	}
+	if logs == nil {
+		logs = []drama.RunLogEntry{}
+	}
+	var summary *drama.RunSummary
+	if strings.TrimSpace(rec.SummaryJSON) != "" {
+		var s drama.RunSummary
+		if err := json.Unmarshal([]byte(rec.SummaryJSON), &s); err == nil {
+			summary = &s
+		}
+	}
+	return gin.H{
+		"id":          rec.ID,
+		"project_id":  rec.ProjectID,
+		"status":      rec.Status,
+		"error":       rec.Error,
+		"logs":        logs,
+		"summary":     summary,
+		"created_at":  rec.CreatedAt,
+		"updated_at":  rec.UpdatedAt,
+		"finished_at": rec.FinishedAt,
+	}
+}
+
+// ListRuns GET /admin/api/v1/drama/projects/:id/runs
+func (h *DramaHandler) ListRuns(c *gin.Context) {
+	if h.db == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "database not initialized"})
+		return
+	}
+	pid := strings.TrimSpace(c.Param("id"))
+	var records []db.DramaRunRecord
+	if err := h.db.Where("project_id = ?", pid).Order("created_at desc").Limit(15).Find(&records).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	out := make([]gin.H, 0, len(records))
+	for _, r := range records {
+		out = append(out, hydrateRunRecord(r))
+	}
+	c.JSON(http.StatusOK, gin.H{"data": out})
+}
+
+// GetRun GET /admin/api/v1/drama/projects/:id/runs/:rid
+func (h *DramaHandler) GetRun(c *gin.Context) {
+	if h.db == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "database not initialized"})
+		return
+	}
+	rid := strings.TrimSpace(c.Param("rid"))
+	var rec db.DramaRunRecord
+	if err := h.db.First(&rec, "id = ?", rid).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "run not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, hydrateRunRecord(rec))
+}
+
+// StreamRunEvents GET /admin/api/v1/drama/projects/:id/runs/:rid/events
+func (h *DramaHandler) StreamRunEvents(c *gin.Context) {
+	if h.engine == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "drama engine not initialized"})
+		return
+	}
+	rid := strings.TrimSpace(c.Param("rid"))
+	pid := strings.TrimSpace(c.Param("id"))
+
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	c.Writer.Header().Set("Cache-Control", "no-cache")
+	c.Writer.Header().Set("Connection", "keep-alive")
+	c.Writer.Header().Set("X-Accel-Buffering", "no")
+
+	ch, unsub, ok := h.engine.Subscribe(rid)
+	if !ok {
+		// Run 已完成或不在内存，查库后回放历史日志与终态事件并结束
+		var rec db.DramaRunRecord
+		if err := h.db.First(&rec, "id = ?", rid).Error; err == nil {
+			var logs []drama.RunLogEntry
+			if strings.TrimSpace(rec.LogsJSON) != "" {
+				_ = json.Unmarshal([]byte(rec.LogsJSON), &logs)
+			}
+			var summary *drama.RunSummary
+			if strings.TrimSpace(rec.SummaryJSON) != "" {
+				var s drama.RunSummary
+				if json.Unmarshal([]byte(rec.SummaryJSON), &s) == nil {
+					summary = &s
+				}
+			}
+			for i := range logs {
+				entry := logs[i]
+				b, _ := json.Marshal(drama.RunEvent{
+					Type:      "run.log",
+					RunID:     rec.ID,
+					ProjectID: pid,
+					NodeKey:   entry.NodeKey,
+					Log:       &entry,
+					Summary:   summary,
+					Timestamp: entry.Timestamp,
+				})
+				_, _ = fmt.Fprintf(c.Writer, "event: run.log\ndata: %s\n\n", b)
+			}
+			payload, _ := json.Marshal(drama.RunEvent{
+				Type:      "run.update",
+				RunID:     rec.ID,
+				ProjectID: pid,
+				Status:    rec.Status,
+				Message:   rec.Error,
+				Summary:   summary,
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+			})
+			_, _ = fmt.Fprintf(c.Writer, "event: run.update\ndata: %s\n\n", payload)
+			c.Writer.Flush()
+		}
+		return
+	}
+	defer unsub()
+
+	// 先回放当前内存中已产生的历史日志与进度汇总，避免刷新丢日志
+	if snapLogs, snapSum, hasSnap := h.engine.GetRunSnapshot(rid); hasSnap {
+		for i := range snapLogs {
+			entry := snapLogs[i]
+			b, _ := json.Marshal(drama.RunEvent{
+				Type:      "run.log",
+				RunID:     rid,
+				ProjectID: pid,
+				NodeKey:   entry.NodeKey,
+				Log:       &entry,
+				Summary:   &snapSum,
+				Timestamp: entry.Timestamp,
+			})
+			_, _ = fmt.Fprintf(c.Writer, "event: run.log\ndata: %s\n\n", b)
+		}
+		c.Writer.Flush()
+	}
+
+	ctx := c.Request.Context()
+	keepalive := time.NewTicker(15 * time.Second)
+	defer keepalive.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-keepalive.C:
+			_, _ = fmt.Fprint(c.Writer, ": keepalive\n\n")
+			c.Writer.Flush()
+		case ev, open := <-ch:
+			if !open {
+				return
+			}
+			b, _ := json.Marshal(ev)
+			_, _ = fmt.Fprintf(c.Writer, "event: %s\ndata: %s\n\n", ev.Type, b)
+			c.Writer.Flush()
+			if ev.Type == "run.update" && (ev.Status == "completed" || ev.Status == "partial" || ev.Status == "failed" || ev.Status == "cancelled") {
+				return
+			}
+		}
+	}
+}
+
+func (h *DramaHandler) setNodeLock(c *gin.Context, locked bool) {
+	if h.engine == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "drama engine not initialized"})
+		return
+	}
+	id := strings.TrimSpace(c.Param("id"))
+	nodeKey := strings.TrimSpace(c.Param("nodeKey"))
+	proj, err := h.engine.SetNodeLocked(id, nodeKey, locked)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "drama project not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"revision": proj.Revision,
+		"node_key": nodeKey,
+		"locked":   locked,
+		"project":  proj,
+	})
+}
+
+// LockNode POST /admin/api/v1/drama/projects/:id/nodes/:nodeKey/lock
+func (h *DramaHandler) LockNode(c *gin.Context) {
+	h.setNodeLock(c, true)
+}
+
+// UnlockNode POST /admin/api/v1/drama/projects/:id/nodes/:nodeKey/unlock
+func (h *DramaHandler) UnlockNode(c *gin.Context) {
+	h.setNodeLock(c, false)
+}
+
+// RetryNode POST /admin/api/v1/drama/projects/:id/nodes/:nodeKey/retry
+func (h *DramaHandler) RetryNode(c *gin.Context) {
+	if h.engine == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "drama engine not initialized"})
+		return
+	}
+	id := strings.TrimSpace(c.Param("id"))
+	nodeKey := strings.TrimSpace(c.Param("nodeKey"))
+	runRec, alreadyRunning, err := h.engine.StartRun(c.Request.Context(), id, drama.RunOptions{
+		Targets: []string{nodeKey},
+		Force:   []string{nodeKey},
+	})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusAccepted, gin.H{
+		"run":             runRec,
+		"already_running": alreadyRunning,
+	})
 }

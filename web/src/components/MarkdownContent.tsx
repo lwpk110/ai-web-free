@@ -1,53 +1,278 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
+import {
+  AlertTriangle,
+  Check,
+  CheckCircle2,
+  Copy,
+  Download,
+  ExternalLink,
+  Info,
+  Maximize2,
+  RotateCw,
+  ShieldCheck,
+  Sparkles,
+  X,
+  XCircle,
+  ZoomIn,
+  ZoomOut,
+} from "lucide-react";
+import { stripUnknownPseudoXmlTags } from "../lib/openui-html-sanitizer";
 
 function MarkdownImageCard({ src, alt }: { src: string; alt: string }) {
   const [loaded, setLoaded] = useState(false);
   const [failed, setFailed] = useState(false);
+  const [retryKey, setRetryKey] = useState(0);
+  const [lightboxOpen, setLightboxOpen] = useState(false);
+  const [zoomActual, setZoomActual] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  // 计算带重试参数的图片地址，避免缓存死锁
+  const effectiveSrc = retryKey > 0
+    ? (src.includes("?") ? `${src}&_r=${retryKey}` : `${src}?_r=${retryKey}`)
+    : src;
+
+  const handleRetry = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setFailed(false);
+    setLoaded(false);
+    setRetryKey((k) => k + 1);
+  };
+
+  const handleCopyLink = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      await navigator.clipboard.writeText(src);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // 忽略剪贴板异常
+    }
+  };
+
+  const handleDownload = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    const a = document.createElement("a");
+    a.href = src;
+    a.download = `image-${Date.now()}.png`;
+    a.target = "_blank";
+    a.rel = "noreferrer";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  };
+
+  useEffect(() => {
+    if (!lightboxOpen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setLightboxOpen(false);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [lightboxOpen]);
 
   return (
-    <span className="block my-2.5 w-full max-w-xs sm:max-w-sm overflow-hidden rounded-2xl border z-border shadow-sm group bg-[var(--bg-surface)] relative">
-      {!loaded && !failed && (
-        <span className="flex items-center justify-center w-full aspect-square bg-gradient-to-br from-indigo-500/10 via-[var(--bg-muted)] to-purple-500/10 animate-pulse text-xs z-text-muted">
-          正在加载缩略图...
-        </span>
-      )}
-      {failed ? (
-        <span className="flex flex-col items-center justify-center gap-1.5 w-full py-8 px-4 bg-[var(--bg-muted)] text-xs z-text-muted text-center">
-          <span>缩略图加载失败</span>
-          <a
-            href={src}
-            target="_blank"
-            rel="noreferrer"
-            className="text-indigo-500 hover:underline"
+    <>
+      <span className="block my-2.5 w-full max-w-xs sm:max-w-sm md:max-w-md overflow-hidden rounded-2xl border z-border shadow-sm group bg-[var(--bg-surface)] relative select-none">
+        {/* 骨架屏占位：绝对定位覆盖在图片上方，绝不用 display:none 隐藏 img，防止触发浏览器 lazy-load 死锁 */}
+        {!loaded && !failed && (
+          <span className="flex flex-col items-center justify-center gap-2 w-full aspect-square bg-gradient-to-br from-indigo-500/10 via-[var(--bg-muted)] to-purple-500/10 animate-pulse text-xs z-text-muted">
+            <span className="w-5 h-5 rounded-full border-2 border-indigo-500/40 border-t-indigo-600 animate-spin" />
+            <span>正在加载缩略图...</span>
+          </span>
+        )}
+
+        {failed ? (
+          <span className="flex flex-col items-center justify-center gap-2 w-full py-8 px-4 bg-[var(--bg-muted)] text-xs z-text-muted text-center">
+            <span className="font-medium text-[var(--text-default)]">缩略图加载受阻</span>
+            <div className="flex items-center gap-2 mt-1">
+              <button
+                type="button"
+                onClick={handleRetry}
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border z-border bg-[var(--bg-surface)] hover:bg-[var(--bg-muted)] text-xs cursor-pointer transition shadow-xs"
+              >
+                <RotateCw size={12} />
+                <span>重新加载</span>
+              </button>
+              <a
+                href={src}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-indigo-500 hover:text-indigo-600 hover:underline text-xs"
+              >
+                <ExternalLink size={12} />
+                <span>在新标签页打开</span>
+              </a>
+            </div>
+          </span>
+        ) : (
+          <div
+            className="relative cursor-pointer overflow-hidden bg-black/5 dark:bg-white/5"
+            onClick={() => setLightboxOpen(true)}
+            title="点击打开图像工坊同款全屏灯箱预览"
           >
-            点击直接打开原图
-          </a>
-        </span>
-      ) : (
-        <img
-          src={src}
-          alt={alt || "AI 生成图片"}
-          loading="lazy"
-          onLoad={() => setLoaded(true)}
-          onError={() => setFailed(true)}
-          className={`w-full h-auto max-h-72 object-contain bg-black/5 dark:bg-white/5 cursor-zoom-in transition-transform duration-200 group-hover:scale-[1.01] ${
-            loaded ? "block" : "hidden"
-          }`}
-          onClick={() => window.open(src, "_blank", "noopener,noreferrer")}
-          title="点击在新标签页查看高清原图"
-        />
+            {/* img 始终保持在 DOM 布局流中，绝不使用 display:none，确保浏览器即刻发起网络请求并触发 onLoad */}
+            <img
+              key={effectiveSrc}
+              src={effectiveSrc}
+              alt={alt || "AI 生成图片"}
+              referrerPolicy="no-referrer"
+              crossOrigin="anonymous"
+              onLoad={() => {
+                setLoaded(true);
+                setFailed(false);
+              }}
+              onError={() => {
+                setFailed(true);
+                setLoaded(false);
+              }}
+              className={`w-full h-auto max-h-80 object-contain transition-all duration-300 group-hover:scale-[1.01] ${
+                loaded ? "opacity-100" : "opacity-0 absolute inset-0 pointer-events-none"
+              }`}
+            />
+
+            {/* 图像工坊同款：悬浮操作快捷胶囊栏 */}
+            {loaded && !failed && (
+              <div className="absolute top-2 right-2 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity bg-black/65 backdrop-blur-xs rounded-xl p-1 text-white shadow-md">
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setLightboxOpen(true);
+                  }}
+                  className="p-1 rounded-lg hover:bg-white/20 transition cursor-pointer"
+                  title="全屏大图预览"
+                >
+                  <Maximize2 size={13} />
+                </button>
+                <button
+                  type="button"
+                  onClick={handleDownload}
+                  className="p-1 rounded-lg hover:bg-white/20 transition cursor-pointer"
+                  title="下载图片"
+                >
+                  <Download size={13} />
+                </button>
+                <a
+                  href={src}
+                  target="_blank"
+                  rel="noreferrer"
+                  onClick={(e) => e.stopPropagation()}
+                  className="p-1 rounded-lg hover:bg-white/20 transition inline-flex items-center text-white"
+                  title="在新标签页打开原图"
+                >
+                  <ExternalLink size={13} />
+                </a>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* 底部提示词信息栏 */}
+        {alt && (
+          <span className="block px-3 py-1.5 text-[11px] z-text-muted bg-[var(--bg-surface)] border-t z-border truncate">
+            {alt}
+          </span>
+        )}
+      </span>
+
+      {/* 图像工坊同款全屏画廊灯箱 (Lightbox) */}
+      {lightboxOpen && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          className="fixed inset-0 z-[9999] flex flex-col items-center justify-center bg-black/85 backdrop-blur-sm p-4 sm:p-6"
+          onClick={() => setLightboxOpen(false)}
+        >
+          {/* 顶栏控制栏 */}
+          <div
+            className="w-full max-w-5xl flex items-center justify-between gap-3 text-white mb-3"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="px-2.5 py-1 rounded-lg bg-white/10 text-xs font-medium font-mono truncate max-w-[260px] sm:max-w-md">
+                {alt || "AI 生成图片原图"}
+              </span>
+            </div>
+
+            <div className="flex items-center gap-1.5 shrink-0">
+              <button
+                type="button"
+                onClick={() => setZoomActual((z) => !z)}
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-xs transition cursor-pointer"
+                title={zoomActual ? "适应屏幕" : "1:1 原图"}
+              >
+                {zoomActual ? <ZoomOut size={13} /> : <ZoomIn size={13} />}
+                <span className="hidden sm:inline">{zoomActual ? "适应屏幕" : "1:1 原图"}</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleCopyLink}
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-xs transition cursor-pointer"
+                title="复制图片链接"
+              >
+                {copied ? <Check size={13} className="text-emerald-400" /> : <Copy size={13} />}
+                <span className="hidden sm:inline">{copied ? "已复制" : "复制链接"}</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleDownload}
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-xs transition cursor-pointer"
+                title="下载原图"
+              >
+                <Download size={13} />
+                <span className="hidden sm:inline">下载</span>
+              </button>
+              <a
+                href={src}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-xs transition text-white"
+                title="新标签页打开"
+              >
+                <ExternalLink size={13} />
+                <span className="hidden sm:inline">新标签打开</span>
+              </a>
+              <button
+                type="button"
+                onClick={() => setLightboxOpen(false)}
+                className="p-1.5 rounded-lg bg-white/10 hover:bg-white/25 text-white transition ml-1 cursor-pointer"
+                title="关闭 (Esc)"
+              >
+                <X size={16} />
+              </button>
+            </div>
+          </div>
+
+          {/* 图像主视口 */}
+          <div
+            className="flex-1 w-full max-w-5xl flex items-center justify-center overflow-auto rounded-2xl p-2 relative"
+            onClick={(e) => {
+              // 点击图片背景关闭，点击图片本身切换缩放
+              if (e.target === e.currentTarget) {
+                setLightboxOpen(false);
+              }
+            }}
+          >
+            <img
+              src={effectiveSrc}
+              alt={alt || "高清原图"}
+              referrerPolicy="no-referrer"
+              onClick={(e) => {
+                e.stopPropagation();
+                setZoomActual((z) => !z);
+              }}
+              className={`rounded-xl shadow-2xl transition-all select-none ${
+                zoomActual
+                  ? "max-w-none w-auto h-auto cursor-zoom-out m-auto"
+                  : "max-w-full max-h-[82vh] w-auto h-auto object-contain cursor-zoom-in"
+              }`}
+            />
+          </div>
+        </div>
       )}
-      {loaded && !failed && (
-        <span className="pointer-events-none absolute top-2 right-2 px-2 py-0.5 rounded-full text-[10px] font-medium bg-black/55 text-white opacity-0 group-hover:opacity-100 transition-opacity">
-          查看原图
-        </span>
-      )}
-      {alt && (
-        <span className="block px-3 py-1.5 text-[11px] z-text-muted bg-[var(--bg-surface)] border-t z-border truncate">
-          {alt}
-        </span>
-      )}
-    </span>
+    </>
   );
 }
 
@@ -215,6 +440,29 @@ function splitUnfencedOpenUI(text: string): HybridSegment[] {
   return out.length > 0 ? out : [{ type: "markdown", text }];
 }
 
+function cleanAdjacentOpenUIWrappers(segments: HybridSegment[]): HybridSegment[] {
+  const result = segments.map((s) => ({ ...s }));
+  const openWrapperRe = /(?:^|\n)\s*<(?:CodeBlock(?:\s+[^>]*)?|openui(?:-lang)?)\s*>\s*$/i;
+  const closeWrapperRe = /^\s*<\/(?:CodeBlock|openui(?:-lang)?)\s*>\s*(?:\n|$)/i;
+
+  for (let idx = 0; idx < result.length; idx++) {
+    if (result[idx].type !== "openui") continue;
+
+    const prev = result[idx - 1];
+    const next = result[idx + 1];
+    if (prev && prev.type === "markdown" && openWrapperRe.test(prev.text)) {
+      prev.text = prev.text.replace(openWrapperRe, "").trimEnd();
+      if (next && next.type === "markdown" && closeWrapperRe.test(next.text)) {
+        next.text = next.text.replace(closeWrapperRe, "").trimStart();
+      }
+    } else if (next && next.type === "markdown" && closeWrapperRe.test(next.text)) {
+      next.text = next.text.replace(closeWrapperRe, "").trimStart();
+    }
+  }
+
+  return result.filter((s) => (s.type === "markdown" ? s.text.trim().length > 0 : true));
+}
+
 export function splitHybridSegments(
   content: string,
   _legacyOpenUIMode = false
@@ -252,11 +500,11 @@ export function splitHybridSegments(
     if (tail.trim()) {
       segments.push(...splitUnfencedOpenUI(tail));
     }
-    return segments;
+    return cleanAdjacentOpenUIWrappers(segments);
   }
 
   // 2. 无 ```openui 围栏时，自动拆分混排或纯 DSL，否则一律交由 Markdown 渲染
-  return splitUnfencedOpenUI(content);
+  return cleanAdjacentOpenUIWrappers(splitUnfencedOpenUI(content));
 }
 
 type AttrValue = string | number | boolean;
@@ -356,6 +604,7 @@ const INLINE_WIDGET_TAGS = new Set([
   "image",
   "img",
   "audio",
+  "icon",
 ]);
 
 const KNOWN_WIDGET_TAGS = new Set([
@@ -372,6 +621,7 @@ const VOID_WIDGET_TAGS = new Set([
   "image",
   "img",
   "audio",
+  "icon",
 ]);
 
 const FLEX_CONTAINER_TAGS = new Set([
@@ -975,6 +1225,27 @@ function renderWidgetAst(
       const renderedChildren = renderWidgetAst(children, key, tag);
 
       if (tag === "br") return <br key={key} />;
+      if (tag === "icon") {
+        const iconName = (resolveAttrString(attrs, "name") || "").toLowerCase();
+        const color = resolveTextColor(resolveAttrString(attrs, "color"));
+        const iconStyle = color ? { color } : undefined;
+        if (iconName.includes("shield")) {
+          return <ShieldCheck key={key} size={14} className="inline-block align-text-bottom mr-1" style={iconStyle} />;
+        }
+        if (iconName.includes("check") || iconName.includes("success")) {
+          return <CheckCircle2 key={key} size={14} className="inline-block align-text-bottom mr-1" style={iconStyle} />;
+        }
+        if (iconName.includes("warn") || iconName.includes("alert")) {
+          return <AlertTriangle key={key} size={14} className="inline-block align-text-bottom mr-1" style={iconStyle} />;
+        }
+        if (iconName.includes("error") || iconName.includes("close") || iconName.includes("x")) {
+          return <XCircle key={key} size={14} className="inline-block align-text-bottom mr-1" style={iconStyle} />;
+        }
+        if (iconName.includes("info")) {
+          return <Info key={key} size={14} className="inline-block align-text-bottom mr-1" style={iconStyle} />;
+        }
+        return <Sparkles key={key} size={13} className="inline-block align-text-bottom mr-1" style={iconStyle} />;
+      }
       if (tag === "hr" || tag === "divider") {
         return <hr key={key} className="md-hr" />;
       }
@@ -1448,6 +1719,7 @@ function renderInlineMarkdown(
   if (allowWidgets && hasValidWidgetTagInText(text)) {
     return parseAndRenderWidgetMarkup(text, `${keyPrefix}-w`);
   }
+  const safeText = stripUnknownPseudoXmlTags(text);
   const nodes: React.ReactNode[] = [];
   const tokenRe =
     /(`[^`]+`|<br\s*\/?>|\*\*[^*\n]+?\*\*|__[^_\n]+?__|~~[^~\n]+?~~|\*[^*\n]+?\*|!\[[^\]\n]*\]\([^)\s]+\)|\[[^\]\n]+\]\([^)\s]+\)|https?:\/\/[^\s<>)"]+)/gi;
@@ -1455,9 +1727,9 @@ function renderInlineMarkdown(
   let idx = 0;
   let m: RegExpExecArray | null;
 
-  while ((m = tokenRe.exec(text)) !== null) {
+  while ((m = tokenRe.exec(safeText)) !== null) {
     if (m.index > last) {
-      nodes.push(text.slice(last, m.index));
+      nodes.push(safeText.slice(last, m.index));
     }
     const tok = m[0];
     const key = `${keyPrefix}-${idx++}`;
@@ -1563,8 +1835,8 @@ function renderInlineMarkdown(
     last = m.index + tok.length;
   }
 
-  if (last < text.length) {
-    nodes.push(text.slice(last));
+  if (last < safeText.length) {
+    nodes.push(safeText.slice(last));
   }
   return nodes;
 }
@@ -1838,9 +2110,37 @@ export const MarkdownContent: React.FC<{ content: string }> = ({ content }) => {
       continue;
     }
 
-    // 忽略被 Markdown 块边界切断后遗留的孤立闭合标签（如表格后的 </box>）
-    if (isOrphanClosingWidgetLine(trimmed)) {
+    // 忽略被 Markdown 块边界切断后遗留的孤立闭合标签（如表格后的 </box> 或 </CodeBlock>）
+    if (isOrphanClosingWidgetLine(trimmed) || /^<\/CodeBlock\s*>$/i.test(trimmed)) {
       i++;
+      continue;
+    }
+
+    // XML/JSX 风格 <CodeBlock language="...">...</CodeBlock> 或 <pre>...</pre> 代码块兜底
+    const xmlCodeOpen = /^<(CodeBlock|pre)(?:\s+([^>]*))?>$/i.exec(trimmed);
+    if (xmlCodeOpen) {
+      const closingTag = xmlCodeOpen[1].toLowerCase();
+      const attrRaw = xmlCodeOpen[2] || "";
+      const langMatch = /(?:language|lang)\s*=\s*["']([^"']+)["']/i.exec(attrRaw);
+      const lang = langMatch ? langMatch[1] : "";
+      const codeLines: string[] = [];
+      i++;
+      while (i < lines.length) {
+        if (lines[i].trim().toLowerCase() === `</${closingTag}>`) {
+          i++;
+          break;
+        }
+        codeLines.push(lines[i]);
+        i++;
+      }
+      blocks.push(
+        <div key={`pre-${blocks.length}`} className="md-code-wrap">
+          {lang && <div className="md-code-lang">{lang}</div>}
+          <pre className="md-code-block" data-lang={lang}>
+            <code>{codeLines.join("\n")}</code>
+          </pre>
+        </div>
+      );
       continue;
     }
 
@@ -2007,6 +2307,7 @@ export const MarkdownContent: React.FC<{ content: string }> = ({ content }) => {
         /^#{1,6}\s+/.test(curTrim) ||
         matchListLine(cur) !== null ||
         /^(-{3,}|\*{3,}|_{3,})$/.test(curTrim) ||
+        /^<\/?(?:CodeBlock|pre)(?:\s|>)/i.test(curTrim) ||
         shouldStartWidgetBlock(curTrim) ||
         isOrphanClosingWidgetLine(curTrim)
       ) {

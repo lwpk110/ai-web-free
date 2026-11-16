@@ -78,34 +78,41 @@
 ```go
 // Conversation 会话主表
 type Conversation struct {
-	ID           string    `gorm:"primaryKey;size:64" json:"id"`
-	Title        string    `gorm:"size:255;index" json:"title"`
-	Model        string    `gorm:"size:64" json:"model"`
-	SystemPrompt string    `gorm:"type:text" json:"system_prompt"`
-	PresetID     string    `gorm:"size:64;index" json:"preset_id"`
-	IsPinned     bool      `gorm:"default:false;index" json:"is_pinned"`
-	IsArchived   bool      `gorm:"default:false;index" json:"is_archived"`
-	Tags         string    `gorm:"size:255" json:"tags"`
-	ClientIP     string    `gorm:"size:64" json:"client_ip"`
-	MessageCount int       `gorm:"default:0" json:"message_count"`
-	CreatedAt    time.Time `gorm:"index" json:"created_at"`
-	UpdatedAt    time.Time `gorm:"index" json:"updated_at"`
+	ID            string    `gorm:"primaryKey;size:64" json:"id"`
+	Title         string    `gorm:"size:255;index" json:"title"`
+	Model         string    `gorm:"size:64" json:"model"`
+	SystemPrompt  string    `gorm:"type:text" json:"system_prompt,omitempty"`
+	PresetID      string    `gorm:"size:64;index" json:"preset_id,omitempty"`
+	HeadMessageID string    `gorm:"size:64" json:"head_message_id,omitempty"`
+	CustomJSON    string    `gorm:"type:text" json:"custom_json,omitempty"`
+	IsPinned      bool      `gorm:"default:false;index" json:"is_pinned"`
+	IsArchived    bool      `gorm:"default:false;index" json:"is_archived"`
+	Tags          string    `gorm:"size:255" json:"tags,omitempty"`
+	ClientIP      string    `gorm:"size:64" json:"client_ip,omitempty"`
+	MessageCount  int       `gorm:"default:0" json:"message_count"`
+	CreatedAt     time.Time `gorm:"index" json:"created_at"`
+	UpdatedAt     time.Time `gorm:"index" json:"updated_at"`
 }
 
-// ChatMessageRecord 消息明细表
+// ChatMessageRecord 消息明细表（支持基于 ParentID 的分支树与多模态 Parts）
 type ChatMessageRecord struct {
-	ID             string    `gorm:"primaryKey;size:64" json:"id"`
-	ConversationID string    `gorm:"size:64;index;not null" json:"conversation_id"`
-	Role           string    `gorm:"size:32" json:"role"` // "user" | "assistant" | "system"
-	Content        string    `gorm:"type:text" json:"content"`
-	Model          string    `gorm:"size:64" json:"model"`
-	OpenUIMode     bool      `gorm:"default:false" json:"openui_mode"`
-	Skill          string    `gorm:"size:32" json:"skill"`
-	TokensPrompt   int       `gorm:"default:0" json:"tokens_prompt"`
-	TokensComp     int       `gorm:"default:0" json:"tokens_comp"`
-	LatencyMs      int64     `gorm:"default:0" json:"latency_ms"`
-	Citations      string    `gorm:"type:text" json:"citations"` // 存放引用来源 JSON
-	CreatedAt      time.Time `gorm:"index" json:"created_at"`
+	ID              string    `gorm:"primaryKey;size:64" json:"id"`
+	ConversationID  string    `gorm:"size:64;index;not null" json:"conversation_id"`
+	ParentID        string    `gorm:"size:64;index" json:"parent_id,omitempty"`
+	Role            string    `gorm:"size:32" json:"role"` // "user" | "assistant" | "system"
+	Content         string    `gorm:"type:text" json:"content"`
+	PartsJSON       string    `gorm:"type:text" json:"parts_json,omitempty"`
+	AttachmentsJSON string    `gorm:"type:text" json:"attachments_json,omitempty"`
+	MetadataJSON    string    `gorm:"type:text" json:"metadata_json,omitempty"`
+	StatusJSON      string    `gorm:"type:text" json:"status_json,omitempty"`
+	Model           string    `gorm:"size:64" json:"model,omitempty"`
+	OpenUIMode      bool      `gorm:"default:false" json:"openui_mode"`
+	Skill           string    `gorm:"size:32" json:"skill,omitempty"`
+	TokensPrompt    int       `gorm:"default:0" json:"tokens_prompt,omitempty"`
+	TokensComp      int       `gorm:"default:0" json:"tokens_comp,omitempty"`
+	LatencyMs       int64     `gorm:"default:0" json:"latency_ms,omitempty"`
+	Citations       string    `gorm:"type:text" json:"citations,omitempty"` // 存放引用来源 JSON
+	CreatedAt       time.Time `gorm:"index" json:"created_at"`
 }
 
 // ChatPreset 角色与系统提示词预设表
@@ -147,9 +154,8 @@ type ChatPreset struct {
 5. **`DELETE /admin/api/v1/chat/conversations/:id`**
    - 级联物理删除会话及关联的所有 `ChatMessageRecord`。
 
-6. **`POST /admin/api/v1/chat/conversations/:id/messages`**
-   - 载荷参数：`{ "messages": [ { "id": "...", "role": "user", "content": "...", ... } ] }`。
-   - 行为：事务内写入或更新消息，自动累加更新 `Conversation.MessageCount` 与 `UpdatedAt`。
+6. **`POST /admin/api/v1/chat/conversations/:id/messages`** 与 **`POST /admin/api/v1/chat/conversations/:id/messages/append`**
+   - 全量覆盖或单节点幂等增量写入（Upsert），支持 `parentId`、`partsJson`、`attachmentsJson`、`metadataJson`、`statusJson` 与 `move_head` 同步更新 `Conversation.HeadMessageID`、`MessageCount` 与 `UpdatedAt`。
 
 7. **`GET /admin/api/v1/chat/search`**
    - 查询参数：`q=关键词`。

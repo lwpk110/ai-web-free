@@ -21,3 +21,13 @@ services:
     restart: unless-stopped
     ports:
       - '8880:8880'
+
+  # 可选外部 FFmpeg 成片渲染服务（通过 docker compose --profile render up -d 启用）
+  # 启用后在 .env 设置 RENDER_SERVICE_URL=http://drama-render:8090
+  drama-render:
+    image: linuxserver/ffmpeg:latest
+    container_name: ai-web-free-drama-render
+    profiles: ["render"]
+    restart: unless-stopped
+    ports:
+      - '8090:8090'

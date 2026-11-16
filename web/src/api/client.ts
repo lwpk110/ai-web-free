@@ -971,8 +971,38 @@ export async function editImageWithReferences(params: {
   return data;
 }
 
+export type OpenAIChatContentPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string } }
+  | { type: "file"; file: { file_id: string } };
+
+export async function uploadOpenAIFile(
+  file: File,
+  apiKey?: string,
+  signal?: AbortSignal
+): Promise<{ id: string; filename: string; bytes: number; purpose?: string }> {
+  const form = new FormData();
+  form.append("file", file);
+  form.append("purpose", "assistants");
+  const headers: Record<string, string> = {};
+  if (apiKey) {
+    headers["Authorization"] = `Bearer ${apiKey}`;
+  }
+  const res = await fetch("/v1/files", {
+    method: "POST",
+    headers,
+    body: form,
+    signal,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(data?.error?.message || data?.error || `File upload failed: HTTP ${res.status}`);
+  }
+  return data;
+}
+
 export async function streamChatCompletion(params: {
-  messages: Array<{ role: string; content: string }>;
+  messages: Array<{ role: string; content: string | OpenAIChatContentPart[] }>;
   model: string;
   openuiMode: boolean;
   apiKey?: string;
@@ -1483,9 +1513,14 @@ export async function clearServerGallery(): Promise<number> {
 export interface ServerChatMessage {
   id: string;
   conversation_id?: string;
+  parent_id?: string;
   session_key?: string;
   role: "user" | "assistant" | "system";
   content: string;
+  parts_json?: string;
+  attachments_json?: string;
+  metadata_json?: string;
+  status_json?: string;
   model?: string;
   openui_mode?: boolean;
   skill?: string;
@@ -1502,6 +1537,8 @@ export interface ServerConversation {
   model: string;
   system_prompt?: string;
   preset_id?: string;
+  head_message_id?: string;
+  custom_json?: string;
   is_pinned: boolean;
   is_archived: boolean;
   tags?: string;
@@ -1561,6 +1598,8 @@ export async function createServerConversation(payload: {
   model?: string;
   system_prompt?: string;
   preset_id?: string;
+  head_message_id?: string;
+  custom_json?: string;
   is_pinned?: boolean;
 }): Promise<ServerConversation> {
   const res = await adminFetch("/admin/api/v1/chat/conversations", {
@@ -1593,6 +1632,8 @@ export async function updateServerConversation(
     model?: string;
     system_prompt?: string;
     preset_id?: string;
+    head_message_id?: string;
+    custom_json?: string;
     is_pinned?: boolean;
     is_archived?: boolean;
     tags?: string;
@@ -1620,26 +1661,51 @@ export async function deleteServerConversation(id: string): Promise<void> {
   }
 }
 
+export interface ServerChatMessagePayload {
+  id?: string;
+  parentId?: string;
+  role: string;
+  content: string;
+  partsJson?: string;
+  attachmentsJson?: string;
+  metadataJson?: string;
+  statusJson?: string;
+  model?: string;
+  openuiMode?: boolean;
+  skill?: string;
+  tokensPrompt?: number;
+  tokensComp?: number;
+  latencyMs?: number;
+  citations?: string;
+  timestamp?: number;
+}
+
+export async function appendServerConversationMessage(
+  id: string,
+  message: ServerChatMessagePayload,
+  moveHead = true
+): Promise<{ success: boolean; conversation_id: string; message: ServerChatMessage }> {
+  const res = await adminFetch(`/admin/api/v1/chat/conversations/${encodeURIComponent(id)}/messages/append`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message, move_head: moveHead }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(data?.error || `Append message failed: HTTP ${res.status}`);
+  }
+  return data;
+}
+
 export async function saveServerConversationMessages(
   id: string,
-  messages: Array<{
-    id?: string;
-    role: string;
-    content: string;
-    model?: string;
-    openuiMode?: boolean;
-    skill?: string;
-    tokensPrompt?: number;
-    tokensComp?: number;
-    latencyMs?: number;
-    citations?: string;
-    timestamp?: number;
-  }>
+  messages: ServerChatMessagePayload[],
+  headMessageId?: string
 ): Promise<void> {
   const res = await adminFetch(`/admin/api/v1/chat/conversations/${encodeURIComponent(id)}/messages`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ messages }),
+    body: JSON.stringify({ messages, head_message_id: headMessageId }),
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
@@ -2209,6 +2275,149 @@ export interface DramaCapabilities {
   recommended: Record<DramaRoutingPolicy, DramaRecommendedPlan>;
 }
 
+export type DramaNodeStatus = "pending" | "running" | "ready" | "stale" | "failed" | "degraded";
+
+export interface DramaNodeStateSchema {
+  status: DramaNodeStatus;
+  input_hash?: string;
+  output?: string;
+  locked: boolean;
+  attempts: number;
+  error?: string;
+  status_note?: string;
+  task_id?: string;
+  model_used?: string;
+  updated_at?: string;
+}
+
+export interface DramaAssetSchema {
+  id: string;
+  kind: "image" | "audio" | "video";
+  url: string;
+  sha256?: string;
+  model?: string;
+  prompt?: string;
+  created_at?: string;
+}
+
+export interface DramaProjectSchema {
+  id: string;
+  schema_version: number;
+  revision: number;
+  script: {
+    title: string;
+    outline: string;
+    genre: string;
+    aspect_ratio: string;
+    style: string;
+    target_duration_sec?: number;
+    routing_policy: string;
+    image_model_override?: string;
+    video_model_override?: string;
+    allowed_image_providers?: string[];
+    allowed_video_providers?: string[];
+    image_concurrency?: number;
+    auto_fallback_ken_burns?: boolean;
+    bgm_url?: string;
+    bgm_volume?: number;
+    show_subtitles?: boolean;
+  };
+  analysis?: {
+    beats?: Array<{ id: string; summary: string; conflict?: string; hook_score?: number }>;
+    highlight_beat_ids?: string[];
+  };
+  characters: Array<{
+    id: string;
+    name: string;
+    role: string;
+    avatar_color?: string;
+    appearance_bible: string;
+    portrait_prompt?: string;
+    voice: { engine: string; id: string; name?: string; speed?: number; pitch?: number };
+    portrait?: string;
+  }>;
+  scenes: Array<{
+    id: string;
+    name: string;
+    environment: string;
+    lighting: string;
+    anchor?: string;
+  }>;
+  shots: Array<{
+    id: string;
+    index: number;
+    beat_id?: string;
+    scene_id?: string;
+    speaker_id?: string;
+    continuous?: boolean;
+    shot_type: string;
+    camera_move: string;
+    action: string;
+    dialogue: string;
+    continuity_notes?: string;
+    polished_video_prompt?: string;
+    transition?: string;
+    duration_sec: number;
+    actual_audio_duration?: number;
+    keyframe?: string;
+    audio?: string;
+    video?: string;
+  }>;
+  assets: Record<string, DramaAssetSchema>;
+  nodes: Record<string, DramaNodeStateSchema>;
+  timeline?: { tracks?: unknown[]; srt?: string };
+}
+
+export interface DramaLayoutData {
+  positions?: Record<string, { x: number; y: number }>;
+  checkpoint_after_cast?: boolean;
+  checkpoint_after_keyframes?: boolean;
+}
+
+export interface DramaRunLogEntry {
+  timestamp: string;
+  level: "info" | "success" | "warn" | "error";
+  node_key?: string;
+  message: string;
+}
+
+export interface DramaRunSummary {
+  total: number;
+  ready: number;
+  degraded: number;
+  skipped: number;
+  running: number;
+  failed: number;
+  pending: number;
+  duration_ms: number;
+}
+
+export interface DramaRunRecord {
+  id: string;
+  project_id: string;
+  status: "running" | "completed" | "partial" | "failed" | "cancelled";
+  error?: string;
+  logs?: DramaRunLogEntry[];
+  summary?: DramaRunSummary;
+  created_at?: string;
+  updated_at?: string;
+  finished_at?: string;
+}
+
+export interface DramaRunEvent {
+  type: "node.update" | "run.update" | "run.log";
+  run_id: string;
+  project_id: string;
+  node_key?: string;
+  node_state?: DramaNodeStateSchema;
+  status?: string;
+  message?: string;
+  log?: DramaRunLogEntry;
+  summary?: DramaRunSummary;
+  revision?: number;
+  timestamp: string;
+}
+
 export interface DramaProjectRecord {
   id: string;
   title: string;
@@ -2220,6 +2429,12 @@ export interface DramaProjectRecord {
   graph_json: string;
   status: string;
   shot_count: number;
+  schema_version?: number;
+  revision?: number;
+  project?: DramaProjectSchema;
+  layout?: DramaLayoutData;
+  active_run_id?: string;
+  latest_run?: DramaRunRecord;
   created_at?: string;
   updated_at?: string;
 }
@@ -2292,6 +2507,126 @@ export async function cacheDramaMedia(payload: {
     throw new Error(data?.error || `Cache drama media failed: HTTP ${res.status}`);
   }
   return data;
+}
+
+export async function startDramaRun(
+  projectId: string,
+  opts?: { targets?: string[]; force?: string[]; until?: string },
+): Promise<{ run: DramaRunRecord; already_running: boolean }> {
+  const res = await adminFetch(`/admin/api/v1/drama/projects/${encodeURIComponent(projectId)}/runs`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(opts || {}),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error || `Start drama run failed: HTTP ${res.status}`);
+  }
+  return data;
+}
+
+export async function fetchDramaRuns(projectId: string): Promise<DramaRunRecord[]> {
+  const res = await adminFetch(`/admin/api/v1/drama/projects/${encodeURIComponent(projectId)}/runs`);
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error || `Fetch drama runs failed: HTTP ${res.status}`);
+  }
+  return data.data || [];
+}
+
+export async function fetchDramaRun(projectId: string, runId: string): Promise<DramaRunRecord> {
+  const res = await adminFetch(
+    `/admin/api/v1/drama/projects/${encodeURIComponent(projectId)}/runs/${encodeURIComponent(runId)}`,
+  );
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error || `Fetch drama run failed: HTTP ${res.status}`);
+  }
+  return data;
+}
+
+export async function lockDramaNode(projectId: string, nodeKey: string): Promise<{ revision: number; project: DramaProjectSchema }> {
+  const res = await adminFetch(
+    `/admin/api/v1/drama/projects/${encodeURIComponent(projectId)}/nodes/${encodeURIComponent(nodeKey)}/lock`,
+    { method: "POST" },
+  );
+  const data = await res.json();
+  if (!res.ok) throw new Error(data?.error || `Lock node failed: HTTP ${res.status}`);
+  return data;
+}
+
+export async function unlockDramaNode(projectId: string, nodeKey: string): Promise<{ revision: number; project: DramaProjectSchema }> {
+  const res = await adminFetch(
+    `/admin/api/v1/drama/projects/${encodeURIComponent(projectId)}/nodes/${encodeURIComponent(nodeKey)}/unlock`,
+    { method: "POST" },
+  );
+  const data = await res.json();
+  if (!res.ok) throw new Error(data?.error || `Unlock node failed: HTTP ${res.status}`);
+  return data;
+}
+
+export async function retryDramaNode(projectId: string, nodeKey: string): Promise<{ run: DramaRunRecord; already_running: boolean }> {
+  const res = await adminFetch(
+    `/admin/api/v1/drama/projects/${encodeURIComponent(projectId)}/nodes/${encodeURIComponent(nodeKey)}/retry`,
+    { method: "POST" },
+  );
+  const data = await res.json();
+  if (!res.ok) throw new Error(data?.error || `Retry node failed: HTTP ${res.status}`);
+  return data;
+}
+
+export function subscribeDramaRunEvents(
+  projectId: string,
+  runId: string,
+  handlers: {
+    onEvent: (ev: DramaRunEvent) => void;
+    onError?: (err: Error) => void;
+    onDone?: () => void;
+  },
+): () => void {
+  const controller = new AbortController();
+  const url = `/admin/api/v1/drama/projects/${encodeURIComponent(projectId)}/runs/${encodeURIComponent(runId)}/events`;
+
+  (async () => {
+    try {
+      const res = await adminFetch(url, { signal: controller.signal });
+      if (!res.ok || !res.body) {
+        throw new Error(`SSE stream failed: HTTP ${res.status}`);
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const blocks = buf.split("\n\n");
+        buf = blocks.pop() || "";
+        for (const block of blocks) {
+          const lines = block.split("\n");
+          for (const line of lines) {
+            if (line.startsWith("data:")) {
+              const raw = line.slice(5).trim();
+              if (!raw) continue;
+              try {
+                const ev = JSON.parse(raw) as DramaRunEvent;
+                handlers.onEvent(ev);
+              } catch {
+                // ignore malformed chunk
+              }
+            }
+          }
+        }
+      }
+      handlers.onDone?.();
+    } catch (err) {
+      if ((err as Error).name !== "AbortError") {
+        handlers.onError?.(err instanceof Error ? err : new Error(String(err)));
+      }
+    }
+  })();
+
+  return () => controller.abort();
 }
 
 export async function transcribeAudio(

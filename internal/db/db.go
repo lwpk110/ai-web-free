@@ -98,6 +98,7 @@ func InitDB(dsn string) (*gorm.DB, error) {
 		&AudioGenerationRecord{},
 		&ProviderAccountRecord{},
 		&DramaProjectRecord{},
+		&DramaRunRecord{},
 	); err != nil {
 		return nil, fmt.Errorf("failed to auto migrate database schemas: %w", err)
 	}

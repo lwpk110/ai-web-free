@@ -439,17 +439,22 @@ func (h *GalleryHandler) ClearWorks(c *gin.Context) {
 // ─── 会话历史 API ────────────────────────────────────────────────────
 
 type ChatMessageItem struct {
-	ID           string `json:"id"`
-	Role         string `json:"role"`
-	Content      string `json:"content"`
-	Model        string `json:"model,omitempty"`
-	OpenUIMode   bool   `json:"openuiMode"`
-	Skill        string `json:"skill,omitempty"`
-	TokensPrompt int    `json:"tokensPrompt,omitempty"`
-	TokensComp   int    `json:"tokensComp,omitempty"`
-	LatencyMs    int64  `json:"latencyMs,omitempty"`
-	Citations    string `json:"citations,omitempty"`
-	Timestamp    int64  `json:"timestamp,omitempty"`
+	ID              string `json:"id"`
+	ParentID        string `json:"parentId,omitempty"`
+	Role            string `json:"role"`
+	Content         string `json:"content"`
+	PartsJSON       string `json:"partsJson,omitempty"`
+	AttachmentsJSON string `json:"attachmentsJson,omitempty"`
+	MetadataJSON    string `json:"metadataJson,omitempty"`
+	StatusJSON      string `json:"statusJson,omitempty"`
+	Model           string `json:"model,omitempty"`
+	OpenUIMode      bool   `json:"openuiMode"`
+	Skill           string `json:"skill,omitempty"`
+	TokensPrompt    int    `json:"tokensPrompt,omitempty"`
+	TokensComp      int    `json:"tokensComp,omitempty"`
+	LatencyMs       int64  `json:"latencyMs,omitempty"`
+	Citations       string `json:"citations,omitempty"`
+	Timestamp       int64  `json:"timestamp,omitempty"`
 }
 
 type SaveChatMessagesRequest struct {

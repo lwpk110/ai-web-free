@@ -30,6 +30,7 @@ import {
 } from "../../lib/dramaPresets";
 
 export interface DramaNodeActionCallbacks {
+  isPipelineRunning?: boolean;
   onRunBreakdown: () => void;
   onRunPipeline: () => void;
   onGenerateCharacter: (nodeId: string) => void;
@@ -79,6 +80,14 @@ function StatusBadge({ status, label }: { status: string; label?: string }) {
       <span className="inline-flex items-center gap-1 rounded-full bg-sky-500/15 px-2 py-0.5 text-[10px] font-medium text-sky-600 dark:text-sky-400">
         <Film className="h-3 w-3" />
         {label || "Ken Burns"}
+      </span>
+    );
+  }
+  if (status === "stale") {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full bg-orange-500/15 px-2 py-0.5 text-[10px] font-medium text-orange-600 dark:text-orange-400">
+        <RefreshCw className="h-3 w-3" />
+        {label || "待更新"}
       </span>
     );
   }
@@ -150,8 +159,8 @@ export const ScriptCanvasNode: React.FC<NodeProps> = ({ data, selected }) => {
             e.stopPropagation();
             actions.onRunBreakdown();
           }}
-          disabled={d.status === "running"}
-          className="flex-1 inline-flex items-center justify-center gap-1 rounded-lg border border-[var(--border-default)] bg-[var(--bg-elevated)] px-2 py-1.5 text-[11px] font-medium hover:bg-[var(--bg-surface-hover)] disabled:opacity-50"
+          disabled={actions.isPipelineRunning || d.status === "running"}
+          className="flex-1 inline-flex items-center justify-center gap-1 rounded-lg border border-[var(--border-default)] bg-[var(--bg-elevated)] px-2 py-1.5 text-[11px] font-medium hover:bg-[var(--bg-surface-hover)] disabled:cursor-not-allowed disabled:opacity-50"
         >
           <Sparkles className="h-3 w-3 text-indigo-500" />
           AI 拆解分镜
@@ -162,10 +171,20 @@ export const ScriptCanvasNode: React.FC<NodeProps> = ({ data, selected }) => {
             e.stopPropagation();
             actions.onRunPipeline();
           }}
-          className="flex-1 inline-flex items-center justify-center gap-1 rounded-lg bg-indigo-600 px-2 py-1.5 text-[11px] font-medium text-white hover:bg-indigo-500"
+          disabled={actions.isPipelineRunning || d.status === "running"}
+          className="flex-1 inline-flex items-center justify-center gap-1 rounded-lg bg-indigo-600 px-2 py-1.5 text-[11px] font-medium text-white hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-60"
         >
-          <Play className="h-3 w-3" />
-          一键成片
+          {actions.isPipelineRunning ? (
+            <>
+              <Loader2 className="h-3 w-3 animate-spin" />
+              运行中...
+            </>
+          ) : (
+            <>
+              <Play className="h-3 w-3" />
+              一键成片
+            </>
+          )}
         </button>
       </div>
     </BaseCard>

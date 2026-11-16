@@ -249,3 +249,19 @@
    - 前端成片终端节点支持多轨音画同步连播、纯前端 `Canvas + AudioContext + MediaRecorder` 合成单个完整连续视频文件，以及打包真实 `.mp4` / `.mp3` / `.png` / `.srt` / `draft_content.json` 的 ZIP 下载包。
 7. **短剧全套音色池、纯云端密钥即配与 Chat 爬虫资产联动**：
    - `BUILTIN_VOICE_OPTIONS` 与 `GET /v1/audio/voices` 覆盖霸总、大女主、战神、甜宠千金、反派、悬疑旁白、方言喜剧、粤语港风、台偶与出海多语种音色；通过 `#/chat` (`/voice` / `/crawl`) 抓取并缓存/克隆的 `custom_*` 系统音色、角色立绘与视频片段同步出现在角色检视器与全平台导入抽屉中，可直接点击顶栏「配置云端 API Key」激活 `SILICONFLOW_API_KEY` / `DASHSCOPE_API_KEY` / `JIMENG` / `META_COOKIE`（纯云端，无本地 GPU/模型部署依赖）。
+
+---
+
+## 8. 后端 DAG 并发引擎、版本化 Schema 与 MCP 编排架构（已实施）
+
+1. **版本化领域 JSON 唯一事实源（`internal/drama/schema.go`、`patch.go`、`hash.go`）**：
+   - 工程以结构化 `DramaProject`（`schema_version: 1`、`revision` 乐观锁、`script` / `analysis` / `characters` / `scenes` / `shots` / `assets` / `nodes` / `timeline`）持久化在 `DramaProjectRecord.ProjectJSON`，画布坐标等 UI 状态独立存放于 `LayoutJSON`，由前端动态派生 React Flow 画布。
+   - 读取旧版 `graph_json` 工程时自动无损迁移至 `DramaProject` Schema，保留已生成产物与 `ready` 状态。
+2. **输入指纹跳过、连带失效与节点锁定保护**：
+   - 每个产物节点记录确定性 `input_hash`；重复触发 Run 时，状态为 `ready`/`degraded` 且指纹一致的节点直接跳过；上游修改（含 RFC 6902 `PATCH /admin/api/v1/drama/projects/:id`）自动将受影响的下游标为 `stale`；`locked: true` 的节点永不被覆盖或重跑。
+3. **后端并发 DAG 调度与断点续跑（`internal/drama/engine.go`）**：
+   - 支持多阶段拆剧本（`script.analyze` → `script.highlights` → `bible.characters`/`bible.scenes` → `storyboard.shots`，含 JSON 校验与修复重试及 `until` 截断）、按生图账号池并发的 `image.*`、并行 `tts.line:*`、异步视频 `video.clip:*`（支持按 `task_id` 续轮询与 `ken_burns` 降级）及终点装配 `timeline.assemble`（输出 `Tracks`、`SRT` 与剪映草稿）。
+   - 每个工程同时只允许一个活跃 Run（重复触发幂等返回）；节点状态与 `task_id` 实时落库，服务重启后自动恢复中断的 Run；通过 `GET /admin/api/v1/drama/projects/:id/runs/:rid/events` 实时 SSE 推送进度。
+4. **MCP 自由编排与可选外部 MP4 渲染服务**：
+   - 暴露 `POST /admin/api/v1/drama/mcp`（JSON-RPC 2.0，提供 `drama_list_projects`、`drama_get_project`、`drama_patch_project`、`drama_run`、`drama_lock_node` 工具）。
+   - 可选配置 `RENDER_SERVICE_URL`（或通过 `docker compose --profile render up -d` 启用外部 FFmpeg 渲染服务）执行 `render.mp4` 节点；未配置时诚实降级并由前端 Canvas+MediaRecorder 合成。

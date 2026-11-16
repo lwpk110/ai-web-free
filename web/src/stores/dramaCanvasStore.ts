@@ -6,16 +6,30 @@ import {
   fetchDramaCapabilities,
   fetchDramaProject,
   fetchDramaProjects,
+  fetchDramaRun,
+  fetchDramaRuns,
+  lockDramaNode,
+  retryDramaNode,
   saveDramaProject,
+  startDramaRun,
+  subscribeDramaRunEvents,
+  unlockDramaNode,
   type DramaCapabilities,
   type DramaProjectRecord,
+  type DramaProjectSchema,
   type DramaRoutingPolicy,
+  type DramaRunLogEntry,
+  type DramaRunRecord,
+  type DramaRunSummary,
 } from "../api/client";
 import type { DramaCanvasImportPayload } from "../lib/dramaCanvasBridge";
 import {
+  applyBackendProjectToFlow,
   buildDramaGraphFromTemplate,
   createShotVersionBranch,
   DRAMA_PRESETS,
+  flowGraphToLayout,
+  flowGraphToSchemaProject,
   getActiveShotBranch,
   layoutDramaNodesCleanly,
   type AudioImportNodeData,
@@ -126,9 +140,18 @@ const initialGraph = buildDramaGraphFromTemplate(initialPreset);
 const DEFAULT_PROJECT_ID = "drama_default_main";
 
 let syncTimer: number | null = null;
+let activeUnsubSSE: (() => void) | null = null;
+let activePollTimer: number | null = null;
 
 export interface DramaCanvasState {
   projectId: string;
+  backendProject: DramaProjectSchema | null;
+  activeRunId: string | null;
+  runLogs: DramaRunLogEntry[];
+  runSummary: DramaRunSummary | null;
+  runsHistory: DramaRunRecord[];
+  selectedLogRunId: string | null;
+  logPanelOpen: boolean;
   nodes: DramaFlowNode[];
   edges: Edge[];
   selectedNodeId: string | null;
@@ -176,6 +199,14 @@ export interface DramaCanvasState {
   moveShotOrder: (shotNodeId: string, direction: "up" | "down") => void;
   importCrossStudioAsset: (payload: DramaCanvasImportPayload) => Promise<void>;
   persistNow: () => Promise<void>;
+  runBackendPipeline: (opts?: { targets?: string[]; force?: string[] }) => Promise<void>;
+  connectRunSSE: (projectId: string, runId: string) => void;
+  toggleNodeLock: (nodeKey: string, locked: boolean) => Promise<void>;
+  retrySingleNode: (nodeKey: string) => Promise<void>;
+  syncFromBackendProject: (proj: DramaProjectSchema) => void;
+  setLogPanelOpen: (open: boolean) => void;
+  refreshRunsHistory: () => Promise<void>;
+  selectRunLogView: (runId: string) => Promise<void>;
 }
 
 export const useDramaCanvasStore = create<DramaCanvasState>((set, get) => {
@@ -216,6 +247,13 @@ export const useDramaCanvasStore = create<DramaCanvasState>((set, get) => {
 
   return {
     projectId: DEFAULT_PROJECT_ID,
+    backendProject: null,
+    activeRunId: null,
+    runLogs: [],
+    runSummary: null,
+    runsHistory: [],
+    selectedLogRunId: null,
+    logPanelOpen: false,
     nodes: initialGraph.nodes,
     edges: initialGraph.edges,
     selectedNodeId: "script-main",
@@ -253,6 +291,11 @@ export const useDramaCanvasStore = create<DramaCanvasState>((set, get) => {
 
       set({ isSaving: true });
       try {
+        const schemaProject = flowGraphToSchemaProject(state.projectId, cleanNodes, state.backendProject);
+        const layout = flowGraphToLayout(cleanNodes, {
+          checkpointAfterCast: state.checkpointAfterCast,
+          checkpointAfterKeyframes: state.checkpointAfterKeyframes,
+        });
         const saved = await saveDramaProject({
           id: state.projectId,
           title: scriptNode?.data.title || "未命名短剧工程",
@@ -261,6 +304,8 @@ export const useDramaCanvasStore = create<DramaCanvasState>((set, get) => {
           style_preset: scriptNode?.data.stylePreset || "",
           routing_policy: (scriptNode?.data.routingPolicy || "free_first") as DramaRoutingPolicy,
           outline: scriptNode?.data.outline || "",
+          project: schemaProject,
+          layout,
           graph_json: JSON.stringify({
             nodes: cleanNodes,
             edges: state.edges,
@@ -277,6 +322,230 @@ export const useDramaCanvasStore = create<DramaCanvasState>((set, get) => {
         set({ syncStatus: "local" });
       } finally {
         set({ isSaving: false });
+      }
+    },
+
+    syncFromBackendProject(proj: DramaProjectSchema) {
+      const state = get();
+      const derived = applyBackendProjectToFlow(proj, state.nodes);
+      set({
+        backendProject: proj,
+        nodes: derived.nodes,
+        edges: derived.edges,
+      });
+    },
+
+    setLogPanelOpen(open: boolean) {
+      set({ logPanelOpen: open });
+    },
+
+    async refreshRunsHistory() {
+      const pid = get().projectId;
+      try {
+        const list = await fetchDramaRuns(pid);
+        set({ runsHistory: list });
+      } catch {
+        /* noop */
+      }
+    },
+
+    async selectRunLogView(runId: string) {
+      const pid = get().projectId;
+      try {
+        const rec = await fetchDramaRun(pid, runId);
+        set({
+          selectedLogRunId: runId,
+          runLogs: rec.logs || [],
+          runSummary: rec.summary || null,
+        });
+      } catch {
+        /* noop */
+      }
+    },
+
+    connectRunSSE(projectId: string, runId: string) {
+      if (activeUnsubSSE) {
+        activeUnsubSSE();
+        activeUnsubSSE = null;
+      }
+      if (activePollTimer !== null) {
+        window.clearInterval(activePollTimer);
+        activePollTimer = null;
+      }
+
+      const startFallbackPolling = () => {
+        if (activePollTimer !== null) return;
+        activePollTimer = window.setInterval(async () => {
+          if (get().activeRunId !== runId || get().projectId !== projectId) {
+            if (activePollTimer !== null) {
+              window.clearInterval(activePollTimer);
+              activePollTimer = null;
+            }
+            return;
+          }
+          try {
+            const [runRec, projRec] = await Promise.all([
+              fetchDramaRun(projectId, runId),
+              fetchDramaProject(projectId),
+            ]);
+            if (projRec.project) {
+              get().syncFromBackendProject(projRec.project);
+            }
+            if (runRec.logs) {
+              set({ runLogs: runRec.logs });
+            }
+            if (runRec.summary) {
+              set({ runSummary: runRec.summary });
+            }
+            if (runRec.status && runRec.status !== "running") {
+              if (activePollTimer !== null) {
+                window.clearInterval(activePollTimer);
+                activePollTimer = null;
+              }
+              set({
+                activeRunId: null,
+                pipelineState: runRec.status === "completed" ? "completed" : "error",
+                pipelineStageText:
+                  runRec.error ||
+                  (runRec.status === "completed" ? "后台 DAG 执行完成" : "部分节点失败，可点击补跑失败节点"),
+              });
+              void get().refreshRunsHistory();
+            }
+          } catch {
+            // 忽略单次网络波动，继续等待下一次轮询
+          }
+        }, 3000);
+      };
+
+      const isSameRun = get().selectedLogRunId === runId;
+      set({
+        activeRunId: runId,
+        selectedLogRunId: runId,
+        pipelineState: "running",
+        runLogs: isSameRun ? get().runLogs : [],
+        logPanelOpen: true,
+      });
+
+      activeUnsubSSE = subscribeDramaRunEvents(projectId, runId, {
+        onEvent: (ev) => {
+          if (ev.type === "run.log" && ev.log) {
+            const incoming = ev.log;
+            set((prev) => {
+              const dup = prev.runLogs.some(
+                (l) => l.timestamp === incoming.timestamp && l.node_key === incoming.node_key && l.message === incoming.message,
+              );
+              return {
+                runLogs: dup ? prev.runLogs : [...prev.runLogs, incoming],
+                runSummary: ev.summary ?? prev.runSummary,
+              };
+            });
+          } else if (ev.type === "node.update" && ev.node_key && ev.node_state) {
+            if (ev.node_state.status === "running") {
+              set({ pipelineStageText: `正在并行处理节点 ${ev.node_key} ...` });
+            }
+            void fetchDramaProject(projectId).then((rec) => {
+              if (rec.project) {
+                get().syncFromBackendProject(rec.project);
+              }
+            }).catch(() => {});
+          } else if (ev.type === "run.update") {
+            if (ev.summary) {
+              set({ runSummary: ev.summary });
+            }
+            if (ev.status === "completed") {
+              set({
+                activeRunId: null,
+                pipelineState: "completed",
+                pipelineStageText: ev.message || "后台 DAG 执行完成",
+              });
+            } else if (ev.status === "partial") {
+              set({
+                activeRunId: null,
+                pipelineState: "error",
+                pipelineStageText: ev.message || "部分节点失败，可再次点击一键制片仅补跑失败节点",
+              });
+            } else if (ev.status === "failed" || ev.status === "cancelled") {
+              set({
+                activeRunId: null,
+                pipelineState: "error",
+                pipelineStageText: ev.message || "执行失败",
+              });
+            } else if (ev.message) {
+              set({ pipelineStageText: ev.message });
+            }
+            if (ev.status && ev.status !== "running") {
+              if (activePollTimer !== null) {
+                window.clearInterval(activePollTimer);
+                activePollTimer = null;
+              }
+              void get().refreshRunsHistory();
+              void fetchDramaProject(projectId).then((rec) => {
+                if (rec.project) {
+                  get().syncFromBackendProject(rec.project);
+                }
+              }).catch(() => {});
+            }
+          }
+        },
+        onError: () => {
+          // SSE 断线（如长耗时视频期间代理超时）自动切换为后台轮询兜底，不直接报死 network error
+          set({ pipelineStageText: "实时流重连中，已切换后台轮询同步进度..." });
+          startFallbackPolling();
+        },
+        onDone: () => {
+          activeUnsubSSE = null;
+          if (get().activeRunId === runId) {
+            startFallbackPolling();
+          }
+        },
+      });
+    },
+
+    async runBackendPipeline(opts) {
+      if (get().activeRunId || get().pipelineState === "running") {
+        set({ logPanelOpen: true });
+        return;
+      }
+      set({ pipelineState: "running", pipelineStageText: "正在保存工程并提交后台 DAG 并发流水线...", logPanelOpen: true });
+      try {
+        await get().persistNow();
+        const pid = get().projectId;
+        const res = await startDramaRun(pid, opts);
+        get().connectRunSSE(pid, res.run.id);
+      } catch (err) {
+        set({
+          pipelineState: "error",
+          pipelineStageText: err instanceof Error ? err.message : String(err),
+        });
+        throw err;
+      }
+    },
+
+    async toggleNodeLock(nodeKey: string, locked: boolean) {
+      const pid = get().projectId;
+      const res = locked ? await lockDramaNode(pid, nodeKey) : await unlockDramaNode(pid, nodeKey);
+      if (res.project) {
+        get().syncFromBackendProject(res.project);
+      }
+    },
+
+    async retrySingleNode(nodeKey: string) {
+      if (get().activeRunId || get().pipelineState === "running") {
+        set({ logPanelOpen: true });
+        return;
+      }
+      set({ pipelineState: "running", pipelineStageText: `正在重跑节点 ${nodeKey}...`, logPanelOpen: true });
+      try {
+        await get().persistNow();
+        const pid = get().projectId;
+        const res = await retryDramaNode(pid, nodeKey);
+        get().connectRunSSE(pid, res.run.id);
+      } catch (err) {
+        set({
+          pipelineState: "error",
+          pipelineStageText: err instanceof Error ? err.message : String(err),
+        });
+        throw err;
       }
     },
 
@@ -337,6 +606,39 @@ export const useDramaCanvasStore = create<DramaCanvasState>((set, get) => {
       const localTime = localRec?.updatedAt ? new Date(localRec.updatedAt).getTime() : 0;
       const serverTime = serverRec?.updated_at ? new Date(serverRec.updated_at).getTime() : 0;
 
+      if (serverRec && serverRec.project && serverTime >= localTime) {
+        const derived = applyBackendProjectToFlow(serverRec.project, [], serverRec.layout);
+        const lr = serverRec.latest_run;
+        const restoredState: DramaPipelineState =
+          serverRec.active_run_id || lr?.status === "running"
+            ? "running"
+            : lr?.status === "completed"
+              ? "completed"
+              : lr?.status === "partial" || lr?.status === "failed"
+                ? "error"
+                : "idle";
+        set({
+          projectId: serverRec.id,
+          backendProject: serverRec.project,
+          nodes: derived.nodes,
+          edges: derived.edges,
+          checkpointAfterCast: Boolean(serverRec.layout?.checkpoint_after_cast),
+          checkpointAfterKeyframes: Boolean(serverRec.layout?.checkpoint_after_keyframes),
+          lastSavedAt: serverRec.updated_at || null,
+          syncStatus: "synced",
+          pipelineState: restoredState,
+          pipelineStageText: lr?.error || "",
+          runLogs: lr?.logs || [],
+          runSummary: lr?.summary || null,
+          selectedLogRunId: lr?.id || null,
+        });
+        void get().refreshRunsHistory();
+        if (serverRec.active_run_id) {
+          get().connectRunSSE(serverRec.id, serverRec.active_run_id);
+        }
+        return;
+      }
+
       if (serverRec && serverRec.graph_json && serverTime >= localTime) {
         try {
           const parsed = JSON.parse(serverRec.graph_json);
@@ -374,6 +676,42 @@ export const useDramaCanvasStore = create<DramaCanvasState>((set, get) => {
       const localRec = await idbGetProject(id);
       try {
         const serverRec = await fetchDramaProject(id);
+        if (serverRec?.project) {
+          const derived = applyBackendProjectToFlow(serverRec.project, [], serverRec.layout);
+          const lr = serverRec.latest_run;
+          const restoredState: DramaPipelineState =
+            serverRec.active_run_id || lr?.status === "running"
+              ? "running"
+              : lr?.status === "completed"
+                ? "completed"
+                : lr?.status === "partial" || lr?.status === "failed"
+                  ? "error"
+                  : "idle";
+          set({
+            projectId: id,
+            backendProject: serverRec.project,
+            nodes: derived.nodes,
+            edges: derived.edges,
+            checkpointAfterCast: Boolean(serverRec.layout?.checkpoint_after_cast),
+            checkpointAfterKeyframes: Boolean(serverRec.layout?.checkpoint_after_keyframes),
+            selectedNodeId: derived.nodes[0]?.id || null,
+            pipelineState: restoredState,
+            pipelineStageText: lr?.error || "",
+            runLogs: lr?.logs || [],
+            runSummary: lr?.summary || null,
+            selectedLogRunId: lr?.id || null,
+          });
+          void get().refreshRunsHistory();
+          if (serverRec.active_run_id) {
+            get().connectRunSSE(id, serverRec.active_run_id);
+          }
+          try {
+            window.localStorage.setItem(ACTIVE_PROJECT_KEY, id);
+          } catch {
+            /* noop */
+          }
+          return;
+        }
         if (serverRec?.graph_json) {
           const parsed = JSON.parse(serverRec.graph_json);
           if (Array.isArray(parsed.nodes)) {

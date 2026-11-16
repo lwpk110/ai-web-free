@@ -530,242 +530,55 @@ export function VideoStudio(): React.JSX.Element {
   const currentModelMeta = modelsList.find((m) => m.id === model);
 
   return (
-    <div className="p-6 max-w-7xl mx-auto space-y-6">
-      {/* 顶栏 */}
-      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 pb-4 border-b z-border">
-        <div>
+    <div className="flex-1 grid grid-cols-1 md:grid-cols-[380px_1fr] lg:grid-cols-[400px_1fr] min-h-0 h-full overflow-hidden">
+      {/* 左栏：参数与输入控制台 */}
+      <form
+        onSubmit={handleSubmit}
+        className="z-surface border-b md:border-b-0 md:border-r z-border flex flex-col min-h-0 max-h-[50vh] md:max-h-none md:h-full overflow-hidden"
+      >
+        {/* 左栏头部 */}
+        <div className="p-3 border-b z-border flex items-center justify-between shrink-0 bg-muted/10">
           <div className="flex items-center gap-2">
-            <div className="p-2 bg-primary/10 rounded-lg text-primary">
-              <Film className="w-5 h-5" />
+            <div className="p-1.5 bg-primary/10 rounded-lg text-primary">
+              <Film className="w-4 h-4" />
             </div>
-            <h1 className="text-2xl font-bold tracking-tight z-text">视频创作工坊 (Video Studio)</h1>
-            <span className="px-2.5 py-0.5 text-xs font-medium rounded-full bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20">
-              CogVideoX & Meta Muse
-            </span>
-            <span className="px-2.5 py-0.5 text-xs font-medium rounded-full bg-purple-500/10 text-purple-600 dark:text-purple-400 border border-purple-500/20">
-              字节即梦 2.0
-            </span>
+            <div>
+              <h2 className="text-xs font-semibold z-text flex items-center gap-1.5">
+                <span>视频创作参数台</span>
+                {currentModelMeta?.tag && (
+                  <span className="text-[10px] font-normal px-1.5 py-0.2 rounded bg-primary/10 text-primary">
+                    {currentModelMeta.tag}
+                  </span>
+                )}
+              </h2>
+              <p className="text-[10px] z-text-muted">标准 OpenAI 异步视频接口</p>
+            </div>
           </div>
-          <p className="text-sm z-text-muted mt-1">
-            支持标准 OpenAI 异步视频接口（POST /v1/videos/generations），内置免算力号池、真实异步任务队列与本地持久化。
-          </p>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-2">
-          <a
-            href="#/chat"
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md border z-border hover:bg-muted/50 transition-colors z-text"
-            title="前往 Chat 使用 /crawl 爬虫搜集首帧参考图或视频素材入库复用"
-          >
-            <Globe className="w-3.5 h-3.5 text-primary" />
-            Chat 爬虫找素材
-          </a>
-          <button
-            type="button"
-            onClick={() => setCloudKeyModalOpen(true)}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md bg-amber-500/10 text-amber-700 dark:text-amber-400 border border-amber-500/25 hover:bg-amber-500/20 transition-colors"
-            title="无需本地 GPU，配置云端 API Key 解锁深度视频扩散生成"
-          >
-            <KeyRound className="w-3.5 h-3.5" />
-            配置云端 API Key
-          </button>
-          <button
-            type="button"
-            onClick={() => void openAssetPicker("images")}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md border border-primary/30 bg-primary/10 text-primary hover:bg-primary/20 transition-colors"
-          >
-            <FolderOpen className="w-3.5 h-3.5" />
-            项目素材库 (图/音/视频)
-          </button>
-          <button
-            onClick={() => {
-              loadTasks();
-              loadModels();
-            }}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md border z-border hover:bg-muted/50 transition-colors z-text-muted"
-          >
-            <RefreshCw className="w-3.5 h-3.5" />
-            刷新列表与模型
-          </button>
-        </div>
-      </div>
-
-      {/* 模式说明条 */}
-      <div className="p-3 text-xs rounded-lg bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20 flex items-start gap-2">
-        <Sparkles className="w-4 h-4 shrink-0 mt-0.5 text-blue-500" />
-        <div>
-          <span className="font-semibold">纯云端 API 视频推理（无需本地硬件部署）：</span>
-          点击右上角「配置云端 API Key」注入 <code className="px-1.5 py-0.5 rounded bg-muted text-foreground font-mono">SILICONFLOW_API_KEY</code>、<code className="px-1.5 py-0.5 rounded bg-muted text-foreground font-mono">DASHSCOPE_API_KEY</code>、字节即梦或 Meta Muse Cookie 后，将直接通过云端大模型执行物理扩散生成；亦可前往 Chat 使用 <code className="px-1.5 py-0.5 rounded bg-muted text-foreground font-mono">/crawl</code> 搜集参考图与视频片段缓存到「项目素材库」中直接复用。
-        </div>
-      </div>
-
-      {errorMsg && (
-        <div className="p-3 text-sm rounded-lg bg-destructive/10 text-destructive border border-destructive/20 flex items-center justify-between">
-          <span>{errorMsg}</span>
-          <button onClick={() => setErrorMsg(null)} className="text-xs hover:underline">
-            关闭
-          </button>
-        </div>
-      )}
-
-      {/* 专业运镜风格提示词建议面板 */}
-      <div className="p-card rounded-xl border z-border p-3.5 shadow-sm space-y-3">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="flex items-center gap-2">
-            <Camera className="w-4 h-4 text-amber-500" />
-            <span className="text-xs font-semibold z-text">专业运镜风格提示词建议</span>
-            <span className="text-[11px] z-text-muted hidden sm:inline">
-              选中运镜后点击「AI 扩写 / 润色」可自动融入镜头调度，也可直接追加或套用双语示例
-            </span>
+          <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => void openAssetPicker("images")}
+              className="flex items-center gap-1 px-2 py-1 text-[11px] font-medium rounded-md border border-primary/30 bg-primary/10 text-primary hover:bg-primary/20 transition-colors"
+              title="打开项目素材库"
+            >
+              <FolderOpen className="w-3 h-3" />
+              素材库
+            </button>
+            <button
+              type="button"
+              onClick={() => setCloudKeyModalOpen(true)}
+              className="flex items-center gap-1 px-2 py-1 text-[11px] font-medium rounded-md bg-amber-500/10 text-amber-700 dark:text-amber-400 border border-amber-500/25 hover:bg-amber-500/20 transition-colors"
+              title="配置云端 API Key"
+            >
+              <KeyRound className="w-3 h-3" />
+              Key
+            </button>
           </div>
-          <button
-            type="button"
-            onClick={() => setShowCameraPanel((v) => !v)}
-            className="inline-flex items-center gap-1 text-[11px] z-text-muted hover:z-text px-2 py-1 rounded-md hover:bg-muted/60 transition-colors"
-          >
-            {showCameraPanel ? (
-              <>
-                收起建议 <ChevronUp className="w-3.5 h-3.5" />
-              </>
-            ) : (
-              <>
-                展开 ({VIDEO_CAMERA_PRESETS.length} 种运镜) <ChevronDown className="w-3.5 h-3.5" />
-              </>
-            )}
-          </button>
         </div>
 
-        {showCameraPanel && (
-          <>
-            <div className="flex flex-wrap items-center gap-1.5">
-              {VIDEO_CAMERA_CATEGORIES.map((cat) => {
-                const active = cameraCategory === cat;
-                return (
-                  <button
-                    key={cat}
-                    type="button"
-                    onClick={() => setCameraCategory(cat)}
-                    className={`text-[11px] px-2.5 py-1 rounded-full border transition-colors ${
-                      active
-                        ? "bg-primary text-primary-foreground border-transparent font-medium"
-                        : "z-border hover:bg-muted/60 z-text-muted"
-                    }`}
-                  >
-                    {cat}
-                  </button>
-                );
-              })}
-              {selectedCameraPreset && (
-                <button
-                  type="button"
-                  onClick={() => setSelectedCameraId(null)}
-                  className="ml-auto inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20 hover:bg-amber-500/20 transition-colors"
-                >
-                  已选：{selectedCameraPreset.nameZh}
-                  <X className="w-3 h-3" />
-                </button>
-              )}
-            </div>
-
-            <CameraMotionPreview
-              preset={previewCameraPreset}
-              museVideoUrl={musePreviewUrls[previewCameraPreset.id]}
-              museGenerating={Boolean(museGeneratingMap[previewCameraPreset.id])}
-              museProgress={museProgressMap[previewCameraPreset.id] || 0}
-              museError={museErrorMap[previewCameraPreset.id] || null}
-              canManageDemo={isAdmin}
-              onGenerateMusePreview={handleGenerateMusePreview}
-              onRegenerateMusePreview={handleRegenerateMusePreview}
-              onPickVideoForPreview={handlePickVideoForPreview}
-              onClearMusePreview={handleClearMusePreview}
-              onAppendClause={handleAppendCameraClause}
-              onApplyExample={handleApplyCameraExample}
-            />
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-2 max-h-[210px] overflow-y-auto pr-1">
-              {filteredCameraPresets.map((preset) => {
-                const isSelected = selectedCameraId === preset.id;
-                return (
-                  <div
-                    key={preset.id}
-                    onMouseEnter={() => setHoveredCameraId(preset.id)}
-                    onMouseLeave={() => setHoveredCameraId(null)}
-                    onClick={() =>
-                      setSelectedCameraId((prev) => (prev === preset.id ? null : preset.id))
-                    }
-                    className={`group cursor-pointer rounded-lg border p-2.5 transition-all flex flex-col justify-between gap-1.5 ${
-                      isSelected
-                        ? "border-primary bg-primary/5 ring-1 ring-primary/30"
-                        : "z-border hover:bg-muted/40"
-                    }`}
-                  >
-                    <div className="space-y-0.5">
-                      <div className="flex items-center justify-between gap-1">
-                        <span className="text-xs font-semibold z-text truncate">
-                          {musePreviewUrls[preset.id] ? "🎬 " : ""}
-                          {preset.nameZh}
-                        </span>
-                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-muted z-text-muted shrink-0">
-                          {preset.category}
-                        </span>
-                      </div>
-                      <div className="text-[10px] font-mono text-primary/80 truncate">
-                        {preset.termEn}
-                      </div>
-                      <p className="text-[11px] z-text-muted line-clamp-2 leading-snug">
-                        {preset.effectDesc}
-                      </p>
-                    </div>
-                    <div className="flex items-center gap-1.5 pt-1 border-t z-border">
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleAppendCameraClause(preset);
-                        }}
-                        className="flex-1 inline-flex items-center justify-center gap-0.5 text-[10px] py-1 px-1.5 rounded border z-border hover:bg-muted z-text transition-colors"
-                        title="将此运镜词追加到当前提示词末尾"
-                      >
-                        <Plus className="w-2.5 h-2.5" />
-                        追加运镜
-                      </button>
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleApplyCameraExample(preset);
-                        }}
-                        className="flex-1 inline-flex items-center justify-center gap-0.5 text-[10px] py-1 px-1.5 rounded bg-primary/10 text-primary hover:bg-primary/20 font-medium transition-colors"
-                        title="填入完整导演级双语示例并匹配推荐模型"
-                      >
-                        套用示例
-                      </button>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </>
-        )}
-      </div>
-
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* 左侧：参数与提交表单 */}
-        <div className="lg:col-span-5 space-y-4">
-          <div className="p-card rounded-xl border z-border p-4 shadow-sm space-y-4">
-            <h2 className="text-sm font-semibold flex items-center justify-between z-text">
-              <span className="flex items-center gap-2">
-                <Video className="w-4 h-4 text-primary" />
-                生成参数设置
-              </span>
-              {currentModelMeta?.tag && (
-                <span className="text-[11px] font-normal px-2 py-0.5 rounded bg-primary/10 text-primary">
-                  {currentModelMeta.tag}
-                </span>
-              )}
-            </h2>
-
-            {/* 模型选择 */}
+        {/* 左栏配置滚动区 */}
+        <div className="flex-1 overflow-y-auto p-4 space-y-4 min-h-0 text-xs">
+          {/* 模型选择 */}
             <div className="space-y-1.5">
               <label className="text-xs font-medium z-text">选择视频大模型</label>
               <select
@@ -1048,25 +861,230 @@ export function VideoStudio(): React.JSX.Element {
                 </div>
               </div>
             </div>
+        </div>
 
-            <button
-              onClick={handleSubmit}
-              disabled={submitting || (!prompt.trim() && !imageUrl.trim())}
-              className="w-full py-2.5 px-4 rounded-lg bg-primary text-primary-foreground font-medium text-sm hover:bg-primary/90 transition-all flex items-center justify-center gap-2 shadow disabled:opacity-50"
+        {/* 左栏底部固定提交操作条 */}
+        <div className="p-3 border-t z-border bg-surface shrink-0">
+          <button
+            type="submit"
+            disabled={submitting || (!prompt.trim() && !imageUrl.trim())}
+            className="w-full py-2.5 px-4 rounded-lg bg-primary text-primary-foreground font-medium text-xs hover:bg-primary/90 transition-all flex items-center justify-center gap-2 shadow disabled:opacity-50 cursor-pointer"
+          >
+            {submitting ? (
+              <>
+                <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                正在提交渲染任务...
+              </>
+            ) : (
+              <>
+                <Film className="w-3.5 h-3.5" />
+                开始生成 AI 视频
+              </>
+            )}
+          </button>
+        </div>
+      </form>
+
+      {/* 右栏：主视区（提示说明、运镜风格库、活跃任务监视、作品画廊） */}
+      <div className="flex-1 flex flex-col min-h-0 h-full overflow-hidden z-canvas">
+        {/* 右栏顶栏 */}
+        <div className="px-4 py-2.5 border-b z-border bg-surface flex flex-wrap items-center justify-between gap-2 shrink-0">
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            <div className="flex items-center gap-2">
+              <Film className="w-4 h-4 text-primary" />
+              <span className="font-semibold z-text">视频创作工坊 (Video Studio)</span>
+            </div>
+            <span className="px-2 py-0.5 text-[10px] font-medium rounded-full bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20">
+              CogVideoX & Meta Muse
+            </span>
+            <span className="px-2 py-0.5 text-[10px] font-medium rounded-full bg-purple-500/10 text-purple-600 dark:text-purple-400 border border-purple-500/20">
+              字节即梦 2.0
+            </span>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <a
+              href="#/chat"
+              className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-md border z-border hover:bg-muted/50 transition-colors z-text"
+              title="前往 Chat 使用 /crawl 爬虫搜集素材"
             >
-              {submitting ? (
-                <>
-                  <RefreshCw className="w-4 h-4 animate-spin" />
-                  正在提交渲染任务...
-                </>
-              ) : (
-                <>
-                  <Film className="w-4 h-4" />
-                  开始生成 AI 视频
-                </>
-              )}
+              <Globe className="w-3.5 h-3.5 text-primary" />
+              Chat 爬虫找素材
+            </a>
+            <button
+              type="button"
+              onClick={() => {
+                loadTasks();
+                loadModels();
+              }}
+              className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-md border z-border hover:bg-muted/50 transition-colors z-text-muted"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              刷新
             </button>
           </div>
+        </div>
+
+        {/* 右栏主体滚动区 */}
+        <div className="flex-1 overflow-y-auto p-4 space-y-4 min-h-0">
+          {/* 模式说明条 */}
+      <div className="p-3 text-xs rounded-lg bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20 flex items-start gap-2">
+        <Sparkles className="w-4 h-4 shrink-0 mt-0.5 text-blue-500" />
+        <div>
+          <span className="font-semibold">纯云端 API 视频推理（无需本地硬件部署）：</span>
+          点击右上角「配置云端 API Key」注入 <code className="px-1.5 py-0.5 rounded bg-muted text-foreground font-mono">SILICONFLOW_API_KEY</code>、<code className="px-1.5 py-0.5 rounded bg-muted text-foreground font-mono">DASHSCOPE_API_KEY</code>、字节即梦或 Meta Muse Cookie 后，将直接通过云端大模型执行物理扩散生成；亦可前往 Chat 使用 <code className="px-1.5 py-0.5 rounded bg-muted text-foreground font-mono">/crawl</code> 搜集参考图与视频片段缓存到「项目素材库」中直接复用。
+        </div>
+      </div>
+
+      {errorMsg && (
+        <div className="p-3 text-sm rounded-lg bg-destructive/10 text-destructive border border-destructive/20 flex items-center justify-between">
+          <span>{errorMsg}</span>
+          <button onClick={() => setErrorMsg(null)} className="text-xs hover:underline">
+            关闭
+          </button>
+        </div>
+      )}
+
+          {/* 专业运镜风格提示词建议面板 */}
+      <div className="p-card rounded-xl border z-border p-3.5 shadow-sm space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <Camera className="w-4 h-4 text-amber-500" />
+            <span className="text-xs font-semibold z-text">专业运镜风格提示词建议</span>
+            <span className="text-[11px] z-text-muted hidden sm:inline">
+              选中运镜后点击「AI 扩写 / 润色」可自动融入镜头调度，也可直接追加或套用双语示例
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setShowCameraPanel((v) => !v)}
+            className="inline-flex items-center gap-1 text-[11px] z-text-muted hover:z-text px-2 py-1 rounded-md hover:bg-muted/60 transition-colors"
+          >
+            {showCameraPanel ? (
+              <>
+                收起建议 <ChevronUp className="w-3.5 h-3.5" />
+              </>
+            ) : (
+              <>
+                展开 ({VIDEO_CAMERA_PRESETS.length} 种运镜) <ChevronDown className="w-3.5 h-3.5" />
+              </>
+            )}
+          </button>
+        </div>
+
+        {showCameraPanel && (
+          <>
+            <div className="flex flex-wrap items-center gap-1.5">
+              {VIDEO_CAMERA_CATEGORIES.map((cat) => {
+                const active = cameraCategory === cat;
+                return (
+                  <button
+                    key={cat}
+                    type="button"
+                    onClick={() => setCameraCategory(cat)}
+                    className={`text-[11px] px-2.5 py-1 rounded-full border transition-colors ${
+                      active
+                        ? "bg-primary text-primary-foreground border-transparent font-medium"
+                        : "z-border hover:bg-muted/60 z-text-muted"
+                    }`}
+                  >
+                    {cat}
+                  </button>
+                );
+              })}
+              {selectedCameraPreset && (
+                <button
+                  type="button"
+                  onClick={() => setSelectedCameraId(null)}
+                  className="ml-auto inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20 hover:bg-amber-500/20 transition-colors"
+                >
+                  已选：{selectedCameraPreset.nameZh}
+                  <X className="w-3 h-3" />
+                </button>
+              )}
+            </div>
+
+            <CameraMotionPreview
+              preset={previewCameraPreset}
+              museVideoUrl={musePreviewUrls[previewCameraPreset.id]}
+              museGenerating={Boolean(museGeneratingMap[previewCameraPreset.id])}
+              museProgress={museProgressMap[previewCameraPreset.id] || 0}
+              museError={museErrorMap[previewCameraPreset.id] || null}
+              canManageDemo={isAdmin}
+              onGenerateMusePreview={handleGenerateMusePreview}
+              onRegenerateMusePreview={handleRegenerateMusePreview}
+              onPickVideoForPreview={handlePickVideoForPreview}
+              onClearMusePreview={handleClearMusePreview}
+              onAppendClause={handleAppendCameraClause}
+              onApplyExample={handleApplyCameraExample}
+            />
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-2 max-h-[210px] overflow-y-auto pr-1">
+              {filteredCameraPresets.map((preset) => {
+                const isSelected = selectedCameraId === preset.id;
+                return (
+                  <div
+                    key={preset.id}
+                    onMouseEnter={() => setHoveredCameraId(preset.id)}
+                    onMouseLeave={() => setHoveredCameraId(null)}
+                    onClick={() =>
+                      setSelectedCameraId((prev) => (prev === preset.id ? null : preset.id))
+                    }
+                    className={`group cursor-pointer rounded-lg border p-2.5 transition-all flex flex-col justify-between gap-1.5 ${
+                      isSelected
+                        ? "border-primary bg-primary/5 ring-1 ring-primary/30"
+                        : "z-border hover:bg-muted/40"
+                    }`}
+                  >
+                    <div className="space-y-0.5">
+                      <div className="flex items-center justify-between gap-1">
+                        <span className="text-xs font-semibold z-text truncate">
+                          {musePreviewUrls[preset.id] ? "🎬 " : ""}
+                          {preset.nameZh}
+                        </span>
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-muted z-text-muted shrink-0">
+                          {preset.category}
+                        </span>
+                      </div>
+                      <div className="text-[10px] font-mono text-primary/80 truncate">
+                        {preset.termEn}
+                      </div>
+                      <p className="text-[11px] z-text-muted line-clamp-2 leading-snug">
+                        {preset.effectDesc}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-1.5 pt-1 border-t z-border">
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleAppendCameraClause(preset);
+                        }}
+                        className="flex-1 inline-flex items-center justify-center gap-0.5 text-[10px] py-1 px-1.5 rounded border z-border hover:bg-muted z-text transition-colors"
+                        title="将此运镜词追加到当前提示词末尾"
+                      >
+                        <Plus className="w-2.5 h-2.5" />
+                        追加运镜
+                      </button>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleApplyCameraExample(preset);
+                        }}
+                        className="flex-1 inline-flex items-center justify-center gap-0.5 text-[10px] py-1 px-1.5 rounded bg-primary/10 text-primary hover:bg-primary/20 font-medium transition-colors"
+                        title="填入完整导演级双语示例并匹配推荐模型"
+                      >
+                        套用示例
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </>
+        )}
+      </div>
 
           {/* 活跃任务进度卡片 */}
           {activeTask && (
@@ -1154,10 +1172,7 @@ export function VideoStudio(): React.JSX.Element {
               )}
             </div>
           )}
-        </div>
 
-        {/* 右侧：生成历史作品列表 */}
-        <div className="lg:col-span-7 space-y-4">
           <div className="p-card rounded-xl border z-border p-4 shadow-sm space-y-4">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <h2 className="text-sm font-semibold flex items-center gap-2 z-text">
@@ -1421,7 +1436,7 @@ export function VideoStudio(): React.JSX.Element {
         </div>
       </div>
 
-      {/* 本项目素材库选择弹窗（图片 / 语音 / 视频） */}
+            {/* 本项目素材库选择弹窗（图片 / 语音 / 视频） */}
       {assetPickerOpen && (
         <div
           className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4"

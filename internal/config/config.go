@@ -45,6 +45,7 @@ type Config struct {
 	LocalTTSBaseURL         string
 	LocalTTSAPIKey          string
 	LocalTTSModel           string
+	RenderServiceURL        string
 }
 
 func Load() Config {
@@ -88,6 +89,7 @@ func Load() Config {
 		LocalTTSBaseURL:         getEnvWithFallback("LOCAL_TTS_BASE_URL", "CUSTOM_TTS_BASE_URL", ""),
 		LocalTTSAPIKey:          getEnvWithFallback("LOCAL_TTS_API_KEY", "CUSTOM_TTS_API_KEY", ""),
 		LocalTTSModel:           getEnvWithFallback("LOCAL_TTS_MODEL", "CUSTOM_TTS_MODEL", "kokoro"),
+		RenderServiceURL:        os.Getenv("RENDER_SERVICE_URL"),
 	}
 }
 

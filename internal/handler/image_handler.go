@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -1145,4 +1146,154 @@ func (h *ImageHandler) runImageEditFlow(c *gin.Context, asVariation bool) {
 		IsEditFlow:     true,
 		Sources:        imageSources,
 	})
+}
+
+// GenerateImageData 供内部后台服务（如短剧 DAG 引擎）直接调用生图并返回 URL 或 Base64。
+func (h *ImageHandler) GenerateImageData(ctx context.Context, prompt, model, size string) (imgURL, b64JSON, usedModel string, err error) {
+	if strings.TrimSpace(prompt) == "" {
+		return "", "", "", fmt.Errorf("prompt is required")
+	}
+	if size == "" {
+		size = "1024x1024"
+	}
+	modelLower := strings.ToLower(strings.TrimSpace(model))
+	if strings.Contains(modelLower, "wanx") || strings.Contains(modelLower, "jimeng") || strings.Contains(modelLower, "flux") {
+		var genErr error
+		if strings.Contains(modelLower, "wanx") {
+			if ds := h.getDashScopeProvider(); ds != nil {
+				imgURL, genErr = ds.GenerateImage(ctx, prompt, size)
+				usedModel = model
+			}
+		} else if strings.Contains(modelLower, "jimeng") {
+			if jm := h.getJimengProvider(); jm != nil {
+				imgURL, genErr = jm.GenerateImage(ctx, prompt, size)
+				usedModel = model
+			}
+		}
+		if imgURL == "" && (strings.Contains(modelLower, "flux") || genErr != nil) {
+			if sf := h.getSiliconFlowProvider(); sf != nil {
+				fallbackURL, sfErr := sf.GenerateImage(ctx, prompt, size)
+				if sfErr == nil && fallbackURL != "" {
+					return fallbackURL, "", "flux-schnell", nil
+				}
+				if genErr == nil {
+					genErr = sfErr
+				}
+			}
+		}
+		if genErr == nil && imgURL != "" {
+			return imgURL, "", usedModel, nil
+		}
+		if genErr != nil && !strings.Contains(modelLower, "gpt") {
+			return "", "", "", genErr
+		}
+	}
+
+	effectivePrompt := chatgpt.DecorateImagePrompt(prompt, model, size, "standard")
+	return h.runImagePipelineData(imagePipelineSpec{
+		Capability:     accounts.CapImageGenerate.Name,
+		Model:          model,
+		Prompt:         effectivePrompt,
+		RevisedPrompt:  prompt,
+		N:              1,
+		ResponseFormat: "b64_json",
+	})
+}
+
+// EditImageData 供内部后台服务直接调用多参考图生图（图生图/角色一致性锁定）。
+func (h *ImageHandler) EditImageData(ctx context.Context, prompt, model, size string, sources []editImageInput) (imgURL, b64JSON, usedModel string, err error) {
+	if strings.TrimSpace(prompt) == "" {
+		return "", "", "", fmt.Errorf("prompt is required")
+	}
+	if model == "" {
+		model = "gpt-image-1"
+	}
+	return h.runImagePipelineData(imagePipelineSpec{
+		Capability:     accounts.CapImageEdit.Name,
+		Model:          model,
+		Prompt:         prompt,
+		RevisedPrompt:  prompt,
+		N:              1,
+		ResponseFormat: "b64_json",
+		IsEditFlow:     true,
+		Sources:        sources,
+	})
+}
+
+func (h *ImageHandler) runImagePipelineData(spec imagePipelineSpec) (imgURL, b64JSON, usedModel string, err error) {
+	rt := h.ensureRuntime()
+	res, err := rt.RunWithFailover(nil, h.accountPool, h.cfg, FailoverOptions{
+		NeedsPaid:  true,
+		Capability: spec.Capability,
+		Model:      spec.Model,
+		IsImage:    true,
+	}, func(acct *accounts.Account, _ *bogdanfinn.TlsClient) AttemptOutcome {
+		if acct.Token == "" {
+			return AttemptOutcome{StatusCode: 400, Err: errMissingAccessToken}
+		}
+		if !AccountSatisfies(acct, accounts.CapImageGenerate.Name) || !AccountSatisfies(acct, spec.Capability) {
+			return AttemptOutcome{StatusCode: 403, Err: errAccountCapDenied}
+		}
+		imgClient := ensureImageClient(acct)
+		turnStile, status, callErr := chatgpt.InitSentinel(imgClient, acct, acct.Proxy, 0)
+		if callErr != nil {
+			if status == http.StatusUnauthorized && h.accountPool != nil {
+				h.accountPool.MarkExpired(acct, callErr.Error())
+			}
+			return AttemptOutcome{StatusCode: status, Err: callErr}
+		}
+
+		var references []chatgpt.ImageEditReference
+		if spec.IsEditFlow {
+			references = make([]chatgpt.ImageEditReference, 0, len(spec.Sources))
+			for _, src := range spec.Sources {
+				uploaded, upStatus, upErr := chatgpt.UploadFile(imgClient, acct, acct.Proxy, src.Filename, src.ContentType, src.Data)
+				if upErr != nil {
+					return AttemptOutcome{
+						StatusCode: upStatus,
+						Err:        chatgpt.NewUpstreamError("upload image failed ("+src.Filename+")", upStatus, upErr.Error()),
+					}
+				}
+				references = append(references, chatgpt.ImageEditReference{
+					FileID:   uploaded.FileID,
+					Width:    uploaded.Width,
+					Height:   uploaded.Height,
+					Size:     int(uploaded.Bytes),
+					MimeType: uploaded.MimeType,
+					Filename: uploaded.Filename,
+				})
+			}
+		}
+
+		var imageResults []chatgpt.ImageGenerationResult
+		var upstreamText string
+		var genErr error
+		if spec.IsEditFlow {
+			imageResults, upstreamText, genErr = chatgpt.GeneratePictureConversationImagesWithReferences(imgClient, acct, turnStile, spec.Prompt, spec.Model, acct.Proxy, references)
+		} else {
+			imageResults, upstreamText, genErr = chatgpt.GeneratePictureConversationImages(imgClient, acct, turnStile, spec.Prompt, spec.Model, acct.Proxy)
+		}
+		if genErr != nil {
+			return AttemptOutcome{Err: genErr}
+		}
+		if len(imageResults) == 0 {
+			return AttemptOutcome{StatusCode: 500, Err: fmt.Errorf("no image result found: %s", upstreamText)}
+		}
+		items, dlErr := materializeImageResults(imgClient, acct, imageResults, spec.RevisedPrompt, spec.ResponseFormat, spec.N, 0)
+		if dlErr != nil {
+			return AttemptOutcome{StatusCode: 500, Err: dlErr}
+		}
+		return AttemptOutcome{
+			Payload: imageAttemptBundle{items: items},
+			StatusCode: 200,
+		}
+	})
+	if err != nil {
+		return "", "", "", err
+	}
+	bundle, ok := res.Outcome.Payload.(imageAttemptBundle)
+	if !ok || len(bundle.items) == 0 {
+		return "", "", "", fmt.Errorf("empty image generation bundle")
+	}
+	return bundle.items[0].URL, bundle.items[0].B64JSON, spec.Model, nil
 }

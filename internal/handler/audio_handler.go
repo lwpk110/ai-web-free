@@ -1462,3 +1462,31 @@ func (h *AudioHandler) GetAudioFile(c *gin.Context) {
 	c.Header("Content-Type", "audio/mpeg")
 	c.Data(200, "audio/mpeg", rec.BlobData)
 }
+
+// SynthesizeSpeechData 供内部后台服务直接调用 TTS 合成并返回音频字节。
+func (h *AudioHandler) SynthesizeSpeechData(ctx context.Context, input, voice, model string, speed float64) ([]byte, string, string, error) {
+	if strings.TrimSpace(input) == "" {
+		return nil, "", "", errors.New("input text is empty")
+	}
+	if speed <= 0 {
+		speed = 1.0
+	}
+	if model == "" {
+		model = "tts-1"
+	}
+	engine := h.resolveTTSEngine(voice, model, "")
+	if engine == "openai_auto" {
+		engine = "edge_tts"
+	}
+	audioBytes, usedProvider, usedVoice, _, err := h.synthesizeDirectEngine(ctx, engine, input, voice, model, speed)
+	if err == nil && len(audioBytes) > 0 {
+		return audioBytes, usedProvider, usedVoice, nil
+	}
+	if fbAudio, fbProv, fbVoice, ok := h.tryFallbackSynthesis(ctx, engine, input, voice, model, speed); ok && len(fbAudio) > 0 {
+		return fbAudio, fbProv, fbVoice, nil
+	}
+	if err != nil {
+		return nil, "", "", err
+	}
+	return nil, "", "", errors.New("TTS synthesis returned empty audio")
+}

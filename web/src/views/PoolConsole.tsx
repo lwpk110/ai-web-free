@@ -2120,7 +2120,7 @@ export const PoolConsole: React.FC<{
           onClick={() => !importing && setShowImport(false)}
         >
           <div
-            className="p-surface z-text rounded-2xl max-w-lg w-full p-5 shadow-2xl space-y-4 text-xs"
+            className="p-surface z-text rounded-2xl max-w-lg w-full max-h-[90vh] overflow-y-auto p-5 shadow-2xl space-y-4 text-xs"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between pb-3 border-b z-border">
@@ -2265,7 +2265,7 @@ export const PoolConsole: React.FC<{
           onClick={() => !updatingProxy && setShowBulkEdit(false)}
         >
           <div
-            className="p-surface z-text rounded-xl max-w-lg w-full p-5 shadow-2xl space-y-4 text-xs"
+            className="p-surface z-text rounded-xl max-w-lg w-full max-h-[90vh] overflow-y-auto p-5 shadow-2xl space-y-4 text-xs"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between pb-3 border-b z-border">
@@ -2364,7 +2364,7 @@ export const PoolConsole: React.FC<{
           onClick={() => !oauthSubmitting && setShowOAuthGuide(false)}
         >
           <div
-            className="w-full max-w-lg p-card rounded-2xl border z-border shadow-2xl p-6 space-y-4"
+            className="w-full max-w-lg p-card rounded-2xl border z-border shadow-2xl p-6 space-y-4 max-h-[90vh] overflow-y-auto"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between pb-3 border-b z-border">
@@ -2517,7 +2517,7 @@ export const PoolConsole: React.FC<{
           onClick={() => !savingEditCookie && setEditingCookieAccount(null)}
         >
           <div
-            className="p-surface z-text rounded-2xl max-w-xl w-full p-5 shadow-2xl space-y-4 text-xs"
+            className="p-surface z-text rounded-2xl max-w-xl w-full max-h-[90vh] overflow-y-auto p-5 shadow-2xl space-y-4 text-xs"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between pb-3 border-b z-border">
@@ -2622,7 +2622,7 @@ export const PoolConsole: React.FC<{
           onClick={() => setDeleteTarget(null)}
         >
           <div
-            className="p-surface z-text rounded-2xl max-w-sm w-full p-5 shadow-2xl space-y-3 text-xs"
+            className="p-surface z-text rounded-2xl max-w-sm w-full max-h-[90vh] overflow-y-auto p-5 shadow-2xl space-y-3 text-xs"
             onClick={(e) => e.stopPropagation()}
           >
             <h3 className="text-sm font-semibold">确认移出账号？</h3>

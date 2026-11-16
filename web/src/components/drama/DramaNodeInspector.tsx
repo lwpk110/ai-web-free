@@ -18,7 +18,7 @@ import {
 } from "lucide-react";
 import React, { useState } from "react";
 import { cacheDramaMedia, type DramaCapabilities, type VoiceDescriptor } from "../../api/client";
-import { cloneVoiceForCharacter, designVoiceForCharacter } from "../../lib/dramaOrchestrator";
+import { cloneVoiceForCharacter, designVoiceForCharacter } from "../../lib/dramaClientActions";
 import {
   BUILTIN_VOICE_OPTIONS,
   CAMERA_MOTIONS,

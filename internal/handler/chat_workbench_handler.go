@@ -32,22 +32,26 @@ func NewChatWorkbenchHandler(database *gorm.DB, vs vectorstore.VectorStore) *Cha
 // ─── 会话 CRUD ─────────────────────────────────────────────────────────────
 
 type CreateConversationRequest struct {
-	ID           string `json:"id"`
-	Title        string `json:"title"`
-	Model        string `json:"model"`
-	SystemPrompt string `json:"system_prompt"`
-	PresetID     string `json:"preset_id"`
-	IsPinned     bool   `json:"is_pinned"`
+	ID            string `json:"id"`
+	Title         string `json:"title"`
+	Model         string `json:"model"`
+	SystemPrompt  string `json:"system_prompt"`
+	PresetID      string `json:"preset_id"`
+	HeadMessageID string `json:"head_message_id"`
+	CustomJSON    string `json:"custom_json"`
+	IsPinned      bool   `json:"is_pinned"`
 }
 
 type UpdateConversationRequest struct {
-	Title        *string `json:"title"`
-	Model        *string `json:"model"`
-	SystemPrompt *string `json:"system_prompt"`
-	PresetID     *string `json:"preset_id"`
-	IsPinned     *bool   `json:"is_pinned"`
-	IsArchived   *bool   `json:"is_archived"`
-	Tags         *string `json:"tags"`
+	Title         *string `json:"title"`
+	Model         *string `json:"model"`
+	SystemPrompt  *string `json:"system_prompt"`
+	PresetID      *string `json:"preset_id"`
+	HeadMessageID *string `json:"head_message_id"`
+	CustomJSON    *string `json:"custom_json"`
+	IsPinned      *bool   `json:"is_pinned"`
+	IsArchived    *bool   `json:"is_archived"`
+	Tags          *string `json:"tags"`
 }
 
 // ListConversations 分页获取会话列表
@@ -129,17 +133,19 @@ func (h *ChatWorkbenchHandler) CreateConversation(c *gin.Context) {
 
 	now := time.Now().UTC()
 	conv := db.Conversation{
-		ID:           id,
-		Title:        title,
-		Model:        model,
-		SystemPrompt: strings.TrimSpace(req.SystemPrompt),
-		PresetID:     strings.TrimSpace(req.PresetID),
-		IsPinned:     req.IsPinned,
-		IsArchived:   false,
-		ClientIP:     c.ClientIP(),
-		MessageCount: 0,
-		CreatedAt:    now,
-		UpdatedAt:    now,
+		ID:            id,
+		Title:         title,
+		Model:         model,
+		SystemPrompt:  strings.TrimSpace(req.SystemPrompt),
+		PresetID:      strings.TrimSpace(req.PresetID),
+		HeadMessageID: strings.TrimSpace(req.HeadMessageID),
+		CustomJSON:    strings.TrimSpace(req.CustomJSON),
+		IsPinned:      req.IsPinned,
+		IsArchived:    false,
+		ClientIP:      c.ClientIP(),
+		MessageCount:  0,
+		CreatedAt:     now,
+		UpdatedAt:     now,
 	}
 
 	if err := h.db.Create(&conv).Error; err != nil {
@@ -169,7 +175,7 @@ func (h *ChatWorkbenchHandler) GetConversation(c *gin.Context) {
 	}
 
 	var messages []db.ChatMessageRecord
-	if err := h.db.Where("conversation_id = ? OR session_key = ?", id, id).Order("created_at asc").Find(&messages).Error; err != nil {
+	if err := h.db.Where("conversation_id = ? OR session_key = ?", id, id).Order("created_at asc, id asc").Find(&messages).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -219,6 +225,12 @@ func (h *ChatWorkbenchHandler) UpdateConversation(c *gin.Context) {
 	if req.PresetID != nil {
 		updates["preset_id"] = strings.TrimSpace(*req.PresetID)
 	}
+	if req.HeadMessageID != nil {
+		updates["head_message_id"] = strings.TrimSpace(*req.HeadMessageID)
+	}
+	if req.CustomJSON != nil {
+		updates["custom_json"] = strings.TrimSpace(*req.CustomJSON)
+	}
 	if req.IsPinned != nil {
 		updates["is_pinned"] = *req.IsPinned
 	}
@@ -264,7 +276,147 @@ func (h *ChatWorkbenchHandler) DeleteConversation(c *gin.Context) {
 // ─── 消息增删改查 ─────────────────────────────────────────────────────────
 
 type SaveConversationMessagesRequest struct {
-	Messages []ChatMessageItem `json:"messages" binding:"required"`
+	HeadMessageID string            `json:"head_message_id,omitempty"`
+	Messages      []ChatMessageItem `json:"messages" binding:"required"`
+}
+
+type AppendConversationMessageRequest struct {
+	Message  ChatMessageItem `json:"message" binding:"required"`
+	MoveHead *bool           `json:"move_head,omitempty"`
+}
+
+func buildChatMessageRecord(convID string, m ChatMessageItem) db.ChatMessageRecord {
+	msgID := strings.TrimSpace(m.ID)
+	if msgID == "" {
+		msgID = "msg-" + uuid.NewString()
+	}
+	createdAt := time.Now().UTC()
+	if m.Timestamp > 0 {
+		createdAt = time.UnixMilli(m.Timestamp).UTC()
+	}
+	return db.ChatMessageRecord{
+		ID:              msgID,
+		ConversationID:  convID,
+		ParentID:        strings.TrimSpace(m.ParentID),
+		SessionKey:      convID,
+		Role:            m.Role,
+		Content:         m.Content,
+		PartsJSON:       m.PartsJSON,
+		AttachmentsJSON: m.AttachmentsJSON,
+		MetadataJSON:    m.MetadataJSON,
+		StatusJSON:      m.StatusJSON,
+		Model:           m.Model,
+		OpenUIMode:      m.OpenUIMode,
+		Skill:           m.Skill,
+		TokensPrompt:    m.TokensPrompt,
+		TokensComp:      m.TokensComp,
+		LatencyMs:       m.LatencyMs,
+		Citations:       m.Citations,
+		CreatedAt:       createdAt,
+	}
+}
+
+func ensureConversationExists(tx *gorm.DB, convID, clientIP, firstUserContent string) error {
+	var conv db.Conversation
+	err := tx.Where("id = ?", convID).First(&conv).Error
+	if err == nil {
+		return nil
+	}
+	if err != gorm.ErrRecordNotFound {
+		return err
+	}
+	now := time.Now().UTC()
+	autoTitle := "新建对话"
+	if trimmed := strings.TrimSpace(firstUserContent); trimmed != "" {
+		runes := []rune(trimmed)
+		if len(runes) > 30 {
+			autoTitle = string(runes[:30]) + "..."
+		} else {
+			autoTitle = string(runes)
+		}
+	}
+	conv = db.Conversation{
+		ID:         convID,
+		Title:      autoTitle,
+		Model:      "auto",
+		ClientIP:   clientIP,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+	return tx.Create(&conv).Error
+}
+
+// AppendConversationMessage 增量幂等写入（Upsert）单条分支树消息节点
+func (h *ChatWorkbenchHandler) AppendConversationMessage(c *gin.Context) {
+	if h.db == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "database not initialized"})
+		return
+	}
+
+	convID := strings.TrimSpace(c.Param("id"))
+	if convID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "conversation id is required"})
+		return
+	}
+
+	var req AppendConversationMessageRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	moveHead := true
+	if req.MoveHead != nil {
+		moveHead = *req.MoveHead
+	}
+
+	rec := buildChatMessageRecord(convID, req.Message)
+	err := h.db.Transaction(func(tx *gorm.DB) error {
+		firstText := ""
+		if rec.Role == "user" {
+			firstText = rec.Content
+		}
+		if ensureErr := ensureConversationExists(tx, convID, c.ClientIP(), firstText); ensureErr != nil {
+			return ensureErr
+		}
+
+		var existing db.ChatMessageRecord
+		if findErr := tx.Where("id = ?", rec.ID).First(&existing).Error; findErr == nil {
+			// 保留原 CreatedAt 避免更新消息内容/状态时重排分支节点顺序
+			rec.CreatedAt = existing.CreatedAt
+			if saveErr := tx.Save(&rec).Error; saveErr != nil {
+				return saveErr
+			}
+		} else if findErr == gorm.ErrRecordNotFound {
+			if createErr := tx.Create(&rec).Error; createErr != nil {
+				return createErr
+			}
+		} else {
+			return findErr
+		}
+
+		var count int64
+		_ = tx.Model(&db.ChatMessageRecord{}).Where("conversation_id = ? OR session_key = ?", convID, convID).Count(&count)
+		updates := map[string]interface{}{
+			"updated_at":    time.Now().UTC(),
+			"message_count": int(count),
+		}
+		if moveHead {
+			updates["head_message_id"] = rec.ID
+		}
+		return tx.Model(&db.Conversation{}).Where("id = ?", convID).Updates(updates).Error
+	})
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":         true,
+		"conversation_id": convID,
+		"message":         rec,
+	})
 }
 
 // SaveConversationMessages 保存或覆盖会话消息并自动更新元数据
@@ -287,40 +439,15 @@ func (h *ChatWorkbenchHandler) SaveConversationMessages(c *gin.Context) {
 	}
 
 	err := h.db.Transaction(func(tx *gorm.DB) error {
-		// 确保会话实体存在，若不存在则自动兜底创建
-		var conv db.Conversation
-		if findErr := tx.Where("id = ?", convID).First(&conv).Error; findErr != nil {
-			if findErr == gorm.ErrRecordNotFound {
-				now := time.Now().UTC()
-				autoTitle := "对话 " + convID
-				if len(req.Messages) > 0 {
-					for _, m := range req.Messages {
-						if m.Role == "user" && strings.TrimSpace(m.Content) != "" {
-							runes := []rune(strings.TrimSpace(m.Content))
-							if len(runes) > 30 {
-								autoTitle = string(runes[:30]) + "..."
-							} else {
-								autoTitle = string(runes)
-							}
-							break
-						}
-					}
-				}
-				conv = db.Conversation{
-					ID:           convID,
-					Title:        autoTitle,
-					Model:        "auto",
-					ClientIP:     c.ClientIP(),
-					CreatedAt:    now,
-					UpdatedAt:    now,
-					MessageCount: len(req.Messages),
-				}
-				if createErr := tx.Create(&conv).Error; createErr != nil {
-					return createErr
-				}
-			} else {
-				return findErr
+		firstUserContent := ""
+		for _, m := range req.Messages {
+			if m.Role == "user" && strings.TrimSpace(m.Content) != "" {
+				firstUserContent = m.Content
+				break
 			}
+		}
+		if ensureErr := ensureConversationExists(tx, convID, c.ClientIP(), firstUserContent); ensureErr != nil {
+			return ensureErr
 		}
 
 		// 清理旧消息并写入新消息
@@ -328,40 +455,30 @@ func (h *ChatWorkbenchHandler) SaveConversationMessages(c *gin.Context) {
 			return delErr
 		}
 
+		lastID := ""
 		for _, m := range req.Messages {
-			msgID := strings.TrimSpace(m.ID)
-			if msgID == "" {
-				msgID = "msg-" + uuid.NewString()
-			}
-			createdAt := time.Now().UTC()
-			if m.Timestamp > 0 {
-				createdAt = time.UnixMilli(m.Timestamp).UTC()
-			}
-			rec := db.ChatMessageRecord{
-				ID:             msgID,
-				ConversationID: convID,
-				SessionKey:     convID,
-				Role:           m.Role,
-				Content:        m.Content,
-				Model:          m.Model,
-				OpenUIMode:     m.OpenUIMode,
-				Skill:          m.Skill,
-				TokensPrompt:   m.TokensPrompt,
-				TokensComp:     m.TokensComp,
-				LatencyMs:      m.LatencyMs,
-				Citations:      m.Citations,
-				CreatedAt:      createdAt,
-			}
+			rec := buildChatMessageRecord(convID, m)
 			if createErr := tx.Create(&rec).Error; createErr != nil {
 				return createErr
 			}
+			lastID = rec.ID
+		}
+
+		headID := strings.TrimSpace(req.HeadMessageID)
+		if headID == "" {
+			headID = lastID
+		}
+
+		updates := map[string]interface{}{
+			"updated_at":    time.Now().UTC(),
+			"message_count": len(req.Messages),
+		}
+		if headID != "" {
+			updates["head_message_id"] = headID
 		}
 
 		// 更新会话更新时间与消息条数
-		return tx.Model(&db.Conversation{}).Where("id = ?", convID).Updates(map[string]interface{}{
-			"updated_at":    time.Now().UTC(),
-			"message_count": len(req.Messages),
-		}).Error
+		return tx.Model(&db.Conversation{}).Where("id = ?", convID).Updates(updates).Error
 	})
 
 	if err != nil {
@@ -372,7 +489,7 @@ func (h *ChatWorkbenchHandler) SaveConversationMessages(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"success": true, "count": len(req.Messages), "conversation_id": convID})
 }
 
-// DeleteConversationMessage 删除单条消息
+// DeleteConversationMessage 删除单条消息并自动重连其直接子节点
 func (h *ChatWorkbenchHandler) DeleteConversationMessage(c *gin.Context) {
 	if h.db == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "database not initialized"})
@@ -383,6 +500,12 @@ func (h *ChatWorkbenchHandler) DeleteConversationMessage(c *gin.Context) {
 	msgID := c.Param("msg_id")
 
 	err := h.db.Transaction(func(tx *gorm.DB) error {
+		var target db.ChatMessageRecord
+		if findErr := tx.Where("id = ? AND (conversation_id = ? OR session_key = ?)", msgID, convID, convID).First(&target).Error; findErr == nil {
+			_ = tx.Model(&db.ChatMessageRecord{}).
+				Where("parent_id = ? AND (conversation_id = ? OR session_key = ?)", msgID, convID, convID).
+				Update("parent_id", target.ParentID).Error
+		}
 		if err := tx.Where("id = ? AND (conversation_id = ? OR session_key = ?)", msgID, convID, convID).Delete(&db.ChatMessageRecord{}).Error; err != nil {
 			return err
 		}
@@ -685,29 +808,7 @@ func (h *ChatWorkbenchHandler) ImportConversations(c *gin.Context) {
 
 			_ = tx.Where("conversation_id = ? OR session_key = ?", conv.ID, conv.ID).Delete(&db.ChatMessageRecord{}).Error
 			for _, m := range item.Messages {
-				msgID := strings.TrimSpace(m.ID)
-				if msgID == "" {
-					msgID = "msg-" + uuid.NewString()
-				}
-				createdAt := time.Now().UTC()
-				if m.Timestamp > 0 {
-					createdAt = time.UnixMilli(m.Timestamp).UTC()
-				}
-				rec := db.ChatMessageRecord{
-					ID:             msgID,
-					ConversationID: conv.ID,
-					SessionKey:     conv.ID,
-					Role:           m.Role,
-					Content:        m.Content,
-					Model:          m.Model,
-					OpenUIMode:     m.OpenUIMode,
-					Skill:          m.Skill,
-					TokensPrompt:   m.TokensPrompt,
-					TokensComp:     m.TokensComp,
-					LatencyMs:      m.LatencyMs,
-					Citations:      m.Citations,
-					CreatedAt:      createdAt,
-				}
+				rec := buildChatMessageRecord(conv.ID, m)
 				if err := tx.Create(&rec).Error; err != nil {
 					return err
 				}

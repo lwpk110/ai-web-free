@@ -9,6 +9,8 @@ import "@xyflow/react/dist/style.css";
 import {
   AlertTriangle,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
   Clapperboard,
   FileAudio,
   FolderPlus,
@@ -18,14 +20,16 @@ import {
   LayoutGrid,
   ListChecks,
   Loader2,
+  Lock,
   MapPin,
   Network,
   PauseCircle,
   Play,
   RefreshCw,
   ScrollText,
+  Settings2,
   Sparkles,
-  Square,
+  Terminal,
   Trash2,
   UserPlus,
   Workflow,
@@ -34,22 +38,15 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { fetchVoices, type DramaRoutingPolicy, type VoiceDescriptor } from "../api/client";
 import { DramaAssetDrawerModal } from "../components/drama/DramaAssetDrawerModal";
 import { DramaNodeInspector } from "../components/drama/DramaNodeInspector";
+import { DramaSettingsModal } from "../components/drama/DramaSettingsModal";
 import { DRAMA_NODE_TYPES, DramaNodeActionsProvider } from "../components/drama/DramaNodes";
 import { CloudKeyConfigModal } from "../components/CloudKeyConfigModal";
 import { DramaTimelinePlayerModal } from "../components/drama/DramaTimelinePlayerModal";
 import { DramaWizardView } from "../components/drama/DramaWizardView";
 import { consumePendingDramaImports, DRAMA_IMPORT_EVENT, type DramaCanvasImportPayload } from "../lib/dramaCanvasBridge";
 import {
-  generateCharacterPortrait,
-  generateSceneAnchor,
-  generateShotAudioNode,
-  generateShotKeyframeNode,
-  generateShotVideoNode,
-  resumeInflightDramaTasks,
-  runAutoDramaPipeline,
-  runScriptBreakdownToCanvas,
   transcribeAudioImportToScript,
-} from "../lib/dramaOrchestrator";
+} from "../lib/dramaClientActions";
 import {
   DRAMA_PRESETS,
   getActiveShotBranch,
@@ -107,6 +104,13 @@ function assertShotsReadyForExport(nodes: DramaFlowNode[]) {
 export const ShortDramaStudio: React.FC = () => {
   const {
     projectId,
+    backendProject,
+    activeRunId,
+    runLogs,
+    runSummary,
+    runsHistory,
+    selectedLogRunId,
+    logPanelOpen,
     nodes,
     edges,
     selectedNodeId,
@@ -127,6 +131,8 @@ export const ShortDramaStudio: React.FC = () => {
     removeProject,
     setSelectedNodeId,
     setViewMode,
+    setLogPanelOpen,
+    selectRunLogView,
     setCheckpointAfterCast,
     setCheckpointAfterKeyframes,
     onNodesChange,
@@ -144,6 +150,7 @@ export const ShortDramaStudio: React.FC = () => {
 
   const [voices, setVoices] = useState<VoiceDescriptor[]>([]);
   const [cloudKeyModalOpen, setCloudKeyModalOpen] = useState(false);
+  const [settingsModalOpen, setSettingsModalOpen] = useState(false);
   const [assetDrawer, setAssetDrawer] = useState<"gallery" | "audio" | "prompts" | null>(null);
   const [playerOpen, setPlayerOpen] = useState(false);
   const [themeMode, setThemeMode] = useState<"light" | "dark">(() =>
@@ -152,10 +159,9 @@ export const ShortDramaStudio: React.FC = () => {
   const abortRef = useRef<AbortController | null>(null);
   const lastExportBlobRef = useRef<{ blob: Blob; ext: string } | null>(null);
 
-  // 初始化双写持久化、探测能力并恢复未完成视频轮询 + 导入跨工坊素材
+  // 初始化双写持久化、探测能力 + 导入跨工坊素材（活跃后台 Run 由 store 自动重连 SSE）
   useEffect(() => {
     void initFromPersistence().then(() => {
-      void resumeInflightDramaTasks();
       const pending = consumePendingDramaImports();
       pending.forEach((p) => void importCrossStudioAsset(p));
     });
@@ -213,20 +219,35 @@ export const ShortDramaStudio: React.FC = () => {
   }, [nodes]);
 
   const handleRunBreakdown = useCallback(() => {
-    abortRef.current?.abort();
-    const ctrl = new AbortController();
-    abortRef.current = ctrl;
-    void runScriptBreakdownToCanvas(ctrl.signal).catch(() => {});
+    void useDramaCanvasStore
+      .getState()
+      .runBackendPipeline({
+        targets: ["script.*", "bible.*", "storyboard.*"],
+        force: ["script.*", "bible.*", "storyboard.*"],
+      })
+      .catch((err) => {
+        useDramaCanvasStore
+          .getState()
+          .setPipelineState("error", err instanceof Error ? err.message : String(err));
+      });
   }, []);
 
   const handleRunPipeline = useCallback((
     resumeFrom: "start" | "after_cast" | "after_keyframes" = "start",
     breakScript = resumeFrom === "start",
   ) => {
-    abortRef.current?.abort();
-    const ctrl = new AbortController();
-    abortRef.current = ctrl;
-    void runAutoDramaPipeline({ resumeFrom, breakScript, signal: ctrl.signal }).catch(() => {});
+    void useDramaCanvasStore
+      .getState()
+      .runBackendPipeline(
+        breakScript
+          ? { targets: ["*"] }
+          : undefined,
+      )
+      .catch((err) => {
+        useDramaCanvasStore
+          .getState()
+          .setPipelineState("error", err instanceof Error ? err.message : String(err));
+      });
   }, []);
 
   const handleExportSingleVideo = useCallback(async () => {
@@ -319,15 +340,79 @@ export const ShortDramaStudio: React.FC = () => {
     }
   }, [composerNode, composerShots, edges, nodes, projectId, scriptNode, updateNodeData]);
 
+  const canvasStats = useMemo(() => {
+    const map = backendProject?.nodes || {};
+    const vals = Object.values(map);
+    let ready = 0;
+    let running = 0;
+    let stale = 0;
+    let failed = 0;
+    let locked = 0;
+    let pending = 0;
+    for (const v of vals) {
+      if (v.locked) locked++;
+      if (v.status === "ready" || v.status === "degraded") ready++;
+      else if (v.status === "running") running++;
+      else if (v.status === "stale") stale++;
+      else if (v.status === "failed") failed++;
+      else pending++;
+    }
+    return { total: vals.length, ready, running, stale, failed, locked, pending };
+  }, [backendProject]);
+
+  const focusNodeByKey = useCallback((nodeKey?: string) => {
+    if (!nodeKey) return;
+    const [, rawId] = nodeKey.split(":");
+    if (!rawId) return;
+    const target = nodes.find((n) => {
+      if (n.type === "character") return n.data.charId === rawId;
+      if (n.type === "scene") return n.data.sceneId === rawId;
+      if (n.type === "shot") return n.data.shotId === rawId;
+      return false;
+    });
+    if (target) {
+      setSelectedNodeId(target.id);
+    }
+  }, [nodes, setSelectedNodeId]);
+
+  const isRunning = pipelineState === "running" || Boolean(activeRunId) || canvasStats.running > 0;
+  const isPaused = pipelineState === "paused_cast" || pipelineState === "paused_keyframes";
+
   const nodeActionCallbacks = useMemo(
     () => ({
+      isPipelineRunning: isRunning,
       onRunBreakdown: handleRunBreakdown,
       onRunPipeline: () => handleRunPipeline("start"),
-      onGenerateCharacter: (id: string) => void generateCharacterPortrait(id).catch(() => {}),
-      onGenerateScene: (id: string) => void generateSceneAnchor(id).catch(() => {}),
-      onGenerateShotAudio: (id: string) => void generateShotAudioNode(id).catch(() => {}),
-      onGenerateShotKeyframe: (id: string) => void generateShotKeyframeNode(id).catch(() => {}),
-      onGenerateShotVideo: (id: string) => void generateShotVideoNode(id).catch(() => {}),
+      onGenerateCharacter: (id: string) => {
+        const node = useDramaCanvasStore.getState().nodes.find((n) => n.id === id && n.type === "character");
+        if (node?.type === "character") {
+          void useDramaCanvasStore.getState().retrySingleNode(`image.portrait:${node.data.charId}`).catch(() => {});
+        }
+      },
+      onGenerateScene: (id: string) => {
+        const node = useDramaCanvasStore.getState().nodes.find((n) => n.id === id && n.type === "scene");
+        if (node?.type === "scene") {
+          void useDramaCanvasStore.getState().retrySingleNode(`image.scene:${node.data.sceneId}`).catch(() => {});
+        }
+      },
+      onGenerateShotAudio: (id: string) => {
+        const node = useDramaCanvasStore.getState().nodes.find((n) => n.id === id && n.type === "shot");
+        if (node?.type === "shot") {
+          void useDramaCanvasStore.getState().retrySingleNode(`tts.line:${node.data.shotId}`).catch(() => {});
+        }
+      },
+      onGenerateShotKeyframe: (id: string) => {
+        const node = useDramaCanvasStore.getState().nodes.find((n) => n.id === id && n.type === "shot");
+        if (node?.type === "shot") {
+          void useDramaCanvasStore.getState().retrySingleNode(`image.keyframe:${node.data.shotId}`).catch(() => {});
+        }
+      },
+      onGenerateShotVideo: (id: string) => {
+        const node = useDramaCanvasStore.getState().nodes.find((n) => n.id === id && n.type === "shot");
+        if (node?.type === "shot") {
+          void useDramaCanvasStore.getState().retrySingleNode(`video.clip:${node.data.shotId}`).catch(() => {});
+        }
+      },
       onAddShotBranch: (id: string) => {
         addShotVersionBranch(id);
       },
@@ -345,16 +430,14 @@ export const ShortDramaStudio: React.FC = () => {
       handleExportZip,
       handleRunBreakdown,
       handleRunPipeline,
+      isRunning,
       switchShotVersionBranch,
     ],
   );
 
-  const isRunning = pipelineState === "running";
-  const isPaused = pipelineState === "paused_cast" || pipelineState === "paused_keyframes";
-
   return (
     <DramaNodeActionsProvider value={nodeActionCallbacks}>
-      <div className="flex h-[calc(100vh-3.5rem)] w-full flex-col overflow-hidden bg-[var(--bg-canvas)] text-[var(--text-primary)]">
+      <div className="flex h-full w-full flex-1 min-h-0 flex-col overflow-hidden bg-[var(--bg-canvas)] text-[var(--text-primary)]">
         {/* 顶栏：工程管理 / 模式切换 / 检查点策略 / 一键启动 */}
         <div className="flex flex-wrap items-center justify-between gap-2.5 border-b border-[var(--border-default)] bg-[var(--bg-surface)] px-4 py-2.5">
           <div className="flex flex-wrap items-center gap-2">
@@ -466,14 +549,49 @@ export const ShortDramaStudio: React.FC = () => {
               </button>
             )}
 
+            <button
+              type="button"
+              onClick={() => setSettingsModalOpen(true)}
+              className="inline-flex items-center gap-1 rounded-lg border border-[var(--border-default)] px-2.5 py-1 text-xs hover:bg-[var(--bg-surface-hover)]"
+              title="配置允许的生图/视频通道、并发数与自动降级策略"
+            >
+              <Settings2 className="h-3.5 w-3.5" />
+              能力设置
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setLogPanelOpen(!logPanelOpen)}
+              className={`inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 text-xs transition-colors ${
+                logPanelOpen
+                  ? "border-indigo-500/40 bg-indigo-500/10 text-indigo-600 dark:text-indigo-400"
+                  : "border-[var(--border-default)] hover:bg-[var(--bg-surface-hover)]"
+              }`}
+              title="查看后台 DAG 执行日志与节点状态追踪"
+            >
+              <Terminal className="h-3.5 w-3.5" />
+              日志追踪
+              {runLogs.length > 0 && (
+                <span className="rounded-full bg-[var(--bg-elevated)] px-1.5 text-[10px] font-medium">
+                  {runLogs.length}
+                </span>
+              )}
+              {canvasStats.failed > 0 && (
+                <span className="h-2 w-2 rounded-full bg-rose-500" />
+              )}
+            </button>
+
             {isRunning ? (
               <button
                 type="button"
-                onClick={() => abortRef.current?.abort()}
-                className="inline-flex items-center gap-1.5 rounded-lg bg-rose-600 px-3.5 py-1.5 text-xs font-medium text-white hover:bg-rose-500"
+                disabled
+                className="inline-flex cursor-not-allowed items-center gap-1.5 rounded-lg bg-indigo-600/80 px-3.5 py-1.5 text-xs font-medium text-white opacity-90"
+                title="后台 DAG 流水线正在执行中，关闭页面也不会中断"
               >
-                <Square className="h-3.5 w-3.5" />
-                停止流水线
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                {runSummary && runSummary.total > 0
+                  ? `后台生成中 (${runSummary.ready + runSummary.degraded}/${runSummary.total})`
+                  : "后台生成中..."}
               </button>
             ) : isPaused ? (
               <button
@@ -493,7 +611,13 @@ export const ShortDramaStudio: React.FC = () => {
                 className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3.5 py-1.5 text-xs font-medium text-white hover:bg-indigo-500"
               >
                 <Sparkles className="h-3.5 w-3.5" />
-                一键生成连贯短片
+                {canvasStats.total > 0 && canvasStats.ready === canvasStats.total && canvasStats.failed === 0 && canvasStats.stale === 0
+                  ? "全片已就绪 · 增量校验"
+                  : canvasStats.failed > 0
+                    ? `补跑失败节点 (${canvasStats.failed})`
+                    : canvasStats.stale > 0
+                      ? `更新失效节点 (${canvasStats.stale})`
+                      : "一键生成连贯短片"}
               </button>
             )}
           </div>
@@ -563,13 +687,66 @@ export const ShortDramaStudio: React.FC = () => {
             </button>
           </div>
 
-          {pipelineStageText && (
-            <div className="flex items-center gap-1.5 text-indigo-600 dark:text-indigo-400 font-medium">
-              {isRunning && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-              {isPaused && <PauseCircle className="h-3.5 w-3.5 text-amber-500" />}
-              <span>{pipelineStageText}</span>
-            </div>
-          )}
+          <div className="flex flex-wrap items-center gap-2.5">
+            {canvasStats.total > 0 && (() => {
+              const pct = Math.round((canvasStats.ready / canvasStats.total) * 100);
+              const allReady = canvasStats.ready === canvasStats.total && canvasStats.failed === 0 && canvasStats.running === 0 && canvasStats.stale === 0;
+              if (isRunning || canvasStats.running > 0) {
+                return (
+                  <span className="inline-flex items-center gap-1.5 rounded-full border border-indigo-500/30 bg-indigo-500/10 px-2.5 py-0.5 text-[11px] font-semibold text-indigo-600 dark:text-indigo-400">
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                    后台制作中 · {canvasStats.ready}/{canvasStats.total} ({pct}%)
+                  </span>
+                );
+              }
+              if (allReady) {
+                return (
+                  <button
+                    type="button"
+                    onClick={() => setPlayerOpen(true)}
+                    className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/40 bg-emerald-500/15 px-3 py-0.5 text-[11px] font-semibold text-emerald-700 hover:bg-emerald-500/25 dark:text-emerald-300"
+                    title="所有节点均已就绪，点击打开时间线播放器预览或导出成片"
+                  >
+                    <CheckCircle2 className="h-3.5 w-3.5" />
+                    已成片 · 全部就绪 ({canvasStats.ready}/{canvasStats.total}) · 点击播放预览
+                  </button>
+                );
+              }
+              if (canvasStats.failed > 0) {
+                return (
+                  <span className="inline-flex items-center gap-1.5 rounded-full border border-rose-500/30 bg-rose-500/10 px-2.5 py-0.5 text-[11px] font-semibold text-rose-600 dark:text-rose-400">
+                    <AlertTriangle className="h-3 w-3" />
+                    部分失败 · 就绪 {canvasStats.ready}/{canvasStats.total} · 失败 {canvasStats.failed}
+                  </span>
+                );
+              }
+              if (canvasStats.stale > 0) {
+                return (
+                  <span className="inline-flex items-center gap-1.5 rounded-full border border-orange-500/30 bg-orange-500/10 px-2.5 py-0.5 text-[11px] font-semibold text-orange-600 dark:text-orange-400">
+                    <RefreshCw className="h-3 w-3" />
+                    待更新 · {canvasStats.stale} 项需重算 ({canvasStats.ready}/{canvasStats.total})
+                  </span>
+                );
+              }
+              return (
+                <span className="inline-flex items-center gap-1.5 rounded-full bg-slate-500/10 px-2.5 py-0.5 text-[11px] font-medium text-[var(--text-muted)]">
+                  进度 {canvasStats.ready}/{canvasStats.total} ({pct}%)
+                </span>
+              );
+            })()}
+            {canvasStats.locked > 0 && (
+              <span className="inline-flex items-center gap-0.5 rounded bg-slate-500/10 px-1.5 py-0.5 text-[10px] text-[var(--text-muted)]">
+                <Lock className="h-2.5 w-2.5" /> 锁定 {canvasStats.locked}
+              </span>
+            )}
+            {pipelineStageText && (
+              <div className="flex items-center gap-1.5 font-medium text-indigo-600 dark:text-indigo-400">
+                {isRunning && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                {isPaused && <PauseCircle className="h-3.5 w-3.5 text-amber-500" />}
+                <span className="max-w-xs truncate" title={pipelineStageText}>{pipelineStageText}</span>
+              </div>
+            )}
+          </div>
         </div>
 
         {/* 主体区：无限画布三栏 vs 5步分镜列表视图 */}
@@ -586,11 +763,11 @@ export const ShortDramaStudio: React.FC = () => {
             }}
             onRunBreakdown={handleRunBreakdown}
             onRunPipeline={() => handleRunPipeline("start", false)}
-            onGenerateCharacter={(id) => void generateCharacterPortrait(id).catch(() => {})}
-            onGenerateScene={(id) => void generateSceneAnchor(id).catch(() => {})}
-            onGenerateShotAudio={(id) => void generateShotAudioNode(id).catch(() => {})}
-            onGenerateShotKeyframe={(id) => void generateShotKeyframeNode(id).catch(() => {})}
-            onGenerateShotVideo={(id) => void generateShotVideoNode(id).catch(() => {})}
+            onGenerateCharacter={nodeActionCallbacks.onGenerateCharacter}
+            onGenerateScene={nodeActionCallbacks.onGenerateScene}
+            onGenerateShotAudio={nodeActionCallbacks.onGenerateShotAudio}
+            onGenerateShotKeyframe={nodeActionCallbacks.onGenerateShotKeyframe}
+            onGenerateShotVideo={nodeActionCallbacks.onGenerateShotVideo}
             onOpenPlayer={() => setPlayerOpen(true)}
             onExportVideo={() => void handleExportSingleVideo()}
             onExportZip={() => void handleExportZip()}
@@ -713,17 +890,89 @@ export const ShortDramaStudio: React.FC = () => {
                 capabilities={capabilities}
                 voices={voices}
                 onRunBreakdown={handleRunBreakdown}
-                onGenerateCharacter={(id) => void generateCharacterPortrait(id).catch(() => {})}
-                onGenerateScene={(id) => void generateSceneAnchor(id).catch(() => {})}
-                onGenerateShotAudio={(id) => void generateShotAudioNode(id).catch(() => {})}
-                onGenerateShotKeyframe={(id) => void generateShotKeyframeNode(id).catch(() => {})}
-                onGenerateShotVideo={(id) => void generateShotVideoNode(id).catch(() => {})}
+                onGenerateCharacter={nodeActionCallbacks.onGenerateCharacter}
+                onGenerateScene={nodeActionCallbacks.onGenerateScene}
+                onGenerateShotAudio={nodeActionCallbacks.onGenerateShotAudio}
+                onGenerateShotKeyframe={nodeActionCallbacks.onGenerateShotKeyframe}
+                onGenerateShotVideo={nodeActionCallbacks.onGenerateShotVideo}
                 onTranscribeAudio={(id) => void transcribeAudioImportToScript(id).catch(() => {})}
                 onOpenPlayer={() => setPlayerOpen(true)}
                 onExportVideo={() => void handleExportSingleVideo()}
                 onExportZip={() => void handleExportZip()}
               />
             </aside>
+          </div>
+        )}
+
+        {/* 底部可折叠 DAG 执行日志与状态追踪面板 */}
+        {logPanelOpen && (
+          <div className="flex h-52 shrink-0 flex-col border-t border-[var(--border-default)] bg-[var(--bg-surface)] text-xs">
+            <div className="flex items-center justify-between border-b border-[var(--border-default)] bg-[var(--bg-elevated)] px-4 py-1.5">
+              <div className="flex items-center gap-2.5">
+                <Terminal className="h-3.5 w-3.5 text-indigo-500" />
+                <span className="font-semibold">后台 DAG 执行日志追踪</span>
+                {runsHistory.length > 0 && (
+                  <select
+                    value={selectedLogRunId || runsHistory[0]?.id || ""}
+                    onChange={(e) => void selectRunLogView(e.target.value)}
+                    className="rounded border border-[var(--border-default)] bg-[var(--bg-surface)] px-2 py-0.5 text-[11px]"
+                  >
+                    {runsHistory.map((r) => (
+                      <option key={r.id} value={r.id}>
+                        {r.id} · {r.status} ({r.created_at ? new Date(r.created_at).toLocaleTimeString() : ""})
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={() => setLogPanelOpen(false)}
+                className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-[11px] text-[var(--text-muted)] hover:bg-[var(--bg-surface-hover)]"
+              >
+                收起 <ChevronDown className="h-3 w-3" />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto px-4 py-2 font-mono text-[11px] leading-relaxed">
+              {runLogs.length === 0 ? (
+                <div className="flex h-full items-center justify-center text-[var(--text-muted)]">
+                  暂无执行日志，点击「一键生成连贯短片」或任意节点操作即可实时追踪执行轨迹
+                </div>
+              ) : (
+                <div className="space-y-1">
+                  {runLogs.map((entry, idx) => {
+                    const levelBadge =
+                      entry.level === "error"
+                        ? "bg-rose-500/15 text-rose-600 dark:text-rose-400"
+                        : entry.level === "warn"
+                          ? "bg-amber-500/15 text-amber-600 dark:text-amber-400"
+                          : entry.level === "success"
+                            ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
+                            : "bg-slate-500/10 text-[var(--text-muted)]";
+                    const timeStr = entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString() : "";
+                    return (
+                      <div key={`${entry.timestamp}-${idx}`} className="flex items-start gap-2">
+                        <span className="shrink-0 text-[10px] text-[var(--text-muted)]">{timeStr}</span>
+                        <span className={`shrink-0 rounded px-1.5 py-0.2 text-[10px] font-semibold uppercase ${levelBadge}`}>
+                          {entry.level}
+                        </span>
+                        {entry.node_key && (
+                          <button
+                            type="button"
+                            onClick={() => focusNodeByKey(entry.node_key)}
+                            className="shrink-0 rounded bg-indigo-500/10 px-1.5 py-0.2 text-[10px] text-indigo-600 hover:underline dark:text-indigo-400"
+                            title="点击定位画布节点"
+                          >
+                            {entry.node_key}
+                          </button>
+                        )}
+                        <span className="break-all text-[var(--text-primary)]">{entry.message}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
           </div>
         )}
 
@@ -755,6 +1004,18 @@ export const ShortDramaStudio: React.FC = () => {
           onSaved={() => {
             void refreshCapabilities();
           }}
+        />
+
+        <DramaSettingsModal
+          open={settingsModalOpen}
+          onClose={() => setSettingsModalOpen(false)}
+          capabilities={capabilities}
+          scriptData={scriptNode?.data}
+          onSave={(patch) => {
+            updateScriptNode(patch);
+            void useDramaCanvasStore.getState().persistNow();
+          }}
+          onOpenCloudKeyModal={() => setCloudKeyModalOpen(true)}
         />
       </div>
     </DramaNodeActionsProvider>

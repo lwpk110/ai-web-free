@@ -9,6 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@assistant-ui/react": "^0.15.36",
     "@openuidev/lang-core": "^1.1.1",
     "@openuidev/react-headless": "^0.18.7",
     "@openuidev/react-lang": "^1.1.1",

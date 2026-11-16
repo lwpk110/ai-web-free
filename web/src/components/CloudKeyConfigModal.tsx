@@ -135,7 +135,7 @@ export function CloudKeyConfigModal({
 
   return (
     <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
-      <div className="p-card rounded-2xl border z-border max-w-lg w-full p-5 space-y-4 shadow-xl">
+      <div className="p-card rounded-2xl border z-border max-w-lg w-full max-h-[90vh] overflow-y-auto p-5 space-y-4 shadow-xl">
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-2">
             <KeyRound className="w-4 h-4 text-primary" />

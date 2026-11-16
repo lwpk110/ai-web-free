@@ -1,4 +1,7 @@
-import type { StoredChatMessage } from "./storage";
+export interface RouterHistoryMessage {
+  role: string;
+  content: string;
+}
 
 export const DEFAULT_IMAGE_MODELS = [
   "gpt-image-2.5-sunburst",
@@ -178,7 +181,7 @@ export function detectResearchIntent(promptText: string): boolean {
 
 export function needsContextExtraction(
   promptText: string,
-  history: StoredChatMessage[]
+  history: RouterHistoryMessage[]
 ): boolean {
   if (history.length === 0) return false;
   const trimmed = promptText.trim();
@@ -210,7 +213,7 @@ export function stripLeadingAudioCommandWords(promptText: string): string {
 }
 
 export function extractPromptFallback(
-  history: StoredChatMessage[],
+  history: RouterHistoryMessage[],
   userRequest: string
 ): string {
   for (let i = history.length - 1; i >= 0; i--) {
@@ -230,7 +233,7 @@ export function extractPromptFallback(
 }
 
 export function extractSpeechFallback(
-  history: StoredChatMessage[],
+  history: RouterHistoryMessage[],
   userRequest: string
 ): string {
   for (let i = history.length - 1; i >= 0; i--) {
@@ -267,7 +270,7 @@ export interface ResolveModelRouteParams {
   selectedModel: string;
   hasExplicitModelOverride: boolean;
   autoSwitchEnabled: boolean;
-  history: StoredChatMessage[];
+  history: RouterHistoryMessage[];
   availableChatModels: string[];
   availableImageModels: string[];
   availableAudioModels: string[];
@@ -464,7 +467,7 @@ export interface SemanticRouteLLMResult {
 
 export type SemanticRouteClassifier = (args: {
   promptText: string;
-  history: StoredChatMessage[];
+  history: RouterHistoryMessage[];
   chatModels: string[];
   imageModels: string[];
   audioModels: string[];

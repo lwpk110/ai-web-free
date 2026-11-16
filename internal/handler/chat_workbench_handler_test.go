@@ -51,6 +51,7 @@ func setupTestChatDB(t *testing.T) (*gorm.DB, *ChatWorkbenchHandler, *gin.Engine
 		admin.PATCH("/chat/conversations/:id", h.UpdateConversation)
 		admin.DELETE("/chat/conversations/:id", h.DeleteConversation)
 		admin.POST("/chat/conversations/:id/messages", h.SaveConversationMessages)
+		admin.POST("/chat/conversations/:id/messages/append", h.AppendConversationMessage)
 		admin.DELETE("/chat/conversations/:id/messages/:msg_id", h.DeleteConversationMessage)
 		admin.GET("/chat/conversations/:id/export", h.ExportConversation)
 		admin.POST("/chat/conversations/import", h.ImportConversations)
@@ -335,5 +336,100 @@ func TestChatWorkbench_ExportImport(t *testing.T) {
 	r.ServeHTTP(wExportJSON, reqExportJSON)
 	if wExportJSON.Code != http.StatusOK {
 		t.Fatalf("export json failed: %d", wExportJSON.Code)
+	}
+}
+
+func TestChatWorkbench_BranchingAndAppend(t *testing.T) {
+	_, _, r := setupTestChatDB(t)
+	convID := "conv-branch-test"
+
+	// 1. 增量写入根节点与两个分支节点
+	items := []map[string]interface{}{
+		{
+			"message": map[string]interface{}{
+				"id":              "u1",
+				"parentId":        "",
+				"role":            "user",
+				"content":         "分析这份 CSV",
+				"partsJson":       `[{"type":"text","text":"分析这份 CSV"}]`,
+				"attachmentsJson": `[{"id":"att-1","name":"data.csv","type":"document"}]`,
+				"timestamp":       1700000000000,
+			},
+			"move_head": true,
+		},
+		{
+			"message": map[string]interface{}{
+				"id":        "a1",
+				"parentId":  "u1",
+				"role":      "assistant",
+				"content":   "分支 A 回答",
+				"partsJson": `[{"type":"text","text":"分支 A 回答"}]`,
+				"timestamp": 1700000001000,
+			},
+			"move_head": true,
+		},
+		{
+			"message": map[string]interface{}{
+				"id":        "a2",
+				"parentId":  "u1",
+				"role":      "assistant",
+				"content":   "分支 B 回答",
+				"partsJson": `[{"type":"text","text":"分支 B 回答"}]`,
+				"timestamp": 1700000002000,
+			},
+			"move_head": true,
+		},
+	}
+
+	for _, item := range items {
+		data, _ := json.Marshal(item)
+		req := httptest.NewRequest(http.MethodPost, "/admin/api/v1/chat/conversations/"+convID+"/messages/append", bytes.NewReader(data))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("append failed: %d: %s", w.Code, w.Body.String())
+		}
+	}
+
+	// 2. 幂等 Upsert 更新 a1（不移动 head_message_id）
+	updateA1, _ := json.Marshal(map[string]interface{}{
+		"message": map[string]interface{}{
+			"id":        "a1",
+			"parentId":  "u1",
+			"role":      "assistant",
+			"content":   "分支 A 回答（已更新）",
+			"partsJson": `[{"type":"text","text":"分支 A 回答（已更新）"}]`,
+		},
+		"move_head": false,
+	})
+	reqUpd := httptest.NewRequest(http.MethodPost, "/admin/api/v1/chat/conversations/"+convID+"/messages/append", bytes.NewReader(updateA1))
+	reqUpd.Header.Set("Content-Type", "application/json")
+	wUpd := httptest.NewRecorder()
+	r.ServeHTTP(wUpd, reqUpd)
+	if wUpd.Code != http.StatusOK {
+		t.Fatalf("upsert update failed: %d: %s", wUpd.Code, wUpd.Body.String())
+	}
+
+	// 3. 验证会话头指针与分支树消息字段
+	reqGet := httptest.NewRequest(http.MethodGet, "/admin/api/v1/chat/conversations/"+convID, nil)
+	wGet := httptest.NewRecorder()
+	r.ServeHTTP(wGet, reqGet)
+	if wGet.Code != http.StatusOK {
+		t.Fatalf("get failed: %d", wGet.Code)
+	}
+	var detail struct {
+		Conversation db.Conversation        `json:"conversation"`
+		Messages     []db.ChatMessageRecord `json:"messages"`
+	}
+	_ = json.Unmarshal(wGet.Body.Bytes(), &detail)
+	if detail.Conversation.HeadMessageID != "a2" {
+		t.Errorf("expected head_message_id 'a2', got %q", detail.Conversation.HeadMessageID)
+	}
+	if len(detail.Messages) != 3 {
+		t.Fatalf("expected 3 messages, got %d", len(detail.Messages))
+	}
+	if detail.Messages[0].AttachmentsJSON == "" || detail.Messages[1].ParentID != "u1" || detail.Messages[1].Content != "分支 A 回答（已更新）" {
+		t.Errorf("unexpected branch message records: %+v", detail.Messages)
 	}
 }
