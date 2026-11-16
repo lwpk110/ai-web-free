@@ -301,15 +301,10 @@ func Init() (*App, error) {
 			false,
 		)
 	}
-	// 初始化持久化数据库与文件存储引擎（严格零 CGO，优雅降级；支持七牛云两级分层缓存）
-	database, _ := db.InitDB(cfg.DatabaseURL)
-	var storageEngine storage.StorageEngine
-	var storageErr error
-	localStorage, storageErr := storage.NewLocalStorageEngine(cfg.StorageDir)
-	if storageErr != nil {
-		storageEngine = storage.NewMemoryStorageEngine()
-	} else if cfg.QiniuAccessKey != "" && cfg.QiniuSecretKey != "" && cfg.QiniuBucket != "" {
-		qiniuClient := storage.NewQiniuClient(storage.QiniuConfig{
+	// 初始化持久化数据库与文件存储引擎（严格零 CGO，优雅降级；支持七牛云两级分层缓存与冷启动自动恢复）
+	var qiniuClient *storage.QiniuClient
+	if cfg.QiniuAccessKey != "" && cfg.QiniuSecretKey != "" && cfg.QiniuBucket != "" {
+		qiniuClient = storage.NewQiniuClient(storage.QiniuConfig{
 			AccessKey: cfg.QiniuAccessKey,
 			SecretKey: cfg.QiniuSecretKey,
 			Bucket:    cfg.QiniuBucket,
@@ -317,6 +312,16 @@ func Init() (*App, error) {
 			Region:    cfg.QiniuRegion,
 			UploadURL: cfg.QiniuUploadURL,
 		})
+		storage.AutoRestoreDBIfMissing(cfg.DatabaseURL, qiniuClient)
+	}
+
+	database, _ := db.InitDB(cfg.DatabaseURL)
+	var storageEngine storage.StorageEngine
+	var storageErr error
+	localStorage, storageErr := storage.NewLocalStorageEngine(cfg.StorageDir)
+	if storageErr != nil {
+		storageEngine = storage.NewMemoryStorageEngine()
+	} else if qiniuClient != nil {
 		storageEngine = storage.NewTieredStorageEngine(localStorage, qiniuClient)
 	} else {
 		storageEngine = localStorage
