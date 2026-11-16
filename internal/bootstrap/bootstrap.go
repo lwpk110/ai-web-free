@@ -3,6 +3,7 @@ package bootstrap
 import (
 	"bytes"
 	"context"
+	"log"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -315,7 +316,10 @@ func Init() (*App, error) {
 		storage.AutoRestoreDBIfMissing(cfg.DatabaseURL, qiniuClient)
 	}
 
-	database, _ := db.InitDB(cfg.DatabaseURL)
+	database, dbErr := db.InitDB(cfg.DatabaseURL)
+	if dbErr != nil {
+		log.Printf("[Bootstrap] 严重警告: 数据库初始化失败: %v", dbErr)
+	}
 	var storageEngine storage.StorageEngine
 	var storageErr error
 	localStorage, storageErr := storage.NewLocalStorageEngine(cfg.StorageDir)
