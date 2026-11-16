@@ -36,16 +36,16 @@ test: test-go test-py ## 运行 Go + Python 全部测试
 adr-sync: ## 回填并同步 /grill-me 访谈记录到 docs/adr/
 	python3 .agents/hooks/grill_me_adr.py --backfill
 
-run: build-go ## 编译并启动本地生产模式单二进制服务 (默认 PORT=18080)
+run: stop build-go ## 停止旧进程、编译并启动本地生产模式单二进制服务 (默认 PORT=18080)
 	SERVER_PORT=$(PORT) ./$(BIN)
 
-dev-backend: ## 仅启动 Go 后端开发服务 (默认 PORT=18080)
+dev-backend: stop ## 仅启动 Go 后端开发服务 (默认 PORT=18080)
 	SERVER_PORT=$(PORT) go run .
 
 dev-frontend: ## 仅启动 Vite 前端热更新 (默认 WEB_PORT=5173，代理至 PORT=18080)
 	cd web && VITE_API_TARGET="http://localhost:$(PORT)" npm run dev -- --port $(WEB_PORT)
 
-dev: ## 本地联调模式：同时启动 Go 后端与 Vite 前端热更新 (默认 PORT=18080, WEB_PORT=5173)
+dev: stop ## 本地联调模式：自动停止已有进程，并同时启动 Go 后端与 Vite 前端热更新 (默认 PORT=18080, WEB_PORT=5173)
 	@bash -c '\
 		set -e; \
 		trap "kill 0 2>/dev/null || true" EXIT INT TERM; \
@@ -57,7 +57,9 @@ dev: ## 本地联调模式：同时启动 Go 后端与 Vite 前端热更新 (默
 
 stop: ## 停止本项目的本地运行进程
 	@pkill -x "$(BIN)" 2>/dev/null || true
-	@pkill -f "node_modules/.bin/vite" 2>/dev/null || true
+	@pkill -f "[n]ode_modules/.bin/vite" 2>/dev/null || true
+	@pkill -f "[g]o run \." 2>/dev/null || true
+	@sleep 0.5
 	@echo "已停止本地项目进程"
 
 docker-build: ## 构建 Docker 镜像
