@@ -58,14 +58,29 @@ dev-backend: stop ## 仅启动 Go 后端开发服务 (默认 PORT=18080)
 	@$(BASH_EXE) -c 'SERVER_PORT=$(PORT) go run .'
 
 dev-frontend: ## 仅启动 Vite 前端热更新 (默认 WEB_PORT=5173，代理至 PORT=18080)
-	@$(BASH_EXE) -c 'cd web && VITE_API_TARGET="http://localhost:$(PORT)" npm run dev -- --port $(WEB_PORT)'
+	@$(BASH_EXE) -c '\
+		if [ ! -d "web/node_modules" ]; then \
+			echo ">> 未检测到 web/node_modules，正在自动执行 npm install..."; \
+			(cd web && npm install); \
+		fi; \
+		cd web && VITE_API_TARGET="http://localhost:$(PORT)" npm run dev -- --port $(WEB_PORT) \
+	'
 
 dev: stop ## 本地联调模式：自动停止已有进程，并同时启动 Go 后端与 Vite 前端热更新 (默认 PORT=18080, WEB_PORT=5173)
 	@$(BASH_EXE) -c '\
 		set -e; \
-		trap "kill 0 2>/dev/null || true" EXIT INT TERM; \
+		if [ ! -d "web/node_modules" ]; then \
+			echo ">> 未检测到 web/node_modules，正在自动执行 npm install..."; \
+			(cd web && npm install); \
+		fi; \
+		cleanup() { \
+			kill $$BACKEND_PID 2>/dev/null || true; \
+			taskkill //F //IM $(BIN) 2>/dev/null || true; \
+		}; \
+		trap cleanup EXIT INT TERM; \
 		echo ">> 启动 Go 后端: http://localhost:$(PORT)"; \
 		SERVER_PORT=$(PORT) go run . & \
+		BACKEND_PID=$$!; \
 		echo ">> 启动 Vite 前端: http://localhost:$(WEB_PORT) (代理至 http://localhost:$(PORT))"; \
 		cd web && VITE_API_TARGET="http://localhost:$(PORT)" npm run dev -- --port $(WEB_PORT) \
 	'
