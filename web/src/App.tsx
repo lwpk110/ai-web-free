@@ -22,6 +22,7 @@ import {
   Video,
   X,
   Zap,
+  KeyRound,
 } from "lucide-react";
 import {
   AdminUnauthorizedError,
@@ -43,6 +44,7 @@ import { PromptChatAssistantHost } from "./components/PromptChatAssistant";
 import { ImageStudio } from "./views/ImageStudio";
 import { LogsView } from "./views/LogsView";
 import { NetworkView } from "./views/NetworkView";
+import { GatewayView } from "./views/GatewayView";
 import { OpsLogsView } from "./views/OpsLogsView";
 import { OverviewView } from "./views/OverviewView";
 import { PoolConsole } from "./views/PoolConsole";
@@ -65,6 +67,7 @@ function resolveInitialTheme(): "light" | "dark" {
 function resolveRouteFromHash(): RouteKey {
   const h = window.location.hash.replace(/^#\/?/, "").toLowerCase();
   if (h.startsWith("pools")) return "pools";
+  if (h.startsWith("gateway")) return "gateway";
   if (h.startsWith("network")) return "network";
   if (h.startsWith("ops-logs")) return "ops-logs";
   if (h.startsWith("logs")) return "logs";
@@ -82,6 +85,8 @@ function renderNavIcon(id: RouteKey) {
       return <LayoutGrid size={15} className="shrink-0" />;
     case "pools":
       return <Server size={15} className="shrink-0" />;
+    case "gateway":
+      return <KeyRound size={15} className="shrink-0" />;
     case "network":
       return <Globe size={15} className="shrink-0" />;
     case "logs":
@@ -673,6 +678,7 @@ export const App: React.FC = () => {
                     onOpenExport={(prov) => setExportProvider(prov)}
                   />
                 )}
+                {route === "gateway" && <GatewayView />}
                 {route === "network" && (
                   <NetworkView autoProbeTrigger={probeTrigger} />
                 )}

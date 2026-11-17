@@ -7,6 +7,7 @@ import (
 	"log"
 	"math"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -30,11 +31,17 @@ type Pool struct {
 	temporary map[string]*Account // key = tokenHash
 
 	// 上游模型目录内存缓存（按探测/拉取结果合并去重，受 p.mu 保护）
-	cachedModels   []string
-	modelsCachedAt time.Time
+	cachedModels           []string
+	modelsCachedAt         time.Time
+	providerModels         map[string][]string
+	providerModelsCachedAt map[string]time.Time
 
 	// 账号永久封禁回调（用于持久化 banned 状态并剔除死 Token）
 	onBanned func(acct *Account, reason string)
+
+	// 热池/待命池策略（按账号类型）
+	policies   map[AccountType]PoolPolicy
+	lastRotate map[AccountType]time.Time
 }
 
 // typeIndex 返回 AccountType 在 cursors 中的索引
@@ -64,7 +71,9 @@ func (p *Pool) sliceFor(t AccountType) *[]*Account {
 
 func NewPool(initial []*Account) *Pool {
 	pool := &Pool{
-		temporary: make(map[string]*Account),
+		temporary:              make(map[string]*Account),
+		providerModels:         make(map[string][]string),
+		providerModelsCachedAt: make(map[string]time.Time),
 	}
 	for _, acct := range initial {
 		pool.AddAccount(acct)
@@ -100,17 +109,56 @@ func isImageCapability(capName string) bool {
 
 // AcquireForCapability 按账号类型与能力轮询获取可用账号，跳过 exclude、全能力冷却及对应生图冷却中的账号。
 func (p *Pool) AcquireForCapability(acctType AccountType, capName string, exclude map[string]bool) (*Account, error) {
+	return p.AcquireMatching([]AccountType{acctType}, nil, capName, exclude)
+}
+
+// AcquireMatching 按类型优先级与自定义过滤器取号（分组调度使用），match 为 nil 表示不过滤。
+func (p *Pool) AcquireMatching(types []AccountType, match func(*Account) bool, capName string, exclude map[string]bool) (*Account, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	for _, t := range types {
+		if a := p.acquireLocked(t, match, capName, exclude); a != nil {
+			return a, nil
+		}
+	}
+	return nil, ErrNoAvailable
+}
 
+// CollectModels 汇总匹配账号已缓存的模型 slug（去重、保持首次出现顺序）。
+func (p *Pool) CollectModels(types []AccountType, match func(*Account) bool) []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	seen := map[string]bool{}
+	var out []string
+	for _, t := range types {
+		slice := p.sliceFor(t)
+		if slice == nil {
+			continue
+		}
+		for _, a := range *slice {
+			if a.Status != StatusActive || (match != nil && !match(a)) {
+				continue
+			}
+			for _, m := range a.Models {
+				if !seen[m] {
+					seen[m] = true
+					out = append(out, m)
+				}
+			}
+		}
+	}
+	return out
+}
+
+func (p *Pool) acquireLocked(acctType AccountType, match func(*Account) bool, capName string, exclude map[string]bool) *Account {
 	slice := p.sliceFor(acctType)
 	if slice == nil || len(*slice) == 0 {
-		return nil, ErrNoAvailable
+		return nil
 	}
 
 	idx := typeIndex(acctType)
 	if idx < 0 {
-		return nil, ErrNoAvailable
+		return nil
 	}
 
 	now := time.Now()
@@ -119,7 +167,7 @@ func (p *Pool) AcquireForCapability(acctType AccountType, capName string, exclud
 	for i := 0; i < len(entries); i++ {
 		cur := (p.cursors[idx] + i) % len(entries)
 		a := entries[cur]
-		if exclude != nil && exclude[a.ID] {
+		if exclude != nil && exclude[a.ID] || (match != nil && !match(a)) {
 			continue
 		}
 		// 冷却期届满时惰性恢复，避免请求侧必须等待后台巡检周期
@@ -139,10 +187,10 @@ func (p *Pool) AcquireForCapability(acctType AccountType, capName string, exclud
 		p.cursors[idx] = (cur + 1) % len(entries)
 		a.TotalCalls++
 		a.LastUsed = now
-		return a, nil
+		return a
 	}
 
-	return nil, ErrNoAvailable
+	return nil
 }
 
 // Release 保留接口但不再需要主动调用（统计在 Acquire 时已更新）。
@@ -486,6 +534,7 @@ type PoolStats struct {
 	ImageLimited int   `json:"image_limited"`
 	Disabled     int   `json:"disabled"`
 	Banned       int   `json:"banned"`
+	Standby      int   `json:"standby"`
 	FreeCount    int   `json:"free_count"`
 	NoAuthCount  int   `json:"noauth_count"`
 	PUIDCount    int   `json:"puid_count"`
@@ -657,6 +706,8 @@ func (p *Pool) Stats() PoolStats {
 			stats.Disabled++
 		case StatusBanned:
 			stats.Banned++
+		case StatusStandby:
+			stats.Standby++
 		}
 	}
 
@@ -1002,7 +1053,7 @@ func (p *Pool) NeedsProactiveRenew(within time.Duration) []*Account {
 			if a.RefreshToken != "" || a.SessionToken != "" {
 				continue
 			}
-			if a.Status == StatusDisabled || a.Status == StatusBanned {
+			if a.Status == StatusDisabled || a.Status == StatusBanned || a.Status == StatusStandby {
 				continue
 			}
 			if a.RenewState == "queued" || a.RenewState == "running" {
@@ -1115,13 +1166,10 @@ func (p *Pool) AllPersistentAccounts() []*Account {
 }
 
 // RecordAccountModels 记录指定账号探测到的上游模型，并合并更新池级模型目录缓存。
-func (p *Pool) RecordAccountModels(acctID string, slugs []string) {
-	if p == nil || len(slugs) == 0 {
-		return
-	}
-	seen := make(map[string]bool, len(slugs))
-	clean := make([]string, 0, len(slugs))
-	for _, raw := range slugs {
+func normalizeModelIDs(models []string) []string {
+	seen := make(map[string]bool, len(models))
+	clean := make([]string, 0, len(models))
+	for _, raw := range models {
 		slug := strings.TrimSpace(raw)
 		if slug == "" || seen[slug] {
 			continue
@@ -1130,25 +1178,24 @@ func (p *Pool) RecordAccountModels(acctID string, slugs []string) {
 		clean = append(clean, slug)
 	}
 	if len(clean) == 0 {
+		return nil
+	}
+	return clean
+}
+
+func (p *Pool) RecordAccountModels(acctID string, slugs []string) {
+	clean := normalizeModelIDs(slugs)
+	if p == nil || len(clean) == 0 {
 		return
 	}
-
 	p.mu.Lock()
 	found := false
 	if acct := p.findAccountLocked(acctID); acct != nil {
 		acct.Models = append([]string(nil), clean...)
 		found = true
 	}
-	merged := make([]string, 0, len(clean)+len(p.cachedModels))
-	merged = append(merged, clean...)
-	for _, prev := range p.cachedModels {
-		if prev != "" && !seen[prev] {
-			seen[prev] = true
-			merged = append(merged, prev)
-		}
-	}
-	p.cachedModels = merged
-	p.modelsCachedAt = time.Now()
+	p.providerModels["chatgpt"] = clean
+	p.rebuildModelsLocked()
 	p.mu.Unlock()
 
 	if !found && acctID != "" {
@@ -1161,6 +1208,48 @@ func (p *Pool) RecordAccountModels(acctID string, slugs []string) {
 		}
 		p.tempMu.Unlock()
 	}
+}
+
+// RecordProviderModelsAt 记录某个供应商实时模型目录，并重建全站合并缓存。
+func (p *Pool) RecordProviderModelsAt(provider string, models []string, cachedAt time.Time) {
+	clean := normalizeModelIDs(models)
+	if p == nil || provider == "" || len(clean) == 0 {
+		return
+	}
+	p.mu.Lock()
+	if p.providerModels == nil {
+		p.providerModels = make(map[string][]string)
+	}
+	if p.providerModelsCachedAt == nil {
+		p.providerModelsCachedAt = make(map[string]time.Time)
+	}
+	p.providerModels[provider] = clean
+	if cachedAt.After(p.providerModelsCachedAt[provider]) {
+		p.providerModelsCachedAt[provider] = cachedAt
+	}
+	p.rebuildModelsLocked()
+	p.mu.Unlock()
+}
+
+func (p *Pool) rebuildModelsLocked() {
+	seen := make(map[string]bool)
+	merged := make([]string, 0)
+	providers := make([]string, 0, len(p.providerModels))
+	for provider := range p.providerModels {
+		providers = append(providers, provider)
+	}
+	sort.Strings(providers)
+	for _, provider := range providers {
+		for _, model := range p.providerModels[provider] {
+			if model == "" || seen[model] {
+				continue
+			}
+			seen[model] = true
+			merged = append(merged, model)
+		}
+	}
+	p.cachedModels = merged
+	p.modelsCachedAt = time.Now()
 }
 
 // CachedModels 返回池内已缓存的上游模型列表及其最近更新时间。
@@ -1176,4 +1265,20 @@ func (p *Pool) CachedModels() ([]string, time.Time) {
 	out := make([]string, len(p.cachedModels))
 	copy(out, p.cachedModels)
 	return out, p.modelsCachedAt
+}
+
+// ProviderModels 返回指定供应商的实时模型缓存。
+func (p *Pool) ProviderModels(provider string) ([]string, time.Time) {
+	if p == nil || provider == "" {
+		return nil, time.Time{}
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	models := p.providerModels[provider]
+	if len(models) == 0 {
+		return nil, p.providerModelsCachedAt[provider]
+	}
+	out := make([]string, len(models))
+	copy(out, models)
+	return out, p.providerModelsCachedAt[provider]
 }

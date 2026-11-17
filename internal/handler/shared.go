@@ -44,6 +44,11 @@ func resolveAccount(c *gin.Context, pool *accounts.Pool, cfg *config.Config, nee
 
 // resolveAccountForCapability 按目标能力与排除列表从号池解析可用账号，外部透传 Token 不受号池退避影响。
 func resolveAccountForCapability(c *gin.Context, pool *accounts.Pool, cfg *config.Config, needsPaid bool, capName string, exclude map[string]bool) (*accounts.Account, int, error) {
+	// 网关 API Key 请求：按 Key 所属分组（及降级分组）取号。
+	if acct, st, err, ok := acquireForGateway(c, pool, needsPaid, capName, exclude); ok {
+		return acct, st, err
+	}
+
 	var authHeader string
 	if c != nil {
 		authHeader = c.GetHeader("Authorization")

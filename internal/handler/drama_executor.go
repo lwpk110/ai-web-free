@@ -13,7 +13,6 @@ import (
 	"math"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -132,6 +131,8 @@ func (e *GatewayDramaExecutor) imageProviderForModel(model string) string {
 		return "dashscope"
 	case strings.Contains(m, "jimeng"):
 		return "jimeng"
+	case strings.Contains(m, "grok"):
+		return "grok"
 	default:
 		return "chatgpt"
 	}
@@ -159,43 +160,19 @@ func (e *GatewayDramaExecutor) pickImageModel(proj *drama.DramaProject) string {
 		policy = proj.Script.RoutingPolicy
 		override = strings.TrimSpace(proj.Script.ImageModelOverride)
 	}
+	_ = policy
 
-	if override != "" {
+	if override != "" && !strings.EqualFold(override, "auto") {
 		prov := e.imageProviderForModel(override)
 		if isProviderAllowed(allowed, prov) && e.hasImageProviderCreds(prov) {
 			return override
 		}
 	}
 
-	hasPaidCGPT := false
-	if e.pool != nil {
-		st := e.pool.Stats()
-		hasPaidCGPT = (st.Active - st.FreeCount - st.NoAuthCount) > 0
-	}
-
-	if policy == "quality_first" {
-		if isProviderAllowed(allowed, "chatgpt") && hasPaidCGPT {
-			return "gpt-image-1"
-		}
-		if isProviderAllowed(allowed, "jimeng") && e.hasRegistryCreds("jimeng") {
-			return "jimeng-2.1"
-		}
-	}
-	if isProviderAllowed(allowed, "siliconflow") && e.hasRegistryCreds("siliconflow") {
-		return "flux-schnell"
-	}
-	if isProviderAllowed(allowed, "dashscope") && e.hasRegistryCreds("dashscope") {
-		return "wanx-v1"
-	}
-	if isProviderAllowed(allowed, "jimeng") && e.hasRegistryCreds("jimeng") {
-		return "jimeng-2.1"
-	}
-	if isProviderAllowed(allowed, "chatgpt") && e.hasImageProviderCreds("chatgpt") {
-		return "gpt-image-1"
-	}
-	return ""
+	return randomDramaProviderModel(dramaModelCatalog(e.pool, e.registry, "image_generation", nil), func(id string) bool {
+		return isProviderAllowed(allowed, id) && e.hasImageProviderCreds(id)
+	})
 }
-
 func (e *GatewayDramaExecutor) canEditWithRefs() bool {
 	if e.pool == nil {
 		return false
@@ -477,6 +454,36 @@ func (e *GatewayDramaExecutor) GenerateKeyframe(ctx context.Context, proj *drama
 	return asset, usedModel, degraded, statusNote, err
 }
 
+func normalizeDramaTTSEngine(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "edge", "edge_tts", "edge-tts":
+		return "edge_tts"
+	case "local", "local_tts", "kokoro":
+		return "local_tts"
+	case "dashscope", "aliyun", "bailian":
+		return "dashscope"
+	case "siliconflow", "sf":
+		return "siliconflow"
+	case "chatgpt", "openai":
+		return "chatgpt"
+	default:
+		return ""
+	}
+}
+
+func isTTSProviderAllowed(allowed []string, engine string) bool {
+	if len(allowed) == 0 {
+		return true
+	}
+	target := normalizeDramaTTSEngine(engine)
+	for _, item := range allowed {
+		if normalizeDramaTTSEngine(item) == target {
+			return true
+		}
+	}
+	return false
+}
+
 func (e *GatewayDramaExecutor) GenerateTTS(ctx context.Context, proj *drama.DramaProject, shot drama.ShotSpec, speaker *drama.CharacterSpec) (drama.AssetSpec, float64, error) {
 	if e.audioHandler == nil {
 		return drama.AssetSpec{}, 0, fmt.Errorf("audio handler not initialized")
@@ -488,18 +495,52 @@ func (e *GatewayDramaExecutor) GenerateTTS(ctx context.Context, proj *drama.Dram
 	if text == "" {
 		return drama.AssetSpec{}, 0, fmt.Errorf("shot dialogue and action are empty")
 	}
-	voiceID := "zh-CN-YunxiNeural"
+
+	engine := ""
+	voiceID := ""
 	speed := 1.0
 	if speaker != nil {
-		if strings.TrimSpace(speaker.Voice.ID) != "" {
-			voiceID = strings.TrimSpace(speaker.Voice.ID)
-		}
+		engine = normalizeDramaTTSEngine(speaker.Voice.Engine)
+		voiceID = strings.TrimSpace(speaker.Voice.ID)
 		if speaker.Voice.Speed > 0 {
 			speed = speaker.Voice.Speed
 		}
 	}
+	defaultEngine := normalizeDramaTTSEngine(proj.Script.DefaultTTSEngine)
+	defaultVoice := strings.TrimSpace(proj.Script.DefaultTTSVoiceID)
+	if engine == "" {
+		engine = defaultEngine
+		voiceID = defaultVoice
+	}
+	if voiceID == "" && defaultVoice != "" && (engine == "" || engine == defaultEngine) {
+		voiceID = defaultVoice
+	}
+	if engine == "" {
+		engine = "edge_tts"
+	}
+	if !isTTSProviderAllowed(proj.Script.AllowedTTSProviders, engine) {
+		if defaultEngine != "" && isTTSProviderAllowed(proj.Script.AllowedTTSProviders, defaultEngine) {
+			engine = defaultEngine
+			voiceID = defaultVoice
+		} else {
+			engine = ""
+			for _, candidate := range proj.Script.AllowedTTSProviders {
+				if normalized := normalizeDramaTTSEngine(candidate); normalized != "" && normalized != "chatgpt" {
+					engine = normalized
+					break
+				}
+			}
+			if engine == "" {
+				return drama.AssetSpec{}, 0, fmt.Errorf("TTS 白名单中没有画布可用的直连引擎")
+			}
+			voiceID = ""
+		}
+	}
+	if voiceID == "" {
+		voiceID = "zh-CN-YunxiNeural"
+	}
 
-	audioBytes, usedProv, _, err := e.audioHandler.SynthesizeSpeechData(ctx, text, voiceID, "tts-1", speed)
+	audioBytes, usedProv, _, err := e.audioHandler.SynthesizeSpeechDataWithPreferredProvider(ctx, text, voiceID, "tts-1", engine, speed)
 	if err != nil {
 		return drama.AssetSpec{}, 0, err
 	}
@@ -514,7 +555,6 @@ func (e *GatewayDramaExecutor) GenerateTTS(ctx context.Context, proj *drama.Dram
 	if localURL == "" {
 		localURL = "data:audio/mpeg;base64," + base64.StdEncoding.EncodeToString(audioBytes)
 	}
-	_ = filepath.Ext(localURL)
 
 	sum := sha256.Sum256(audioBytes)
 	// 按中文语速（约 4.2 字/秒 * speed）估算物理时长作为初始值，前端播放器加载后亦可微调
@@ -555,9 +595,16 @@ func extractCleanJSON(raw string) (string, error) {
 	return "", fmt.Errorf("no JSON object or array found in LLM output")
 }
 
+func (e *GatewayDramaExecutor) scriptModel(proj *drama.DramaProject) string {
+	if proj != nil && strings.TrimSpace(proj.Script.ScriptModelOverride) != "" {
+		return strings.TrimSpace(proj.Script.ScriptModelOverride)
+	}
+	return "auto"
+}
+
 func (e *GatewayDramaExecutor) callJSONWithRepair(
 	ctx context.Context,
-	systemPrompt, userPrompt string,
+	systemPrompt, userPrompt, model string,
 	parseAndValidate func(jsonStr string) error,
 ) error {
 	if e.chatExec == nil {
@@ -566,7 +613,7 @@ func (e *GatewayDramaExecutor) callJSONWithRepair(
 	curPrompt := userPrompt
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
-		raw, err := e.chatExec(ctx, systemPrompt, curPrompt, false)
+		raw, err := e.chatExec(ctx, systemPrompt, curPrompt, false, model)
 		if err != nil {
 			lastErr = err
 			continue
@@ -588,6 +635,7 @@ func (e *GatewayDramaExecutor) callJSONWithRepair(
 }
 
 func (e *GatewayDramaExecutor) AnalyzeScript(ctx context.Context, proj *drama.DramaProject) ([]drama.BeatSpec, error) {
+	model := e.scriptModel(proj)
 	if strings.TrimSpace(proj.Script.Outline) == "" {
 		return nil, fmt.Errorf("剧本梗概为空")
 	}
@@ -599,7 +647,7 @@ func (e *GatewayDramaExecutor) AnalyzeScript(ctx context.Context, proj *drama.Dr
 	var out struct {
 		Beats []drama.BeatSpec `json:"beats"`
 	}
-	err := e.callJSONWithRepair(ctx, sys, user, func(js string) error {
+	err := e.callJSONWithRepair(ctx, sys, user, model, func(js string) error {
 		if err := json.Unmarshal([]byte(js), &out); err != nil {
 			return err
 		}
@@ -620,6 +668,7 @@ func (e *GatewayDramaExecutor) AnalyzeScript(ctx context.Context, proj *drama.Dr
 }
 
 func (e *GatewayDramaExecutor) SelectHighlights(ctx context.Context, proj *drama.DramaProject) ([]string, error) {
+	model := e.scriptModel(proj)
 	if len(proj.Analysis.Beats) == 0 {
 		return nil, fmt.Errorf("缺少故事节拍分析结果")
 	}
@@ -636,7 +685,7 @@ func (e *GatewayDramaExecutor) SelectHighlights(ctx context.Context, proj *drama
 	var out struct {
 		HighlightBeatIDs []string `json:"highlight_beat_ids"`
 	}
-	err := e.callJSONWithRepair(ctx, sys, user, func(js string) error {
+	err := e.callJSONWithRepair(ctx, sys, user, model, func(js string) error {
 		if err := json.Unmarshal([]byte(js), &out); err != nil {
 			return err
 		}
@@ -649,6 +698,7 @@ func (e *GatewayDramaExecutor) SelectHighlights(ctx context.Context, proj *drama
 }
 
 func (e *GatewayDramaExecutor) BuildCharacters(ctx context.Context, proj *drama.DramaProject) ([]drama.CharacterSpec, error) {
+	model := e.scriptModel(proj)
 	beatsJSON, _ := json.Marshal(proj.Analysis.Beats)
 	sys := `你是短剧美术与选角导演。根据高光剧情生成 2~4 个核心角色（含旁白如需要），输出纯 JSON：
 {"characters":[{"id":"char-1","name":"角色名","role":"主角/女主/反派/旁白","appearance_bible":"极其详尽的外貌发型服饰特征（用于多镜头锁定）","voice_hint":"稳重男声/清亮女声/旁白"}]}`
@@ -664,7 +714,7 @@ func (e *GatewayDramaExecutor) BuildCharacters(ctx context.Context, proj *drama.
 			VoiceHint       string `json:"voice_hint"`
 		} `json:"characters"`
 	}
-	err := e.callJSONWithRepair(ctx, sys, user, func(js string) error {
+	err := e.callJSONWithRepair(ctx, sys, user, model, func(js string) error {
 		if err := json.Unmarshal([]byte(js), &out); err != nil {
 			return err
 		}
@@ -711,6 +761,7 @@ func (e *GatewayDramaExecutor) BuildCharacters(ctx context.Context, proj *drama.
 }
 
 func (e *GatewayDramaExecutor) BuildScenes(ctx context.Context, proj *drama.DramaProject) ([]drama.SceneSpec, error) {
+	model := e.scriptModel(proj)
 	beatsJSON, _ := json.Marshal(proj.Analysis.Beats)
 	sys := `你是短剧场景概念师。根据高光剧情设计 1~3 个核心固定场景，输出纯 JSON：
 {"scenes":[{"id":"scene-1","name":"场景名称","environment":"环境建筑陈设天气细节","lighting":"光影色调"}]}`
@@ -720,7 +771,7 @@ func (e *GatewayDramaExecutor) BuildScenes(ctx context.Context, proj *drama.Dram
 	var out struct {
 		Scenes []drama.SceneSpec `json:"scenes"`
 	}
-	err := e.callJSONWithRepair(ctx, sys, user, func(js string) error {
+	err := e.callJSONWithRepair(ctx, sys, user, model, func(js string) error {
 		if err := json.Unmarshal([]byte(js), &out); err != nil {
 			return err
 		}
@@ -738,6 +789,7 @@ func (e *GatewayDramaExecutor) BuildScenes(ctx context.Context, proj *drama.Dram
 }
 
 func (e *GatewayDramaExecutor) BuildShots(ctx context.Context, proj *drama.DramaProject) ([]drama.ShotSpec, error) {
+	model := e.scriptModel(proj)
 	beatsJSON, _ := json.Marshal(proj.Analysis.Beats)
 	charsJSON, _ := json.Marshal(proj.Characters)
 	scenesJSON, _ := json.Marshal(proj.Scenes)
@@ -749,7 +801,7 @@ func (e *GatewayDramaExecutor) BuildShots(ctx context.Context, proj *drama.Drama
 	var out struct {
 		Shots []drama.ShotSpec `json:"shots"`
 	}
-	err := e.callJSONWithRepair(ctx, sys, user, func(js string) error {
+	err := e.callJSONWithRepair(ctx, sys, user, model, func(js string) error {
 		if err := json.Unmarshal([]byte(js), &out); err != nil {
 			return err
 		}
@@ -777,38 +829,24 @@ func (e *GatewayDramaExecutor) BuildShots(ctx context.Context, proj *drama.Drama
 
 func (e *GatewayDramaExecutor) pickVideoModel(proj *drama.DramaProject, hasAudio bool) string {
 	var allowed []string
-	policy := ""
 	override := ""
 	if proj != nil {
 		allowed = proj.Script.AllowedVideoProviders
-		policy = proj.Script.RoutingPolicy
 		override = strings.TrimSpace(proj.Script.VideoModelOverride)
 	}
+	_ = hasAudio
 
-	if override != "" {
+	if override != "" && !strings.EqualFold(override, "auto") {
 		prov := resolveVideoProviderName(override)
 		if isProviderAllowed(allowed, prov) && e.videoHandler.hasActiveCredentials(prov) {
 			return override
 		}
 	}
-	if hasAudio && isProviderAllowed(allowed, "meta_muse") && e.videoHandler.hasActiveCredentials("meta_muse") && policy != "fast" {
-		return "muse-talk"
-	}
-	if isProviderAllowed(allowed, "meta_muse") && e.videoHandler.hasActiveCredentials("meta_muse") {
-		return "muse-video"
-	}
-	if isProviderAllowed(allowed, "siliconflow") && e.videoHandler.hasActiveCredentials("siliconflow") {
-		return "THUDM/CogVideoX-5b"
-	}
-	if isProviderAllowed(allowed, "dashscope") && e.videoHandler.hasActiveCredentials("dashscope") {
-		return "wan-video-v1"
-	}
-	if isProviderAllowed(allowed, "jimeng") && e.videoHandler.hasActiveCredentials("jimeng") {
-		return "jimeng-video-2.0"
-	}
-	return ""
-}
 
+	return randomDramaProviderModel(dramaModelCatalog(e.pool, e.registry, "video_generation", nil), func(id string) bool {
+		return isProviderAllowed(allowed, id) && e.videoHandler.hasActiveCredentials(id)
+	})
+}
 func (e *GatewayDramaExecutor) GenerateOrPollVideo(
 	ctx context.Context,
 	proj *drama.DramaProject,

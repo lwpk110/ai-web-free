@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net/http"
@@ -243,6 +244,10 @@ func (h *AdminHandler) ListAccounts(c *gin.Context) {
 		} else if kw := h.kamiWorker(); kw != nil {
 			resp["kami_worker"] = kw.Stats()
 		}
+	} else if runner, ok := p.(interface {
+		ActiveKamiLoginTask() *provider.KamiLoginTask
+	}); ok {
+		resp["login_task"] = runner.ActiveKamiLoginTask()
 	}
 	c.JSON(http.StatusOK, resp)
 }
@@ -628,6 +633,36 @@ func (h *AdminHandler) CancelKamiLogin(c *gin.Context) {
 			targetIDs = append(targetIDs, trimmed)
 		}
 	}
+	if cg == nil {
+		runner, ok := p.(interface {
+			CancelKamiLogin(taskID, accountID string, cancelAll bool) (*provider.KamiLoginTask, int, error)
+			CancelKamiLoginBatch(taskID string, accountIDs []string) (*provider.KamiLoginTask, int, error)
+		})
+		if !ok {
+			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "该供应商插件不支持队列取消"}})
+			return
+		}
+		var task *provider.KamiLoginTask
+		var count int
+		var err error
+		if !body.CancelAll && len(body.AccountIDs) > 0 {
+			task, count, err = runner.CancelKamiLoginBatch(body.TaskID, body.AccountIDs)
+		} else {
+			task, count, err = runner.CancelKamiLogin(body.TaskID, accountID, body.CancelAll)
+		}
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": err.Error()}})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"provider":  providerID,
+			"cancelled": count,
+			"task":      task,
+			"stats":     p.Stats(),
+		})
+		return
+	}
+
 	kw := cg.KamiWorker()
 
 	cancelRenewQueue := func() (int, bool) {
@@ -732,15 +767,12 @@ func (h *AdminHandler) CancelKamiLogin(c *gin.Context) {
 // DismissTask 标记已完成的可观察战报（重登或全池测活）为已关闭。
 func (h *AdminHandler) DismissTask(c *gin.Context) {
 	providerID := c.Param("provider")
-	if _, ok := h.registry.Get(providerID); !ok {
+	p, ok := h.registry.Get(providerID)
+	if !ok {
 		c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"message": "未找到供应商插件: " + providerID}})
 		return
 	}
 	cg := h.providerAsChatGPT(providerID)
-	if cg == nil {
-		c.JSON(http.StatusOK, gin.H{"ok": true, "dismissed": false})
-		return
-	}
 	var body struct {
 		Kind   string `json:"kind"`
 		TaskID string `json:"task_id"`
@@ -752,7 +784,21 @@ func (h *AdminHandler) DismissTask(c *gin.Context) {
 		}
 	}
 	dismissed := false
-	switch strings.ToLower(strings.TrimSpace(body.Kind)) {
+	kind := strings.ToLower(strings.TrimSpace(body.Kind))
+	if cg == nil {
+		if kind != "login" && kind != "" {
+			c.JSON(http.StatusOK, gin.H{"ok": true, "dismissed": false})
+			return
+		}
+		if runner, ok := p.(interface {
+			DismissKamiLoginTask(taskID string) bool
+		}); ok {
+			dismissed = runner.DismissKamiLoginTask(body.TaskID)
+		}
+		c.JSON(http.StatusOK, gin.H{"ok": true, "dismissed": dismissed})
+		return
+	}
+	switch kind {
 	case "login":
 		dismissed = cg.DismissKamiLoginTask(body.TaskID)
 	case "probe":
@@ -766,6 +812,28 @@ func (h *AdminHandler) DismissTask(c *gin.Context) {
 		}
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true, "dismissed": dismissed})
+}
+
+// RebalancePool 按热池/待命池策略立即补位、收缩与轮换。
+func (h *AdminHandler) RebalancePool(c *gin.Context) {
+	providerID := c.Param("provider")
+	p, ok := h.registry.Get(providerID)
+	if !ok {
+		c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"message": "未找到供应商插件: " + providerID}})
+		return
+	}
+	runner, ok := p.(interface {
+		Rebalance() []accounts.RebalanceResult
+	})
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "供应商 " + providerID + " 不支持热池调谐"}})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"provider": providerID,
+		"results":  runner.Rebalance(),
+		"stats":    p.Stats(),
+	})
 }
 
 // ProbeAllAccounts 批量并发测活当前供应商的所有非免登账号（支持 ?async=true 后台异步追踪进度）
@@ -1062,7 +1130,6 @@ func respondAdminModelsCatalog(
 	source string,
 	cachedAt time.Time,
 	warning string,
-	includeBuiltins bool,
 ) {
 	seen := make(map[string]bool, len(upstreamSlugs)+20)
 	data := make([]gin.H, 0, len(upstreamSlugs)+20)
@@ -1082,35 +1149,6 @@ func respondAdminModelsCatalog(
 			"source":   "upstream",
 		})
 	}
-	if source == "fallback" && upstreamCount == 0 {
-		for _, id := range []string{"gpt-5-6", "gpt-5-3", "gpt-5-mini", "gpt-4o", "gpt-4o-mini"} {
-			if !seen[id] {
-				seen[id] = true
-				data = append(data, gin.H{
-					"id":       id,
-					"object":   "model",
-					"owned_by": "openai",
-					"created":  0,
-					"source":   "builtin",
-				})
-			}
-		}
-	}
-	if includeBuiltins {
-		for _, id := range BuiltinModelIDs() {
-			if !seen[id] {
-				seen[id] = true
-				data = append(data, gin.H{
-					"id":       id,
-					"object":   "model",
-					"owned_by": "openai",
-					"created":  0,
-					"source":   "builtin",
-				})
-			}
-		}
-	}
-
 	payload := gin.H{
 		"object":         "list",
 		"source":         source,
@@ -1126,15 +1164,68 @@ func respondAdminModelsCatalog(
 	c.JSON(http.StatusOK, payload)
 }
 
+func (h *AdminHandler) syncDynamicModelCatalogs(pool *accounts.Pool, force bool) (bool, string) {
+	if h.registry == nil {
+		return false, ""
+	}
+	refreshed := false
+	warnings := make([]string, 0)
+	for _, descriptor := range h.registry.ListDescriptors() {
+		plugin, ok := h.registry.Get(descriptor.ID)
+		if !ok || plugin == nil {
+			continue
+		}
+		catalog, ok := plugin.(provider.ModelCatalogProvider)
+		if !ok {
+			continue
+		}
+		cached := catalog.CachedModels()
+		if len(cached) > 0 && !force {
+			if pool != nil {
+				pool.RecordProviderModelsAt(descriptor.ID, cached, catalog.ModelsCachedAt())
+			}
+			continue
+		}
+		if len(cached) == 0 && plugin.Stats().Active == 0 {
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		models, err := catalog.RefreshModels(ctx)
+		cachedAt := catalog.ModelsCachedAt()
+		cancel()
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("%s: %v", descriptor.Name, err))
+			continue
+		}
+		if pool != nil {
+			pool.RecordProviderModelsAt(descriptor.ID, models, cachedAt)
+		}
+		refreshed = true
+	}
+	return refreshed, strings.Join(warnings, "; ")
+}
+
 // ListModelsCatalog 返回动态获取并池级缓存的模型目录（支持 ?refresh=true 强制重新拉取）。
 func (h *AdminHandler) ListModelsCatalog(c *gin.Context) {
 	forceRefresh := c.Query("refresh") == "true" || c.Query("refresh") == "1"
-	includeBuiltins := c.DefaultQuery("include_builtins", "true") != "false" && c.DefaultQuery("include_builtins", "true") != "0"
 	pool := h.accountPool()
+	hadChatGPTCache := false
+	if pool != nil {
+		if models, _ := pool.ProviderModels("chatgpt"); len(models) > 0 {
+			hadChatGPTCache = true
+		}
+	}
+	dynamicRefreshed, dynamicWarning := h.syncDynamicModelCatalogs(pool, forceRefresh)
 
-	if !forceRefresh && pool != nil {
+	if dynamicRefreshed && hadChatGPTCache && pool != nil {
 		if cached, cachedAt := pool.CachedModels(); len(cached) > 0 {
-			respondAdminModelsCatalog(c, cached, "cache", cachedAt, "", includeBuiltins)
+			respondAdminModelsCatalog(c, cached, "cache", cachedAt, dynamicWarning)
+			return
+		}
+	}
+	if !forceRefresh && !dynamicRefreshed && pool != nil {
+		if cached, cachedAt := pool.CachedModels(); len(cached) > 0 {
+			respondAdminModelsCatalog(c, cached, "cache", cachedAt, dynamicWarning)
 			return
 		}
 	}
@@ -1168,7 +1259,10 @@ func (h *AdminHandler) ListModelsCatalog(c *gin.Context) {
 					}
 					if len(slugs) > 0 {
 						pool.RecordAccountModels(acct.ID, slugs)
-						respondAdminModelsCatalog(c, slugs, "live", time.Now(), "", includeBuiltins)
+						if cached, _ := pool.CachedModels(); len(cached) > 0 {
+							slugs = cached
+						}
+						respondAdminModelsCatalog(c, slugs, "live", time.Now(), dynamicWarning)
 						return
 					}
 					lastErr = "上游返回空模型列表"
@@ -1181,13 +1275,23 @@ func (h *AdminHandler) ListModelsCatalog(c *gin.Context) {
 			}
 		}
 		if cached, cachedAt := pool.CachedModels(); len(cached) > 0 {
-			respondAdminModelsCatalog(c, cached, "cache", cachedAt, lastErr, includeBuiltins)
+			respondAdminModelsCatalog(c, cached, "cache", cachedAt, joinModelWarnings(dynamicWarning, lastErr))
 			return
 		}
 	}
 
 	if lastErr == "" {
-		lastErr = "当前无可用登录态账号，已使用内置参考目录"
+		lastErr = "当前无可用登录态账号，未返回静态模型目录"
 	}
-	respondAdminModelsCatalog(c, nil, "fallback", time.Time{}, lastErr, includeBuiltins)
+	respondAdminModelsCatalog(c, nil, "fallback", time.Time{}, joinModelWarnings(dynamicWarning, lastErr))
+}
+
+func joinModelWarnings(values ...string) string {
+	parts := make([]string, 0, len(values))
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			parts = append(parts, value)
+		}
+	}
+	return strings.Join(parts, "; ")
 }

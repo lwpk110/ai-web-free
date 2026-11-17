@@ -26,6 +26,7 @@ export type RouteKey =
   | "overview"
   | "pools"
   | "network"
+  | "gateway"
   | "logs"
   | "ops-logs"
   | "chat"
@@ -56,6 +57,13 @@ export const NAV_ITEMS: NavItemConfig[] = [
     label: "号池与供应商",
     hash: "#/pools",
     description: "分级冷却状态、批量导入导出与 2FA 实时动态码",
+  },
+  {
+    id: "gateway",
+    group: "ops",
+    label: "网关与密钥分组",
+    hash: "#/gateway",
+    description: "分发客户端 API Key (sk-gw-*)、Sub2API 路由分组与 RPM 限额",
   },
   {
     id: "network",
@@ -219,6 +227,11 @@ const STATUS_STYLE_MAP: Record<
   },
   banned: {
     label: "已封禁",
+    cls: "z-muted z-border z-text-muted",
+    dot: "status-dot-muted",
+  },
+  standby: {
+    label: "待命休眠",
     cls: "z-muted z-border z-text-muted",
     dot: "status-dot-muted",
   },

@@ -93,6 +93,91 @@ function parseNodeMeta(nodeKey: string): { nodeName: string; stageName: string }
   return { nodeName: nodeKey, stageName: "任务节点" };
 }
 
+export interface ChronoBottleneck {
+  nodeKey: string;
+  nodeName: string;
+  error: string;
+  blockedDownstream: string[];
+  suggestedFix: string;
+  kind: "failed" | "stale_running" | "history_error";
+}
+
+const STALE_RUNNING_MS = 3 * 60 * 1000;
+
+export function analyzeChronoBottlenecks(
+  logs: ChronoLogEntry[],
+  nodeStates: Record<string, ChronoNodeState>,
+): ChronoBottleneck[] {
+  const byKey = new Map<string, ChronoBottleneck>();
+  const blockedFor = (key: string) => {
+    const blocked: string[] = [];
+    if (key.startsWith("image.keyframe:")) {
+      const shot = key.replace("image.keyframe:", "");
+      blocked.push(`video.clip:${shot}`, "timeline.assemble");
+    } else if (key.startsWith("bible.")) {
+      blocked.push("全部下游分镜生图与视频");
+    } else if (key.startsWith("video.clip:")) {
+      blocked.push("timeline.assemble", "render.mp4");
+    }
+    return blocked;
+  };
+  const fixFor = (err: string) => {
+    if (err.includes("no active siliconflow api key") || err.includes("key")) {
+      return "通道未配置有效 API Key，请在「能力设置」切换为可用通道";
+    }
+    if (err.includes("timeout") || err.includes("504") || err.includes("500")) {
+      return "模型上游临时超时，建议稍后重试或减小生图并发数";
+    }
+    return "点击单节点重试或调整 Prompt 提示词";
+  };
+
+  Object.entries(nodeStates).forEach(([key, st]) => {
+    if (st.status === "failed") {
+      const err = st.error || st.statusNote || "未知执行错误";
+      byKey.set(key, {
+        nodeKey: key,
+        nodeName: parseNodeMeta(key).nodeName,
+        error: err,
+        blockedDownstream: blockedFor(key),
+        suggestedFix: fixFor(err),
+        kind: "failed",
+      });
+      return;
+    }
+    if (st.status !== "running" || !st.updatedAt) return;
+    const updated = new Date(st.updatedAt).getTime();
+    if (Number.isFinite(updated) && Date.now() - updated >= STALE_RUNNING_MS) {
+      const idleMin = Math.floor((Date.now() - updated) / 60000);
+      const err = `节点运行中已 ${idleMin} 分钟无状态心跳`;
+      byKey.set(key, {
+        nodeKey: key,
+        nodeName: parseNodeMeta(key).nodeName,
+        error: err,
+        blockedDownstream: blockedFor(key),
+        suggestedFix: "后台任务可能仍在等待上游返回；可先刷新工程，超过 5 分钟仍无变化再重跑此节点",
+        kind: "stale_running",
+      });
+    }
+  });
+
+  logs.forEach((log) => {
+    const key = log.nodeKey || "";
+    if (!key || byKey.has(key)) return;
+    const isError = log.level === "error" || log.message.startsWith("失败 ");
+    if (!isError) return;
+    byKey.set(key, {
+      nodeKey: key,
+      nodeName: parseNodeMeta(key).nodeName,
+      error: `历史执行错误：${log.message}`,
+      blockedDownstream: blockedFor(key),
+      suggestedFix: "该错误来自当前选中的执行记录；若资产已补跑成功，可切换最新 Run 查看实时状态",
+      kind: "history_error",
+    });
+  });
+
+  return Array.from(byKey.values());
+}
+
 export const ChronoEventTracker: React.FC<ChronoEventTrackerProps> = ({
   logs,
   nodeStates,
@@ -106,52 +191,10 @@ export const ChronoEventTracker: React.FC<ChronoEventTrackerProps> = ({
   const [filterMode, setFilterMode] = useState<"all" | "bottlenecks" | "errors" | "nodes">("all");
   const [searchTerm, setSearchTerm] = useState("");
 
-  // 1. 识别当前所有卡点 (Bottlenecks)
-  const bottlenecks = useMemo(() => {
-    const list: Array<{
-      nodeKey: string;
-      nodeName: string;
-      error: string;
-      blockedDownstream: string[];
-      suggestedFix: string;
-    }> = [];
-
-    // 统计当前失败或降级的节点
-    Object.entries(nodeStates).forEach(([key, st]) => {
-      if (st.status === "failed") {
-        const { nodeName } = parseNodeMeta(key);
-        const err = st.error || st.statusNote || "未知执行错误";
-        
-        // 推导下游受阻节点
-        const blocked: string[] = [];
-        if (key.startsWith("image.keyframe:")) {
-          const shot = key.replace("image.keyframe:", "");
-          blocked.push(`video.clip:${shot}`, "timeline.assemble");
-        } else if (key.startsWith("bible.")) {
-          blocked.push("全部下游分镜生图与视频");
-        } else if (key.startsWith("video.clip:")) {
-          blocked.push("timeline.assemble", "render.mp4");
-        }
-
-        let fix = "点击单节点重试或调整 Prompt 提示词";
-        if (err.includes("no active siliconflow api key") || err.includes("key")) {
-          fix = "通道未配置有效 API Key，建议在「能力设置」切换为可用通道（如 Meta Muse 或内置通道）";
-        } else if (err.includes("timeout") || err.includes("504") || err.includes("500")) {
-          fix = "模型上游临时超时，建议稍后重试或减小生图并发数";
-        }
-
-        list.push({
-          nodeKey: key,
-          nodeName,
-          error: err,
-          blockedDownstream: blocked,
-          suggestedFix: fix,
-        });
-      }
-    });
-
-    return list;
-  }, [nodeStates]);
+  const bottlenecks = useMemo(
+    () => analyzeChronoBottlenecks(logs, nodeStates),
+    [logs, nodeStates],
+  );
 
   // 2. 结构化时光事件列表
   const parsedEvents = useMemo<ParsedEvent[]>(() => {

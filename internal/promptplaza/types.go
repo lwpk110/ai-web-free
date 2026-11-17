@@ -150,7 +150,7 @@ type VideoExpandResponse struct {
 type ProxyFunc func() string
 
 // PoolChatExecutor 调用本机 ChatGPT 号池执行文本对话或联网搜索。
-type PoolChatExecutor func(ctx context.Context, systemPrompt, userPrompt string, useWebSearch bool) (string, error)
+type PoolChatExecutor func(ctx context.Context, systemPrompt, userPrompt string, useWebSearch bool, model ...string) (string, error)
 
 // Endpoints 配置多源爬虫的外部接口地址，便于测试注入 mock server。
 type Endpoints struct {

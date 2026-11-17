@@ -274,3 +274,28 @@ type ProviderDescriptor struct {
      - 语音样本：先在现有系统/短剧音色库检索；未命中时爬虫抓样并缓存至 `voice_samples/`，同时通过 SiliconFlow `/v1/uploads/audio/voice`（支持本地采集音频转 `data:audio/...;base64,...` 直传，无需公网回调地址）或 DashScope `VoiceCloning` 复刻为 `speech:...` / `cosyvoice-...` 音色，持久化于 `voices/custom_voices.json`。无 Key 时暂存为 `cached_pending_key`，待补充 Key 后支持一键「云端复刻」，并在 `#/tts`、`#/short-drama` 与 `POST /v1/audio/speech` 中透明路由复用。
      - 参考图像与视频片段：爬虫下载缓存至 `images/` / `videos/` 并分别写入 `GalleryWork`（`model: "crawled-ref"`）与 `VideoTask`（`provider: "crawler"`），立即在 `#/image`（「设为参考图」）、`#/video`（「项目素材库」）与 `#/short-drama`（全平台画廊导入）中直接复用。
 
+
+## 7. xAI Grok Web 免费号池插件规范 (`provider: grok`)
+
+### 7.1 核心特性与架构定位
+- **定位**：基于 grok.com / X Web 逆向协议的免费号池插件，支持 Grok-3 / Grok-2 对话与 Grok-2-Image (Aurora) 高清文生图。
+- **状态**：`enabled`，已完全接入网关号池控制台、OpenAI `/v1/chat/completions` 与 `/v1/images/generations` 路由。
+- **账号凭据**：支持 `sso` 与 `sso-rw` Cookie 凭据（格式：`sso=...; sso-rw=...;` 或 `user@example.com----sso=...;`）。
+- **持久化**：启动时自动从 `GROK_ACCOUNTS_FILE`（默认 `grok_accounts.txt`）读取，并支持管理台热导入写回。
+
+### 7.2 热池与待命池阈值调谐
+完全遵从分供应商策略模型，支持环境变量精准控制：
+- `POOL_GROK_FREE_ACTIVE_TARGET`：热池活跃账号数量上限（0 为不限）。
+- `POOL_GROK_FREE_MIN_HEALTHY`：热池健康可用下限，低于此值立即补位。
+- `POOL_GROK_FREE_MAX_ACTIVE`：硬上限防止突发超量。
+- `POOL_GROK_FREE_ROTATE_INTERVAL` 与 `ROTATE_RATIO`：支持定时轮换热池账号。
+- `POOL_GROK_FREE_ACTIVATE_BATCH`：每轮调谐激活步长。
+- 自动自愈：当热池中账号遭遇 429 限流或失效时，自动触发 `Rebalance()` 从 `standby` 待命池补位激活。
+
+### 7.3 卡密 SSO 刷新与管理端任务
+
+- `ai-web-free grok-login` 支持从 `邮箱|密码|2FA密钥` 卡密批量登录 `accounts.x.ai`，并在回跳 Grok 后提取 `sso` / `sso-rw` Cookie；第三列也接受旧 JWT（`eyJ...`）或旧 SSO Cookie。旧 JWT 仅用于导入与持久化待命凭据，不会被当作可用 SSO，也不会因过期密码自动触发重登。
+- 工具基于既有纯 Go `chromedp` 依赖执行，支持 `--proxy`、`--browser-path`、`--limit`、`--account`、`--timeout`、`--headless` 与 `--merge`；输出为 `email----sso=...; sso-rw=...`，可直接作为 `GROK_ACCOUNTS_FILE` 凭据行导入。
+- CLI 与管理端批量登录默认无头运行；遇到必须人工完成的挑战时，管理员可显式选择有头模式。输出文件使用同目录临时文件原子替换，并设置为仅当前用户可读写（Windows 上权限语义由文件系统决定）。
+- 管理端 Grok 供应商支持 `auto`、`kami` 与 `cookie` 三种导入格式；`auto` 为默认值并逐行识别同一批混合凭据（`|` 卡密、`----` 卡密、旧版 `email----SSO`、纯 SSO Cookie）。确定性解析失败的行可在显式开启 `GROK_CREDENTIAL_LLM_ENABLED` 后批量交给 SiliconFlow 低成本模型归一化；LLM 输出必须重新通过 Grok 格式校验与“所有敏感值必须来自原始行”的防幻觉校验，未通过行仍按失败处理，且原始行与 LLM 响应不得写入日志。LLM 成功后会将原行与标准行双双脱敏为占位符模板，并保存到数据库 `credential_format_pattern_records`；后续相同格式直接离线渲染与校验，不再调用外部模型，模板连续误判 3 次后自动停用。卡密导入后创建异步串行 SSO 提取任务，成功后写回 Cookie、激活账号并持久化；已有 SSO Cookie 直接导入。任务状态、排队位置、取消排队与结果横幅复用 ChatGPT 卡密任务模型。
+- Linux 服务器执行浏览器登录时必须提供外部 Chrome/Chromium（推荐 `CHROME_PATH` 指向可执行文件）；网关二进制仍保持零 CGO / distroless 静态部署，不内嵌浏览器。

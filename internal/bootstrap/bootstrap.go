@@ -265,12 +265,21 @@ func Init() (*App, error) {
 		}
 	}
 
-	// 初始化 TLS Client
+	accountPool := accounts.NewPool(accs)
+
+	// 热池/待命池：按供应商 + 账号类型读取阈值（POOL_CHATGPT_FREE_ACTIVE_TARGET 等），0 表示不限制
+	applyPoolPolicy(accountPool, "chatgpt", accounts.TypeFree)
+	applyPoolPolicy(accountPool, "chatgpt", accounts.TypePUID)
+	accountPool.Rebalance()
+
+	// 初始化 TLS Client（待命账号延迟到激活时创建）
 	for _, acct := range accs {
+		if acct.Status == accounts.StatusStandby || acct.Client != nil {
+			continue
+		}
 		_ = acct.InitClient()
 	}
-
-	accountPool := accounts.NewPool(accs)
+	stopRebalancer := accountPool.StartRebalancer(time.Minute)
 	healthTracker := health.NewTracker()
 
 	var kamiWorker *provider.KamiRenewWorker
@@ -418,6 +427,13 @@ func Init() (*App, error) {
 	if dbErr != nil {
 		log.Printf("[Bootstrap] 严重警告: 数据库初始化失败: %v", dbErr)
 	}
+	if database != nil {
+		if grokAny, ok := reg.Get("grok"); ok {
+			if grokProvider, ok := grokAny.(*provider.GrokProvider); ok {
+				grokProvider.SetGrokCredentialPatternDB(database)
+			}
+		}
+	}
 	var storageEngine storage.StorageEngine
 	var storageErr error
 	localStorage, storageErr := storage.NewLocalStorageEngine(cfg.StorageDir)
@@ -450,7 +466,7 @@ func Init() (*App, error) {
 	plazaMgr := promptplaza.NewManager(promptplaza.Options{
 		PersistFile:  cfg.PromptPlazaFile,
 		ProxyFunc:    proxyPool.Allocate,
-		ChatExecutor: handler.NewPoolChatExecutor(rtForPlaza, accountPool, &cfg),
+		ChatExecutor: handler.NewPoolChatExecutor(rtForPlaza, accountPool, &cfg, reg),
 	})
 	promptSyncInterval := time.Duration(cfg.PromptSyncIntervalHours) * time.Hour
 	stopPromptSync := plazaMgr.StartScheduler(promptSyncInterval)
@@ -490,6 +506,7 @@ func Init() (*App, error) {
 		HealthTracker: healthTracker,
 		Cleanup: func() {
 			stopHealthCheck()
+			stopRebalancer()
 			healthTracker.MarkRunning("account_health_check", false, "已停止")
 			stopTempGC()
 			healthTracker.MarkRunning("temp_account_gc", false, "已停止")
@@ -508,6 +525,23 @@ func Init() (*App, error) {
 }
 
 // exchangeRefreshToken 用 refresh_token 换 access_token，使用账号自身的 Client（已绑定代理）
+// applyPoolPolicy 读取「供应商 + 账号类型」热池阈值并注入号池。
+func applyPoolPolicy(pool *accounts.Pool, providerID string, t accounts.AccountType) {
+	pc := config.LoadPoolPolicy(providerID, t.String())
+	pool.SetPolicy(t, accounts.PoolPolicy{
+		ActiveTarget:   pc.ActiveTarget,
+		MinHealthy:     pc.MinHealthy,
+		MaxActive:      pc.MaxActive,
+		RotateInterval: pc.RotateInterval,
+		RotateRatio:    pc.RotateRatio,
+		ActivateBatch:  pc.ActivateBatch,
+	})
+	if pc.ActiveTarget > 0 {
+		log.Printf("[pool] %s/%s hot-pool policy: target=%d min_healthy=%d max_active=%d rotate=%s",
+			providerID, t.String(), pc.ActiveTarget, pc.MinHealthy, pc.MaxActive, pc.RotateInterval)
+	}
+}
+
 func exchangeRefreshToken(acct *accounts.Account) bool {
 	if acct.RefreshToken == "" {
 		return false

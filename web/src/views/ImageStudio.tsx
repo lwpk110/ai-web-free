@@ -1405,7 +1405,7 @@ export const ImageStudio: React.FC = () => {
                 }
                 title={
                   modelsSource === "fallback"
-                    ? "从网关重新拉取模型目录（当前内置参考）"
+                    ? "从网关重新拉取模型目录（当前暂无实时模型）"
                     : "重新拉取模型目录（当前已缓存复用）"
                 }
                 className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg border z-border z-canvas z-ghost-btn z-text-muted cursor-pointer"

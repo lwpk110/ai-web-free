@@ -125,38 +125,9 @@ const BUILTIN_MODEL_META: Record<
   },
 };
 
-export const BUILTIN_IDS = new Set([
-  "gpt-image-2.5",
-  "gpt-image-2.5-sunburst",
-  "gpt-image-2.5-flare",
-  "gpt-image-2.6",
-  "gpt-image-2",
-  "gpt-image-1",
-  "dall-e-3",
-  "gpt-4o-mini-tts",
-  "tts-1",
-  "tts-1-hd",
-  "gpt-4o-transcribe",
-  "whisper-1",
-]);
+export const BUILTIN_IDS = new Set<string>([]);
 
-export const FALLBACK_CATALOG_IDS: string[] = [
-  "gpt-5-6",
-  "gpt-5-3",
-  "gpt-5-mini",
-  "gpt-4o",
-  "gpt-image-2.5-sunburst",
-  "gpt-image-2.5-flare",
-  "gpt-image-2.5",
-  "gpt-image-2.6",
-  "gpt-image-1",
-  "dall-e-3",
-  "gpt-4o-mini-tts",
-  "tts-1",
-  "tts-1-hd",
-  "gpt-4o-transcribe",
-  "whisper-1",
-];
+export const FALLBACK_CATALOG_IDS: string[] = [];
 
 export function classifyModel(
   id: string,
@@ -328,10 +299,7 @@ function savePersistedCatalog(
 }
 
 function makeFallbackState(): ModelsCatalogState {
-  return buildCatalogState(
-    FALLBACK_CATALOG_IDS.map((id) => ({ id, source: "builtin" })),
-    "fallback"
-  );
+  return buildCatalogState([], "fallback", "", "模型目录尚未实时拉取");
 }
 
 let currentState: ModelsCatalogState =
@@ -438,12 +406,6 @@ export function seedModelsCatalogFromSlugs(upstreamSlugs: string[]): void {
   }
   if (items.length === 0) return;
 
-  for (const id of BUILTIN_IDS) {
-    if (!seen.has(id)) {
-      seen.add(id);
-      items.push({ id, source: "builtin" });
-    }
-  }
   const now = new Date().toISOString();
   hasFetchedThisSession = true;
   currentState = buildCatalogState(items, "live", now, null, false, null);

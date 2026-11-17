@@ -1065,7 +1065,7 @@ export const OverviewView: React.FC<{
               </span>
               <span className="z-text-muted leading-relaxed">
                 {modelsSource === "fallback"
-                  ? `内置参考 ${catalog.length} 个模型：对话 ${chatModels.length} · 生图 ${imageModels.length} · 语音 ${audioModels.length}，点击查看 →`
+                  ? `暂无实时模型，点击查看 →`
                   : `已缓存 ${catalog.length} 个可用模型：对话 ${chatModels.length} · 生图 ${imageModels.length} · 语音 ${audioModels.length}，点击查看 →`}
               </span>
             </button>

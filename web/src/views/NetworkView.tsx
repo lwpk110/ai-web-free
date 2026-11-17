@@ -85,26 +85,23 @@ export const NetworkView: React.FC<{
     if (nextState.error) {
       setNotice({
         type: "error",
-        text: `实时拉取模型目录失败（已保留当前参考目录）：${nextState.error}`,
+        text: `实时拉取模型目录失败（已保留当前结果）：${nextState.error}`,
       });
       return;
     }
     if (nextState.source === "fallback") {
       setNotice({
         type: "info",
-        text: nextState.warning || "当前无可用登录态账号，已使用内置参考目录",
+        text: nextState.warning || "当前无可用登录态账号，模型目录为空",
       });
       return;
     }
     const upstreamN = nextState.catalog.filter(
       (m) => m.source === "upstream"
     ).length;
-    const builtinN = nextState.catalog.filter(
-      (m) => m.source === "builtin"
-    ).length;
     setNotice({
       type: "success",
-      text: `已实时拉取并缓存 ${nextState.catalog.length} 个模型（上游 ${upstreamN} + 内置生图/语音 ${builtinN}）`,
+      text: `已实时拉取并缓存 ${nextState.catalog.length} 个模型（上游 ${upstreamN}）`,
     });
   };
 
@@ -272,7 +269,7 @@ export const NetworkView: React.FC<{
           </h1>
           <p className="text-xs z-text-muted mt-1">
             粘性出站代理探测与熔断校准；右侧通过{" "}
-            <code className="font-mono-num">/v1/models?include_builtins=true</code>{" "}
+            <code className="font-mono-num">/v1/models</code>{" "}
             真实聚合上游对话、生图与语音全部可用模型。
           </p>
         </div>
@@ -420,7 +417,7 @@ export const NetworkView: React.FC<{
                     {modelsSource === "cache"
                       ? "已缓存复用 /v1/models 目录"
                       : "实时拉取自 /v1/models 目录"}
-                    （上游 {counts.upstream} + 内置生图/语音 {counts.builtin}
+                    （上游 {counts.upstream}
                     {modelsCachedAt
                       ? ` · ${formatClockTime(modelsCachedAt)}`
                       : ""}
@@ -428,7 +425,7 @@ export const NetworkView: React.FC<{
                   </span>
                 ) : (
                   <span>
-                    内置参考目录
+                    暂无实时模型
                     {modelsError || modelsWarning
                       ? ` · ${modelsError || modelsWarning}`
                       : ""}

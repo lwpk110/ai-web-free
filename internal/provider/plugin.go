@@ -1,8 +1,10 @@
 package provider
 
 import (
+	"context"
 	"errors"
 	"sync"
+	"time"
 
 	"ai-web-free/internal/accounts"
 )
@@ -50,12 +52,13 @@ type ImportRequest struct {
 
 // ImportResult 批量导入结果统计
 type ImportResult struct {
-	Added     int      `json:"added"`
-	Skipped   int      `json:"skipped"`
-	Failed    int      `json:"failed"`
-	TotalPool int      `json:"total_pool"`
-	Persisted bool     `json:"persisted"`
-	Messages  []string `json:"messages,omitempty"`
+	Added     int            `json:"added"`
+	Skipped   int            `json:"skipped"`
+	Failed    int            `json:"failed"`
+	TotalPool int            `json:"total_pool"`
+	Persisted bool           `json:"persisted"`
+	Messages  []string       `json:"messages,omitempty"`
+	LoginTask *KamiLoginTask `json:"login_task,omitempty"`
 }
 
 // ProviderPlugin 多供应商免费号池插件统一契约接口
@@ -65,6 +68,13 @@ type ProviderPlugin interface {
 	ListAccounts(typeFilter, statusFilter, search string) []accounts.AccountSnapshot
 	ImportCredentials(req ImportRequest) (ImportResult, error)
 	ExecuteAccountAction(id, action string) (map[string]interface{}, error)
+}
+
+// ModelCatalogProvider 支持实时发现并缓存上游模型目录的供应商。
+type ModelCatalogProvider interface {
+	CachedModels() []string
+	ModelsCachedAt() time.Time
+	RefreshModels(ctx context.Context) ([]string, error)
 }
 
 // Registry 供应商插件注册中心

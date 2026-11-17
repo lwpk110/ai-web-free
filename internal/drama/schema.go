@@ -42,10 +42,15 @@ type ScriptSpec struct {
 	Style                 string   `json:"style"`
 	TargetDurationSec     int      `json:"target_duration_sec,omitempty"`
 	RoutingPolicy         string   `json:"routing_policy"`
+	ScriptModelOverride   string   `json:"script_model_override,omitempty"`
 	ImageModelOverride    string   `json:"image_model_override,omitempty"`
 	VideoModelOverride    string   `json:"video_model_override,omitempty"`
 	AllowedImageProviders []string `json:"allowed_image_providers,omitempty"`
 	AllowedVideoProviders []string `json:"allowed_video_providers,omitempty"`
+	AllowedTTSProviders   []string `json:"allowed_tts_providers,omitempty"`
+	DefaultTTSEngine      string   `json:"default_tts_engine,omitempty"`
+	DefaultTTSVoiceID     string   `json:"default_tts_voice_id,omitempty"`
+	DefaultTTSVoiceName   string   `json:"default_tts_voice_name,omitempty"`
 	ImageConcurrency      int      `json:"image_concurrency,omitempty"`
 	AutoFallbackKenBurns  *bool    `json:"auto_fallback_ken_burns,omitempty"`
 	BGMURL                string   `json:"bgm_url,omitempty"`
@@ -93,24 +98,24 @@ type SceneSpec struct {
 }
 
 type ShotSpec struct {
-	ID                  string   `json:"id"`
-	Index               int      `json:"index"`
-	BeatID              string   `json:"beat_id,omitempty"`
-	SceneID             string   `json:"scene_id,omitempty"`
-	SpeakerID           string   `json:"speaker_id,omitempty"`
-	Continuous          bool     `json:"continuous,omitempty"`
-	ShotType            string   `json:"shot_type"`
-	CameraMove          string   `json:"camera_move"`
-	Action              string   `json:"action"`
-	Dialogue            string   `json:"dialogue"`
-	ContinuityNotes     string   `json:"continuity_notes,omitempty"`
-	PolishedVideoPrompt string   `json:"polished_video_prompt,omitempty"`
-	Transition          string   `json:"transition,omitempty"`
-	DurationSec         float64  `json:"duration_sec"`
-	ActualAudioDuration float64  `json:"actual_audio_duration,omitempty"`
-	Keyframe            string   `json:"keyframe,omitempty"` // asset_id
-	Audio               string   `json:"audio,omitempty"`    // asset_id
-	Video               string   `json:"video,omitempty"`    // asset_id
+	ID                  string  `json:"id"`
+	Index               int     `json:"index"`
+	BeatID              string  `json:"beat_id,omitempty"`
+	SceneID             string  `json:"scene_id,omitempty"`
+	SpeakerID           string  `json:"speaker_id,omitempty"`
+	Continuous          bool    `json:"continuous,omitempty"`
+	ShotType            string  `json:"shot_type"`
+	CameraMove          string  `json:"camera_move"`
+	Action              string  `json:"action"`
+	Dialogue            string  `json:"dialogue"`
+	ContinuityNotes     string  `json:"continuity_notes,omitempty"`
+	PolishedVideoPrompt string  `json:"polished_video_prompt,omitempty"`
+	Transition          string  `json:"transition,omitempty"`
+	DurationSec         float64 `json:"duration_sec"`
+	ActualAudioDuration float64 `json:"actual_audio_duration,omitempty"`
+	Keyframe            string  `json:"keyframe,omitempty"` // asset_id
+	Audio               string  `json:"audio,omitempty"`    // asset_id
+	Video               string  `json:"video,omitempty"`    // asset_id
 }
 
 type AssetSpec struct {
@@ -169,18 +174,18 @@ type LayoutData struct {
 	CheckpointAfterKeyframes bool                    `json:"checkpoint_after_keyframes,omitempty"`
 }
 
-func ScriptAnalyzeNodeKey() string    { return "script.analyze" }
-func ScriptHighlightsNodeKey() string { return "script.highlights" }
-func BibleCharactersNodeKey() string  { return "bible.characters" }
-func BibleScenesNodeKey() string      { return "bible.scenes" }
-func StoryboardShotsNodeKey() string  { return "storyboard.shots" }
-func PortraitNodeKey(charID string) string  { return "image.portrait:" + charID }
-func SceneNodeKey(sceneID string) string    { return "image.scene:" + sceneID }
-func KeyframeNodeKey(shotID string) string  { return "image.keyframe:" + shotID }
-func TTSNodeKey(shotID string) string       { return "tts.line:" + shotID }
-func VideoNodeKey(shotID string) string     { return "video.clip:" + shotID }
-func TimelineNodeKey() string               { return "timeline.assemble" }
-func RenderMP4NodeKey() string              { return "render.mp4" }
+func ScriptAnalyzeNodeKey() string         { return "script.analyze" }
+func ScriptHighlightsNodeKey() string      { return "script.highlights" }
+func BibleCharactersNodeKey() string       { return "bible.characters" }
+func BibleScenesNodeKey() string           { return "bible.scenes" }
+func StoryboardShotsNodeKey() string       { return "storyboard.shots" }
+func PortraitNodeKey(charID string) string { return "image.portrait:" + charID }
+func SceneNodeKey(sceneID string) string   { return "image.scene:" + sceneID }
+func KeyframeNodeKey(shotID string) string { return "image.keyframe:" + shotID }
+func TTSNodeKey(shotID string) string      { return "tts.line:" + shotID }
+func VideoNodeKey(shotID string) string    { return "video.clip:" + shotID }
+func TimelineNodeKey() string              { return "timeline.assemble" }
+func RenderMP4NodeKey() string             { return "render.mp4" }
 
 func (p *DramaProject) EnsureMaps() {
 	if p.SchemaVersion <= 0 {
@@ -279,6 +284,22 @@ func MigrateGraphJSON(
 		}
 		return ""
 	}
+	listVal := func(m map[string]interface{}, key string) []string {
+		if m == nil {
+			return nil
+		}
+		items, ok := m[key].([]interface{})
+		if !ok {
+			return nil
+		}
+		out := make([]string, 0, len(items))
+		for _, item := range items {
+			if s, ok := item.(string); ok && strings.TrimSpace(s) != "" {
+				out = append(out, strings.TrimSpace(s))
+			}
+		}
+		return out
+	}
 	numVal := func(m map[string]interface{}, key string, def float64) float64 {
 		if m == nil {
 			return def
@@ -315,8 +336,13 @@ func MigrateGraphJSON(
 			if v := strVal(n.Data, "routingPolicy"); v != "" {
 				proj.Script.RoutingPolicy = v
 			}
+			proj.Script.ScriptModelOverride = strVal(n.Data, "scriptModelOverride")
 			proj.Script.ImageModelOverride = strVal(n.Data, "imageModelOverride")
 			proj.Script.VideoModelOverride = strVal(n.Data, "videoModelOverride")
+			proj.Script.AllowedTTSProviders = listVal(n.Data, "allowedTTSProviders")
+			proj.Script.DefaultTTSEngine = strVal(n.Data, "defaultTTSEngine")
+			proj.Script.DefaultTTSVoiceID = strVal(n.Data, "defaultTTSVoiceId")
+			proj.Script.DefaultTTSVoiceName = strVal(n.Data, "defaultTTSVoiceName")
 			proj.Script.BGMURL = strVal(n.Data, "bgmUrl")
 
 		case "character":

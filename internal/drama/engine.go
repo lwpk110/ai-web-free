@@ -725,6 +725,8 @@ func (e *Engine) executeRun(ctx context.Context, state *activeRunState, opts Run
 	var schedMu sync.Mutex
 	inFlight := make(map[string]bool)
 	loggedSkipped := make(map[string]bool)
+	// Force 只表示本轮需要重算一次；不能让 ready 节点在每个调度周期都被重新满足。
+	forceExecuted := make(map[string]bool)
 	doneCond := sync.NewCond(&schedMu)
 
 	isTerminal := func(st *NodeState) bool {
@@ -741,11 +743,15 @@ func (e *Engine) executeRun(ctx context.Context, state *activeRunState, opts Run
 		if st.Locked && st.Output != "" {
 			return true
 		}
+		reusable := st.Status == StatusReady || st.Status == StatusDegraded
+		if reusable && forceExecuted[key] {
+			return true
+		}
 		if len(opts.Force) > 0 && matchesPattern(opts.Force, key) {
 			return false
 		}
 		curHash := ComputeNodeInputHash(proj, key)
-		return (st.Status == StatusReady || st.Status == StatusDegraded) && st.InputHash == curHash
+		return reusable && st.InputHash == curHash
 	}
 
 	for {
@@ -892,6 +898,9 @@ func (e *Engine) executeRun(ctx context.Context, state *activeRunState, opts Run
 
 				schedMu.Lock()
 				delete(inFlight, nodeKey)
+				if len(opts.Force) > 0 && matchesPattern(opts.Force, nodeKey) {
+					forceExecuted[nodeKey] = true
+				}
 				doneCond.Broadcast()
 				schedMu.Unlock()
 			}()
@@ -947,12 +956,12 @@ func (e *Engine) runSingleNode(ctx context.Context, state *activeRunState, nodeK
 		lastErr    error
 		attempts   int
 
-		beatsOut     []BeatSpec
-		highlights   []string
-		charsOut     []CharacterSpec
-		scenesOut    []SceneSpec
-		shotsOut     []ShotSpec
-		timelineOut  *TimelineSpec
+		beatsOut    []BeatSpec
+		highlights  []string
+		charsOut    []CharacterSpec
+		scenesOut   []SceneSpec
+		shotsOut    []ShotSpec
+		timelineOut *TimelineSpec
 	)
 
 	for attempt := 0; attempt <= e.maxRetries; attempt++ {

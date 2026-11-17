@@ -256,8 +256,76 @@ func (p *DashScopeProvider) ExecuteAccountAction(id, action string) (map[string]
 	return nil, fmt.Errorf("unsupported action: %s", action)
 }
 
+// ChatCompletionText 调用百炼 OpenAI 兼容文本对话接口，供内部后台 DAG 使用。
+func (p *DashScopeProvider) ChatCompletionText(ctx context.Context, systemPrompt, userPrompt, model string) (string, error) {
+	key, keyIdx, err := p.nextKey()
+	if err != nil {
+		return "", err
+	}
+	model = strings.TrimSpace(model)
+	if model == "" || strings.EqualFold(model, "auto") {
+		model = "qwen-plus"
+	}
+	messages := make([]map[string]string, 0, 2)
+	if strings.TrimSpace(systemPrompt) != "" {
+		messages = append(messages, map[string]string{"role": "system", "content": systemPrompt})
+	}
+	messages = append(messages, map[string]string{"role": "user", "content": userPrompt})
+	bodyBytes, err := json.Marshal(map[string]interface{}{"model": model, "messages": messages, "stream": false, "max_tokens": 4096})
+	if err != nil {
+		return "", err
+	}
+	baseURL := strings.TrimRight(p.baseURL, "/")
+	if strings.HasSuffix(baseURL, "/api/v1") {
+		baseURL = strings.TrimSuffix(baseURL, "/api/v1") + "/compatible-mode/v1"
+	} else if !strings.Contains(baseURL, "/compatible-mode") {
+		baseURL += "/compatible-mode/v1"
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/chat/completions", bytes.NewReader(bodyBytes))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+key.Key)
+	req.Header.Set("Content-Type", "application/json")
+	if key.WorkspaceID != "" {
+		req.Header.Set("DashScope-Workspace", key.WorkspaceID)
+	}
+	resp, err := p.client.Do(req)
+	if err != nil {
+		p.reportStatus(keyIdx, false, false)
+		return "", err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		p.reportStatus(keyIdx, false, false)
+		return "", err
+	}
+	if resp.StatusCode != http.StatusOK {
+		p.reportStatus(keyIdx, false, resp.StatusCode == http.StatusTooManyRequests)
+		return "", fmt.Errorf("dashscope chat failed (status %d): %s", resp.StatusCode, string(data))
+	}
+	var parsed struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		p.reportStatus(keyIdx, false, false)
+		return "", err
+	}
+	if len(parsed.Choices) == 0 || strings.TrimSpace(parsed.Choices[0].Message.Content) == "" {
+		p.reportStatus(keyIdx, false, false)
+		return "", errors.New("empty dashscope chat response")
+	}
+	p.reportStatus(keyIdx, true, false)
+	return parsed.Choices[0].Message.Content, nil
+}
+
 // GenerateImage 使用通义万相异步提交并轮询出图
-func (p *DashScopeProvider) GenerateImage(ctx context.Context, prompt, size string) (string, error) {
+func (p *DashScopeProvider) GenerateImage(ctx context.Context, prompt, model, size string) (string, error) {
 	k, keyIdx, err := p.nextKey()
 	if err != nil {
 		return "", err

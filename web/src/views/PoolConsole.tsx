@@ -63,6 +63,15 @@ const IMPORT_PLACEHOLDERS: Record<string, string> = {
   free_uuid: "留空则按下方数量自动生成 UUID 访客设备，或每行粘贴一个 UUID",
 };
 
+const GROK_AUTO_PLACEHOLDER =
+  "每行自动识别，可混合粘贴：\nuser@example.com|MyPassword123|JBSWY3DPEHPK3PXP\nuser@example.com----MyPassword123----JBSWY3DPEHPK3PXP\nuser@example.com----sso=...; sso-rw=...\nsso=...; sso-rw=...";
+
+const GROK_KAMI_PLACEHOLDER =
+  "每行一条 Grok 卡密：邮箱|密码|2FA密钥\nuser@example.com|MyPassword123|JBSWY3DPEHPK3PXP\n第三列也支持旧 JWT (eyJ...) 或旧 SSO Cookie；旧 JWT 仅导入为待命凭据，不会当作可用 SSO 或自动重登\n可选追加代理：user@example.com|MyPassword123|JBSWY3DPEHPK3PXP|http://proxy:port";
+
+const GROK_COOKIE_PLACEHOLDER =
+  "每行一条已有 SSO Cookie：sso=...; sso-rw=...\n也可附带邮箱标识：user@example.com----sso=...; sso-rw=...";
+
 function getAvatarInitial(acc: AccountView): string {
   const src = (acc.email || acc.chatgpt_account_id || acc.id || "A").trim();
   const ch = src.charAt(0).toUpperCase();
@@ -119,7 +128,7 @@ export const PoolConsole: React.FC<{
   const trackedLoginIdRef = useRef<string | null>(null);
   const trackedProbeIdRef = useRef<string | null>(null);
   const [updatingProxy, setUpdatingProxy] = useState(false);
-  const [headlessLogin, setHeadlessLogin] = useState(false);
+  const [headlessLogin, setHeadlessLogin] = useState(true);
   const [proxyNodes, setProxyNodes] = useState<ProxyNodeStatus[]>([]);
   const [bulkProxyUrl, setBulkProxyUrl] = useState("");
   const [selectedAccountIds, setSelectedAccountIds] = useState<Set<string>>(
@@ -291,6 +300,16 @@ export const PoolConsole: React.FC<{
   useEffect(() => {
     setSelectedAccountIds(new Set());
   }, [activeProvider, statusFilter, typeFilter]);
+
+  useEffect(() => {
+    setImportFormat(
+      activeProvider === "grok"
+        ? "auto"
+        : activeProvider === "meta_muse"
+          ? "cookie"
+          : "kami"
+    );
+  }, [activeProvider]);
 
   useEffect(() => {
     let cancelled = false;
@@ -805,19 +824,33 @@ export const PoolConsole: React.FC<{
         credentialType: importFormat,
         rawText: trimmed,
         persist: true,
-        autoLogin: false,
+        autoLogin:
+          activeProvider === "grok" &&
+          (importFormat === "auto" || importFormat === "kami"),
         headless: headlessLogin,
         generateCount:
           importFormat === "free_uuid" && !trimmed ? generateCount : 0,
       });
       const r = res.result;
       const extraMsg = r.messages?.length ? `（${r.messages.join("；")}）` : "";
-      setNotice({
-        type: r.failed > 0 && r.added === 0 ? "error" : "success",
+      let importNotice: { type: "info" | "success" | "error"; text: string } = {
+        type: r.failed > 0 && r.added === 0 ? ("error" as const) : ("success" as const),
         text: `导入完成：新增 ${r.added} 个，跳过重复 ${r.skipped} 个，失败 ${r.failed} 个${extraMsg}`,
-      });
+      };
+
       setShowImport(false);
       setImportText("");
+
+      if (r.login_task) {
+        trackedLoginIdRef.current = r.login_task.id;
+        setLoginTask(r.login_task);
+        importNotice = {
+          type: "info",
+          text: `导入完成并已创建无头 SSO 提取任务（队列 ${r.login_task.total} 个账号）。`,
+        };
+      }
+
+      setNotice(importNotice);
       await loadData();
     } catch (e: any) {
       setNotice({
@@ -1082,7 +1115,9 @@ export const PoolConsole: React.FC<{
           <button
             type="button"
             onClick={() => {
-              if (activeProvider === "meta_muse") {
+              if (activeProvider === "grok") {
+                setImportFormat("auto");
+              } else if (activeProvider === "meta_muse") {
                 setImportFormat("cookie");
               } else if (importFormat === "cookie") {
                 setImportFormat("kami");
@@ -1093,7 +1128,7 @@ export const PoolConsole: React.FC<{
             className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl z-primary-btn font-medium cursor-pointer"
           >
             <Plus size={13} />
-            <span>{activeProvider === "meta_muse" ? "导入 Cookie 凭据" : "导入卡密 / JSON"}</span>
+            <span>{activeProvider === "grok" ? "导入 Grok 卡密 / SSO" : activeProvider === "meta_muse" ? "导入 Cookie 凭据" : "导入卡密 / JSON"}</span>
           </button>
         </div>
       </div>
@@ -1517,6 +1552,11 @@ export const PoolConsole: React.FC<{
                 <div className="z-text-muted">可用 / 总容量</div>
                 <div className="text-base font-semibold font-mono-num mt-0.5">
                   {stats.active} / {stats.total}
+                  {(stats.standby ?? 0) > 0 && (
+                    <span className="ml-1.5 text-xs font-normal z-text-muted">
+                      待命 {stats.standby}
+                    </span>
+                  )}
                 </div>
               </div>
               <div className="p-card rounded-xl px-3.5 py-2.5">
@@ -1558,6 +1598,7 @@ export const PoolConsole: React.FC<{
                   { k: "renewing", label: "续期队列" },
                   { k: "expired", label: "已过期" },
                   { k: "pending", label: "待激活" },
+                  { k: "standby", label: "待命" },
                 ].map((opt) => (
                   <button
                     key={opt.k}
@@ -2105,6 +2146,28 @@ export const PoolConsole: React.FC<{
                             >
                               {acc.status === "disabled" ? "启用" : "停用"}
                             </button>
+                            {(acc.status === "active" ||
+                              acc.status === "standby") && (
+                              <button
+                                type="button"
+                                disabled={
+                                  actionLoadingKey === `${acc.id}:standby` ||
+                                  actionLoadingKey === `${acc.id}:activate`
+                                }
+                                onClick={() =>
+                                  handleAction(
+                                    acc,
+                                    acc.status === "standby"
+                                      ? "activate"
+                                      : "standby"
+                                  )
+                                }
+                                className="z-text-sec hover:underline cursor-pointer disabled:opacity-50"
+                                title="待命账号不参与调度、续期与连接占用"
+                              >
+                                {acc.status === "standby" ? "激活" : "待命"}
+                              </button>
+                            )}
                             <button
                               type="button"
                               onClick={() => setDeleteTarget(acc)}
@@ -2149,12 +2212,18 @@ export const PoolConsole: React.FC<{
             <div className="flex items-center justify-between pb-3 border-b z-border">
               <div>
                 <h3 className="text-sm font-semibold">
-                  {activeProvider === "meta_muse" ? "导入 Meta AI Muse 凭据" : "导入账号到号池"}
+                  {activeProvider === "grok"
+                    ? "导入 xAI Grok 凭据"
+                    : activeProvider === "meta_muse"
+                      ? "导入 Meta AI Muse 凭据"
+                      : "导入账号到号池"}
                 </h3>
                 <p className="z-text-muted mt-0.5">
-                  {activeProvider === "meta_muse"
-                    ? "支持批量粘贴 muse.ai 会话 Cookie，或使用 Web 授权向导一键提取。"
-                    : "支持 ChatGPT 卡密（email----pwd----totp）、Sub2API JSON、JWT Token 等格式。"}
+                  {activeProvider === "grok"
+                    ? "支持邮箱|密码|2FA 卡密自动提取 SSO，也支持直接导入已有 SSO Cookie。"
+                    : activeProvider === "meta_muse"
+                      ? "支持批量粘贴 muse.ai 会话 Cookie，或使用 Web 授权向导一键提取。"
+                      : "支持 ChatGPT 卡密（email----pwd----totp）、Sub2API JSON、JWT Token 等格式。"}
                 </p>
               </div>
               <button
@@ -2190,14 +2259,22 @@ export const PoolConsole: React.FC<{
               <div className="space-y-1.5">
                 <label className="font-medium z-text-sec block">凭据格式</label>
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
-                  {[
-                    { k: "kami", label: "卡密账号" },
-                    { k: "sub2api_json", label: "Sub2API JSON" },
-                    { k: "access_token", label: "Access Token" },
-                    { k: "refresh_token", label: "Refresh Token" },
-                    { k: "session_token", label: "Session Token" },
-                    { k: "free_uuid", label: "NoAuth UUID" },
-                  ].map((opt) => (
+                  {(
+                    activeProvider === "grok"
+                      ? [
+                          { k: "auto", label: "自动识别" },
+                          { k: "kami", label: "Grok 卡密" },
+                          { k: "cookie", label: "SSO Cookie" },
+                        ]
+                      : [
+                          { k: "kami", label: "卡密账号" },
+                          { k: "sub2api_json", label: "Sub2API JSON" },
+                          { k: "access_token", label: "Access Token" },
+                          { k: "refresh_token", label: "Refresh Token" },
+                          { k: "session_token", label: "Session Token" },
+                          { k: "free_uuid", label: "NoAuth UUID" },
+                        ]
+                  ).map((opt) => (
                     <button
                       key={opt.k}
                       type="button"
@@ -2244,14 +2321,30 @@ export const PoolConsole: React.FC<{
                 rows={7}
                 value={importText}
                 onChange={(e) => setImportText(e.target.value)}
-                placeholder={IMPORT_PLACEHOLDERS[importFormat] || ""}
+                placeholder={
+                    activeProvider === "grok" && importFormat === "auto"
+                      ? GROK_AUTO_PLACEHOLDER
+                      : activeProvider === "grok" && importFormat === "kami"
+                        ? GROK_KAMI_PLACEHOLDER
+                        : activeProvider === "grok" && importFormat === "cookie"
+                        ? GROK_COOKIE_PLACEHOLDER
+                        : IMPORT_PLACEHOLDERS[importFormat] || ""
+                  }
                 className="w-full p-3 rounded-xl p-code-box font-mono-num resize-y focus:outline-none"
               />
             </div>
 
-            {importFormat === "kami" && activeProvider !== "meta_muse" && (
+            {(importFormat === "kami" || importFormat === "auto") &&
+              activeProvider !== "meta_muse" && (
               <div className="px-3 py-2.5 rounded-lg border z-border z-muted">
-                导入后可全量选择账号，使用后台批量登录任务；账号按序处理并动态更新状态。
+                {activeProvider === "grok"
+                  ? "自动识别卡密与已有 SSO Cookie；卡密会自动创建无头 SSO 提取任务，Cookie 直接激活。未识别行可在服务端开启 GROK_CREDENTIAL_LLM_ENABLED 后交给低成本 LLM 归一化（会发送原始凭据，默认关闭）；成功格式会脱敏沉淀到数据库，后续同格式离线命中。Linux 服务器需提供 CHROME_PATH 指向的 Chrome/Chromium。"
+                  : "导入后可全量选择账号，使用后台批量登录任务；账号按序处理并动态更新状态。"}
+              </div>
+            )}
+            {activeProvider === "grok" && importFormat === "cookie" && (
+              <div className="px-3 py-2.5 rounded-lg border z-border z-muted">
+                直接导入已有 sso / sso-rw Cookie 会立即激活；后续可在账号行使用「重登」从卡密重新提取。
               </div>
             )}
             {activeProvider === "meta_muse" && (

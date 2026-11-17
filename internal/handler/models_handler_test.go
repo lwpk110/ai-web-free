@@ -208,7 +208,7 @@ func TestListModelsMiddlewareExternalToken(t *testing.T) {
 	}
 }
 
-func TestListModelsIncludeBuiltins(t *testing.T) {
+func TestListModelsUsesUpstreamCatalogOnly(t *testing.T) {
 	client := &modelsTestClient{
 		status: 200,
 		body:   `{"models":[{"slug":"gpt-5-6"},{"slug":"gpt-image-2.5"}]}`,
@@ -218,7 +218,7 @@ func TestListModelsIncludeBuiltins(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
-	c.Request = httptest.NewRequest(http.MethodGet, "/v1/models?include_builtins=true", nil)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
 	h.ListModels(c)
 
 	if w.Code != 200 {
@@ -236,29 +236,19 @@ func TestListModelsIncludeBuiltins(t *testing.T) {
 	for _, m := range got.Data {
 		counts[m.ID]++
 	}
-	for _, want := range []string{
-		"gpt-5-6",
-		"gpt-image-2.5",
-		"gpt-image-2.5-sunburst",
-		"gpt-image-2.5-flare",
-		"gpt-image-2.6",
-		"gpt-image-1",
-		"dall-e-3",
-		"gpt-4o-mini-tts",
-		"tts-1",
-		"tts-1-hd",
-		"gpt-4o-transcribe",
-		"whisper-1",
-	} {
+	for _, want := range []string{"gpt-5-6", "gpt-image-2.5"} {
 		if counts[want] != 1 {
 			t.Errorf("model %q count = %d, want 1 (body=%s)", want, counts[want], w.Body.String())
 		}
+	}
+	if len(got.Data) != 2 {
+		t.Fatalf("expected only upstream models, got %+v", got.Data)
 	}
 
 	// use_cache=true should reuse pool cache without additional upstream calls
 	wCache := httptest.NewRecorder()
 	cCache, _ := gin.CreateTestContext(wCache)
-	cCache.Request = httptest.NewRequest(http.MethodGet, "/v1/models?include_builtins=true&use_cache=true", nil)
+	cCache.Request = httptest.NewRequest(http.MethodGet, "/v1/models?use_cache=true", nil)
 	h.ListModels(cCache)
 	if wCache.Code != 200 || client.calls != 1 || !strings.Contains(wCache.Body.String(), `"id":"gpt-5-6"`) {
 		t.Fatalf("expected cached /v1/models response with calls=1, got code=%d calls=%d body=%s", wCache.Code, client.calls, wCache.Body.String())

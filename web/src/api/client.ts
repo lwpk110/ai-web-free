@@ -178,6 +178,7 @@ export interface PoolStats {
   image_limited: number;
   disabled: number;
   banned: number;
+  standby?: number;
   free_count: number;
   noauth_count: number;
   puid_count: number;
@@ -510,6 +511,8 @@ export type AccountActionType =
   | "refresh"
   | "enable"
   | "disable"
+  | "standby"
+  | "activate"
   | "delete"
   | "totp"
   | "sync_chrome"
@@ -698,6 +701,7 @@ export async function importAccounts(params: {
     total_pool: number;
     persisted: boolean;
     messages?: string[];
+    login_task?: KamiLoginTask;
   };
 }> {
   const res = await adminFetch(
@@ -856,7 +860,7 @@ export async function fetchAdminModelsCatalog(options?: {
   const apiKey = options?.apiKey?.trim();
   const useCacheParam = options?.refresh ? "" : "&use_cache=true";
   if (apiKey) {
-    const res = await fetch(`/v1/models?include_builtins=true${useCacheParam}`, {
+    const res = await fetch(`/v1/models${useCacheParam}`, {
       headers: { Authorization: `Bearer ${apiKey}` },
     });
     if (!res.ok) {
@@ -873,7 +877,7 @@ export async function fetchAdminModelsCatalog(options?: {
   const refreshParam = options?.refresh ? "&refresh=true" : "";
   try {
     const res = await adminFetch(
-      `/admin/api/v1/models?include_builtins=true${refreshParam}`
+      `/admin/api/v1/models${refreshParam}`
     );
     if (res.ok) {
       const data = await res.json();
@@ -891,7 +895,7 @@ export async function fetchAdminModelsCatalog(options?: {
     }
   }
 
-  const res = await fetch(`/v1/models?include_builtins=true${useCacheParam}`);
+  const res = await fetch(`/v1/models${useCacheParam}`);
   if (!res.ok) {
     throw new Error(await parseCatalogError(res));
   }
@@ -2247,14 +2251,30 @@ export interface DramaRecommendedPlan {
   fallback_mode: "ken_burns" | string;
 }
 
+export interface DramaModelProvider {
+  id?: string;
+  name?: string;
+  status?: string;
+  available: boolean;
+  active: number;
+  models: string[];
+  reason?: string;
+}
+
 export interface DramaCapabilities {
-  llm: { available: boolean; active: number; models: string[]; reason?: string };
+  llm: {
+    available: boolean;
+    active: number;
+    models: string[];
+    providers?: Record<string, DramaModelProvider>;
+    reason?: string;
+  };
   image: {
     available: boolean;
     edit_available: boolean;
     default_model: string;
     reason?: string;
-    providers: Record<string, { available: boolean; active: number; models: string[] }>;
+    providers: Record<string, DramaModelProvider>;
   };
   tts: {
     available: boolean;
@@ -2312,10 +2332,15 @@ export interface DramaProjectSchema {
     style: string;
     target_duration_sec?: number;
     routing_policy: string;
+    script_model_override?: string;
     image_model_override?: string;
     video_model_override?: string;
     allowed_image_providers?: string[];
     allowed_video_providers?: string[];
+    allowed_tts_providers?: string[];
+    default_tts_engine?: string;
+    default_tts_voice_id?: string;
+    default_tts_voice_name?: string;
     image_concurrency?: number;
     auto_fallback_ken_burns?: boolean;
     bgm_url?: string;
@@ -2797,3 +2822,152 @@ export async function deleteCustomVoice(id: string): Promise<void> {
 }
 
 
+
+// ─── 网关路由分组与 API Key 类型与接口 ────────────────────────
+
+export interface GatewayGroup {
+  id: string;
+  name: string;
+  provider: string;
+  account_types: string[];
+  account_ids: string[];
+  model_allowlist: string[];
+  model_aliases: Record<string, string>;
+  fallback_group_id?: string;
+  enabled: boolean;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface GatewayKey {
+  id: string;
+  name: string;
+  prefix: string;
+  group_id: string;
+  rpm: number;
+  max_concurrent: number;
+  enabled: boolean;
+  total_requests: number;
+  failed_requests: number;
+  last_used_at?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export async function fetchGatewayGroups(): Promise<{ groups: GatewayGroup[] }> {
+  const res = await adminFetch("/admin/api/v1/gateway/groups");
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error?.message || `获取网关分组失败: HTTP ${res.status}`);
+  }
+  return data;
+}
+
+export async function createGatewayGroup(
+  group: Partial<GatewayGroup>
+): Promise<GatewayGroup> {
+  const res = await adminFetch("/admin/api/v1/gateway/groups", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(group),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error?.message || `创建网关分组失败: HTTP ${res.status}`);
+  }
+  return data;
+}
+
+export async function updateGatewayGroup(
+  id: string,
+  group: Partial<GatewayGroup>
+): Promise<GatewayGroup> {
+  const res = await adminFetch(`/admin/api/v1/gateway/groups/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(group),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error?.message || `更新网关分组失败: HTTP ${res.status}`);
+  }
+  return data;
+}
+
+export async function deleteGatewayGroup(id: string): Promise<void> {
+  const res = await adminFetch(`/admin/api/v1/gateway/groups/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error?.message || `删除网关分组失败: HTTP ${res.status}`);
+  }
+}
+
+export async function fetchGatewayKeys(): Promise<{ keys: GatewayKey[] }> {
+  const res = await adminFetch("/admin/api/v1/gateway/keys");
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error?.message || `获取网关 Key 列表失败: HTTP ${res.status}`);
+  }
+  return data;
+}
+
+export async function createGatewayKey(params: {
+  name: string;
+  group_id: string;
+  rpm?: number;
+  max_concurrent?: number;
+}): Promise<{ key: string; record: GatewayKey }> {
+  const res = await adminFetch("/admin/api/v1/gateway/keys", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(params),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error?.message || `创建网关 Key 失败: HTTP ${res.status}`);
+  }
+  return data;
+}
+
+export async function updateGatewayKey(
+  id: string,
+  params: {
+    name?: string;
+    group_id?: string;
+    rpm?: number;
+    max_concurrent?: number;
+    enabled?: boolean;
+  }
+): Promise<GatewayKey> {
+  const res = await adminFetch(`/admin/api/v1/gateway/keys/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(params),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error?.message || `更新网关 Key 失败: HTTP ${res.status}`);
+  }
+  return data;
+}
+
+export async function deleteGatewayKey(id: string): Promise<void> {
+  const res = await adminFetch(`/admin/api/v1/gateway/keys/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error?.message || `删除网关 Key 失败: HTTP ${res.status}`);
+  }
+}
+
+export async function revealGatewayKeySecret(id: string): Promise<string> {
+  const res = await adminFetch(`/admin/api/v1/gateway/keys/${encodeURIComponent(id)}/secret`);
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error?.message || `获取 Key 明文失败: HTTP ${res.status}`);
+  }
+  return data?.key || "";
+}

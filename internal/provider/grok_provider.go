@@ -1,0 +1,1378 @@
+package provider
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"math"
+	"net/http"
+	"net/url"
+	"os"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"ai-web-free/internal/accounts"
+	"ai-web-free/internal/proxy"
+	officialtypes "ai-web-free/typings/official"
+
+	"github.com/google/uuid"
+	"gorm.io/gorm"
+)
+
+var (
+	ErrNoGrokAccountAvailable = errors.New("no active grok account available in pool")
+)
+
+type grokAccount struct {
+	ID            string                 `json:"id"`
+	Email         string                 `json:"email"`
+	Password      string                 `json:"password,omitempty"`
+	TOTPSecret    string                 `json:"totp_secret,omitempty"`
+	LegacyToken   string                 `json:"legacy_token,omitempty"`
+	Cookie        string                 `json:"cookie"`
+	Proxy         string                 `json:"proxy"`
+	Status        accounts.AccountStatus `json:"status"`
+	CreatedAt     time.Time              `json:"created_at"`
+	LastUsed      time.Time              `json:"last_used"`
+	CooldownUntil time.Time              `json:"cooldown_until"`
+	ActivatedAt   time.Time              `json:"activated_at"`
+	TotalCalls    int64                  `json:"total_calls"`
+	FailedCalls   int64                  `json:"failed_calls"`
+	LastError     string                 `json:"last_error"`
+
+	ActiveAction      string    `json:"active_action,omitempty"`
+	ActionPhase       string    `json:"action_phase,omitempty"`
+	ActionPhaseLabel  string    `json:"action_phase_label,omitempty"`
+	ActionQueuePos    int       `json:"action_queue_pos,omitempty"`
+	ActionTaskID      string    `json:"action_task_id,omitempty"`
+	ActionStartedAt   time.Time `json:"action_started_at,omitempty"`
+	LastAction        string    `json:"last_action,omitempty"`
+	LastActionOK      bool      `json:"last_action_ok,omitempty"`
+	LastActionSummary string    `json:"last_action_summary,omitempty"`
+	LastActionAt      time.Time `json:"last_action_at,omitempty"`
+}
+
+func (a *grokAccount) IsInCooldown(now time.Time) bool {
+	return !a.CooldownUntil.IsZero() && now.Before(a.CooldownUntil)
+}
+
+func (a *grokAccount) occupiesSlot() bool {
+	return a.Status == accounts.StatusActive || a.Status == accounts.StatusPending || a.Status == accounts.StatusRateLimited
+}
+
+// GrokProvider xAI Grok.com / X Web 免费号池插件
+type GrokProvider struct {
+	mu          sync.RWMutex
+	baseURL     string
+	accounts    []*grokAccount
+	idx         int
+	policy      accounts.PoolPolicy
+	lastRotate  time.Time
+	proxyPool   *proxy.Pool
+	persistFile string
+
+	grokLoginMu        sync.Mutex
+	grokLoginTasks     map[string]*KamiLoginTask
+	grokLoginTaskOrder []string
+	grokLoginRunning   string
+	grokLoginQueue     []grokLoginQueueItem
+	grokLoginFn        func(context.Context, GrokCardAccount, GrokLoginOptions) (string, error)
+	grokLoginCooldown  time.Duration
+
+	grokCredentialLLMFn grokCredentialLLMFn
+
+	grokCredentialPatternMu sync.RWMutex
+	grokCredentialPatternDB *gorm.DB
+
+	modelMu        sync.RWMutex
+	cachedModels   []string
+	modelsCachedAt time.Time
+	defaultModel   string
+}
+
+// NewGrokProvider 创建 Grok 供应商插件
+func NewGrokProvider(pPool *proxy.Pool, baseURL, persistFile string, policy accounts.PoolPolicy) *GrokProvider {
+	if baseURL == "" {
+		baseURL = "https://grok.com"
+	}
+	p := &GrokProvider{
+		baseURL:           baseURL,
+		proxyPool:         pPool,
+		persistFile:       persistFile,
+		policy:            policy,
+		grokLoginTasks:    make(map[string]*KamiLoginTask),
+		grokLoginCooldown: 10 * time.Second,
+		grokLoginFn: func(ctx context.Context, card GrokCardAccount, options GrokLoginOptions) (string, error) {
+			results, err := RunGrokCardLogin(ctx, []GrokCardAccount{card}, options)
+			if err != nil {
+				return "", err
+			}
+			if len(results) == 0 || !results[0].OK {
+				if len(results) > 0 {
+					return "", errors.New(results[0].Error)
+				}
+				return "", errors.New("Grok login returned no result")
+			}
+			return results[0].Cookie, nil
+		},
+	}
+	p.loadFromDisk()
+	p.Rebalance()
+	return p
+}
+
+func (p *GrokProvider) loadFromDisk() {
+	if p.persistFile == "" {
+		return
+	}
+	data, err := os.ReadFile(p.persistFile)
+	if err != nil {
+		return
+	}
+	lines := strings.Split(string(data), "\n")
+	p.AddAccounts(lines, false)
+}
+
+func (p *GrokProvider) persistToDisk() {
+	if p.persistFile == "" {
+		return
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	var buf bytes.Buffer
+	for _, a := range p.accounts {
+		if a.Status == accounts.StatusBanned {
+			continue
+		}
+		if a.Password != "" {
+			parts := []string{a.Email, a.Password}
+			if a.TOTPSecret != "" {
+				parts = append(parts, a.TOTPSecret)
+			}
+			if a.LegacyToken != "" {
+				parts = append(parts, a.LegacyToken)
+			}
+			if a.Cookie != "" {
+				parts = append(parts, a.Cookie)
+			}
+			buf.WriteString(strings.Join(parts, "|") + "\n")
+		} else if a.Email != "" {
+			buf.WriteString(fmt.Sprintf("%s----%s\n", a.Email, a.Cookie))
+		} else {
+			buf.WriteString(fmt.Sprintf("%s\n", a.Cookie))
+		}
+	}
+	_ = os.WriteFile(p.persistFile, buf.Bytes(), 0644)
+}
+
+// SetPolicy 动态设置热池策略
+func (p *GrokProvider) SetPolicy(pol accounts.PoolPolicy) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.policy = pol
+}
+
+// AddAccounts 批量导入 Grok Cookie 或 email|password|totp 卡密凭据。
+func (p *GrokProvider) AddAccounts(tokens []string, persist bool) int {
+	added, _ := p.addAccounts(tokens, persist)
+	return added
+}
+
+func (p *GrokProvider) addAccounts(tokens []string, persist bool) (int, []string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	existingCookie := make(map[string]bool, len(p.accounts))
+	existingEmail := make(map[string]*grokAccount, len(p.accounts))
+	for _, account := range p.accounts {
+		existingCookie[account.Cookie] = true
+		if account.Email != "" {
+			existingEmail[account.Email] = account
+		}
+	}
+
+	added := 0
+	affectedIDs := make([]string, 0, len(tokens))
+	now := time.Now()
+	for _, raw := range tokens {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+
+		email := ""
+		cookie := ""
+		password := ""
+		totpSecret := ""
+		legacyToken := ""
+		kind, parsedCard, detectErr := DetectGrokCredentialLine(trimmed)
+		if detectErr != nil {
+			continue
+		}
+		var card GrokCardAccount
+		if kind == "kami" {
+			card = parsedCard
+			email, password, totpSecret, legacyToken, cookie =
+				card.Email, card.Password, card.TOTPSecret, card.LegacyToken, card.OldCookie
+		} else {
+			if strings.Contains(trimmed, "----") {
+				parts := strings.SplitN(trimmed, "----", 2)
+				email = strings.TrimSpace(parts[0])
+				cookie = strings.TrimSpace(parts[1])
+			} else {
+				cookie = trimmed
+			}
+			if cookie == "" || existingCookie[cookie] {
+				continue
+			}
+		}
+
+		if target := existingEmail[email]; email != "" && target != nil {
+			credentialsChanged := false
+			if password != "" && password != target.Password {
+				target.Password = password
+				credentialsChanged = true
+			}
+			if totpSecret != "" && totpSecret != target.TOTPSecret {
+				target.TOTPSecret = totpSecret
+				credentialsChanged = true
+			}
+			if legacyToken != "" && legacyToken != target.LegacyToken {
+				target.LegacyToken = legacyToken
+				credentialsChanged = true
+			}
+			if cookie != "" && cookie != target.Cookie && !existingCookie[cookie] {
+				target.Cookie = cookie
+				target.Status = accounts.StatusActive
+				target.LastError = ""
+				target.ActivatedAt = now
+				credentialsChanged = true
+			}
+			if card.Proxy != "" && card.Proxy != target.Proxy {
+				target.Proxy = card.Proxy
+				credentialsChanged = true
+			}
+			if credentialsChanged {
+				affectedIDs = append(affectedIDs, target.ID)
+			}
+			continue
+		}
+		if cookie != "" && existingCookie[cookie] {
+			continue
+		}
+
+		accountProxy := card.Proxy
+		if accountProxy == "" && p.proxyPool != nil {
+			accountProxy = p.proxyPool.Allocate()
+		}
+		id := fmt.Sprintf("grok-%s", uuid.NewString()[:8])
+		if email != "" && strings.Contains(email, "@") {
+			id = "grok-" + strings.Split(email, "@")[0]
+		}
+
+		status := accounts.StatusActive
+		if cookie == "" {
+			status = accounts.StatusPending
+		}
+		account := &grokAccount{
+			ID:          id,
+			Email:       email,
+			Password:    password,
+			TOTPSecret:  totpSecret,
+			LegacyToken: legacyToken,
+			Cookie:      cookie,
+			Proxy:       accountProxy,
+			Status:      status,
+			CreatedAt:   now,
+			ActivatedAt: now,
+		}
+		p.accounts = append(p.accounts, account)
+		existingCookie[cookie] = true
+		if email != "" {
+			existingEmail[email] = account
+		}
+		added++
+		affectedIDs = append(affectedIDs, account.ID)
+	}
+
+	if added > 0 {
+		p.rebalanceLocked(now)
+		if persist {
+			go p.persistToDisk()
+		}
+	}
+	return added, affectedIDs
+}
+
+// Rebalance 对 Grok 号池执行热池与待命池调谐
+func (p *GrokProvider) Rebalance() []accounts.RebalanceResult {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return []accounts.RebalanceResult{p.rebalanceLocked(time.Now())}
+}
+
+func (p *GrokProvider) rebalanceLocked(now time.Time) accounts.RebalanceResult {
+	res := accounts.RebalanceResult{
+		Type:   "grok_free",
+		Target: p.policy.ActiveTarget,
+	}
+
+	if !p.policy.Enabled() || len(p.accounts) == 0 {
+		slots := p.countSlotsLocked(now)
+		res.Working, res.Healthy, res.Standby = slots[0], slots[1], slots[2]
+		return res
+	}
+
+	justDemoted := make(map[string]bool)
+	demote := func(a *grokAccount) {
+		a.Status = accounts.StatusStandby
+		justDemoted[a.ID] = true
+		res.Demoted++
+	}
+
+	// 1. 定时轮换
+	if p.policy.RotateInterval > 0 {
+		if p.lastRotate.IsZero() {
+			p.lastRotate = now
+		} else if now.Sub(p.lastRotate) >= p.policy.RotateInterval {
+			p.lastRotate = now
+			slots := p.countSlotsLocked(now)
+			standbyCount := slots[2]
+			if standbyCount > 0 {
+				cands := p.getDemotableAccountsLocked()
+				n := int(math.Ceil(float64(len(cands)) * p.policy.RotateRatio))
+				if n > standbyCount {
+					n = standbyCount
+				}
+				for i := 0; i < n && i < len(cands); i++ {
+					demote(cands[i])
+					res.Rotated++
+				}
+			}
+		}
+	}
+
+	// 2. 超额收缩
+	slots := p.countSlotsLocked(now)
+	working := slots[0]
+	limit := p.policy.ActiveTarget
+	if p.policy.MaxActive > 0 && p.policy.MaxActive < limit {
+		limit = p.policy.MaxActive
+	}
+	if working > limit {
+		for _, a := range p.getDemotableAccountsLocked() {
+			if working <= limit {
+				break
+			}
+			demote(a)
+			working--
+		}
+	}
+
+	// 3. 补位
+	slots = p.countSlotsLocked(now)
+	working, healthy := slots[0], slots[1]
+	want := p.policy.ActiveTarget - working
+	if d := p.policy.MinHealthy - healthy; d > want {
+		want = d
+	}
+	if p.policy.MaxActive > 0 && want > p.policy.MaxActive-working {
+		want = p.policy.MaxActive - working
+	}
+	if want > p.policy.ActivateBatch {
+		want = p.policy.ActivateBatch
+	}
+	if want > 0 {
+		var standbys []*grokAccount
+		for _, a := range p.accounts {
+			if a.Status == accounts.StatusStandby && !justDemoted[a.ID] {
+				standbys = append(standbys, a)
+			}
+		}
+		sort.SliceStable(standbys, func(i, j int) bool {
+			if !standbys[i].ActivatedAt.Equal(standbys[j].ActivatedAt) {
+				return standbys[i].ActivatedAt.Before(standbys[j].ActivatedAt)
+			}
+			return standbys[i].FailedCalls < standbys[j].FailedCalls
+		})
+		for _, a := range standbys {
+			if want <= 0 {
+				break
+			}
+			a.Status = accounts.StatusActive
+			a.ActivatedAt = now
+			a.CooldownUntil = time.Time{}
+			res.Activated++
+			want--
+		}
+	}
+
+	finalSlots := p.countSlotsLocked(now)
+	res.Working, res.Healthy, res.Standby = finalSlots[0], finalSlots[1], finalSlots[2]
+	return res
+}
+
+func (p *GrokProvider) countSlotsLocked(now time.Time) [3]int {
+	working, healthy, standby := 0, 0, 0
+	for _, a := range p.accounts {
+		if a.occupiesSlot() {
+			working++
+		}
+		if a.Status == accounts.StatusActive && !a.IsInCooldown(now) {
+			healthy++
+		}
+		if a.Status == accounts.StatusStandby {
+			standby++
+		}
+	}
+	return [3]int{working, healthy, standby}
+}
+
+func (p *GrokProvider) getDemotableAccountsLocked() []*grokAccount {
+	var cands []*grokAccount
+	for _, a := range p.accounts {
+		if a.Status == accounts.StatusActive || a.Status == accounts.StatusRateLimited {
+			cands = append(cands, a)
+		}
+	}
+	sort.SliceStable(cands, func(i, j int) bool {
+		ri, rj := cands[i].Status == accounts.StatusRateLimited, cands[j].Status == accounts.StatusRateLimited
+		if ri != rj {
+			return ri
+		}
+		if !cands[i].ActivatedAt.Equal(cands[j].ActivatedAt) {
+			return cands[i].ActivatedAt.Before(cands[j].ActivatedAt)
+		}
+		return cands[i].FailedCalls > cands[j].FailedCalls
+	})
+	return cands
+}
+
+func (p *GrokProvider) nextAccount() (*grokAccount, int, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	n := len(p.accounts)
+	if n == 0 {
+		return nil, -1, ErrNoGrokAccountAvailable
+	}
+
+	now := time.Now()
+	for i := 0; i < n; i++ {
+		candidateIdx := (p.idx + i) % n
+		a := p.accounts[candidateIdx]
+		if a.Status == accounts.StatusRateLimited && !a.IsInCooldown(now) {
+			a.Status = accounts.StatusActive
+			a.CooldownUntil = time.Time{}
+		}
+		if a.Status == accounts.StatusActive && !a.IsInCooldown(now) {
+			p.idx = (candidateIdx + 1) % n
+			a.TotalCalls++
+			a.LastUsed = now
+			return a, candidateIdx, nil
+		}
+	}
+	return nil, -1, ErrNoGrokAccountAvailable
+}
+
+// CachedModels 返回最近一次实时拉取的 Grok 模型目录。
+func (p *GrokProvider) CachedModels() []string {
+	p.modelMu.RLock()
+	defer p.modelMu.RUnlock()
+	if len(p.cachedModels) == 0 {
+		return nil
+	}
+	out := make([]string, len(p.cachedModels))
+	copy(out, p.cachedModels)
+	return out
+}
+
+// ModelsCachedAt 返回 Grok 模型目录缓存时间。
+func (p *GrokProvider) ModelsCachedAt() time.Time {
+	p.modelMu.RLock()
+	defer p.modelMu.RUnlock()
+	return p.modelsCachedAt
+}
+
+func (p *GrokProvider) defaultGrokModel() string {
+	p.modelMu.RLock()
+	defer p.modelMu.RUnlock()
+	return p.defaultModel
+}
+
+type grokModelsResponse struct {
+	Models []struct {
+		ModelID string `json:"modelId"`
+	} `json:"models"`
+	DefaultFreeModel string `json:"defaultFreeModel"`
+	DefaultAnonModel string `json:"defaultAnonModel"`
+}
+
+func (p *GrokProvider) modelCatalogTarget() (string, string) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	now := time.Now()
+	for _, account := range p.accounts {
+		if account.Status == accounts.StatusActive && !account.IsInCooldown(now) {
+			return account.Cookie, account.Proxy
+		}
+	}
+	if len(p.accounts) > 0 {
+		return p.accounts[0].Cookie, p.accounts[0].Proxy
+	}
+	return "", ""
+}
+
+// RefreshModels 调用 Grok Web 实时模型目录端点并更新本地缓存。
+func (p *GrokProvider) RefreshModels(ctx context.Context) ([]string, error) {
+	cookie, proxyURL := p.modelCatalogTarget()
+	body := []byte(`{"locale":"en-US"}`)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/rest/models", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36")
+	req.Header.Set("Origin", p.baseURL)
+	req.Header.Set("Referer", p.baseURL+"/")
+	if cookie != "" {
+		req.Header.Set("Cookie", cookie)
+	}
+
+	resp, err := p.createHTTPClient(proxyURL).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("grok models returned HTTP %d", resp.StatusCode)
+	}
+	var payload grokModelsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return nil, err
+	}
+
+	seen := make(map[string]bool)
+	models := make([]string, 0, len(payload.Models))
+	for _, item := range payload.Models {
+		model := strings.TrimSpace(item.ModelID)
+		if model == "" || seen[model] {
+			continue
+		}
+		seen[model] = true
+		models = append(models, model)
+	}
+	if len(models) == 0 {
+		return nil, errors.New("grok models returned an empty catalog")
+	}
+	defaultModel := payload.DefaultFreeModel
+	if defaultModel == "" {
+		defaultModel = payload.DefaultAnonModel
+	}
+	if defaultModel == "" {
+		defaultModel = models[0]
+	}
+
+	p.modelMu.Lock()
+	p.cachedModels = models
+	p.defaultModel = defaultModel
+	p.modelsCachedAt = time.Now()
+	p.modelMu.Unlock()
+	return p.CachedModels(), nil
+}
+
+func (p *GrokProvider) reportStatus(idx int, success bool, isRateLimit bool, errMsg string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if idx < 0 || idx >= len(p.accounts) {
+		return
+	}
+	a := p.accounts[idx]
+	if success {
+		a.LastError = ""
+	} else {
+		a.FailedCalls++
+		a.LastError = errMsg
+		if isRateLimit {
+			a.Status = accounts.StatusRateLimited
+			a.CooldownUntil = time.Now().Add(10 * time.Minute)
+		}
+	}
+}
+
+func (p *GrokProvider) createHTTPClient(proxyURL string) *http.Client {
+	transport := &http.Transport{
+		MaxIdleConns:       10,
+		IdleConnTimeout:    30 * time.Second,
+		DisableCompression: false,
+	}
+	if proxyURL != "" {
+		if parsed, err := url.Parse(proxyURL); err == nil {
+			transport.Proxy = http.ProxyURL(parsed)
+		}
+	}
+	return &http.Client{
+		Transport: transport,
+		Timeout:   120 * time.Second,
+	}
+}
+
+// Descriptor 返回供应商插件元信息
+func (p *GrokProvider) Descriptor() ProviderDescriptor {
+	models := p.CachedModels()
+	return ProviderDescriptor{
+		ID:                    "grok",
+		Name:                  "xAI Grok",
+		Vendor:                "xAI",
+		Status:                "enabled",
+		Version:               "1.0.0",
+		Description:           "Grok.com / X 免登与 SSO 免费号池插件（支持实时模型目录与 Aurora Image 逆向生图）",
+		SupportedAccountTypes: []string{"free", "sso_cookie", "kami"},
+		CredentialFormats:     []string{"auto", "kami", "cookie"},
+		Capabilities: []string{
+			"chat",
+			"image_generation",
+		},
+		FeaturedModels: models,
+		Tags:           MakeTags("daily-credits", "cookie-pool", "reverse-web", "img-flux-wanx"),
+		CostType:       "daily_credits",
+		AuthType:       "cookie",
+	}
+}
+
+// Stats 统计号池状态
+func (p *GrokProvider) Stats() accounts.PoolStats {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	now := time.Now()
+	var stats accounts.PoolStats
+	stats.Total = len(p.accounts)
+	for _, a := range p.accounts {
+		stats.TotalCalls += a.TotalCalls
+		stats.FailedCalls += a.FailedCalls
+		switch a.Status {
+		case accounts.StatusActive:
+			if a.IsInCooldown(now) {
+				stats.RateLimited++
+			} else {
+				stats.Active++
+			}
+		case accounts.StatusStandby:
+			stats.Standby++
+		case accounts.StatusPending:
+			stats.Pending++
+		case accounts.StatusRateLimited:
+			stats.RateLimited++
+		case accounts.StatusExpired:
+			stats.Expired++
+		case accounts.StatusDisabled:
+			stats.Disabled++
+		case accounts.StatusBanned:
+			stats.Banned++
+		}
+	}
+	return stats
+}
+
+// ListAccounts 返回脱敏的账号列表
+func (p *GrokProvider) ListAccounts(typeFilter, statusFilter, search string) []accounts.AccountSnapshot {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	typeFilter = strings.ToLower(strings.TrimSpace(typeFilter))
+	statusFilter = strings.ToLower(strings.TrimSpace(statusFilter))
+	search = strings.ToLower(strings.TrimSpace(search))
+
+	out := make([]accounts.AccountSnapshot, 0, len(p.accounts))
+	now := time.Now()
+	for _, a := range p.accounts {
+		accountType := "sso_cookie"
+		if a.Password != "" {
+			accountType = "kami"
+		}
+		if typeFilter != "" && typeFilter != "all" && typeFilter != accountType && !(typeFilter == "cookie" && accountType == "sso_cookie") {
+			continue
+		}
+		st := a.Status.String()
+		if a.Status == accounts.StatusActive && a.IsInCooldown(now) {
+			st = "rate_limited"
+		}
+		if statusFilter != "" && statusFilter != "all" && st != statusFilter {
+			continue
+		}
+		if search != "" {
+			haystack := strings.ToLower(fmt.Sprintf("%s %s %s", a.ID, a.Email, a.Proxy))
+			if !strings.Contains(haystack, search) {
+				continue
+			}
+		}
+
+		preview := a.Cookie
+		if preview == "" {
+			if a.LegacyToken != "" {
+				preview = "旧 Token 未启用"
+			} else {
+				preview = "未提取 SSO"
+			}
+		} else if len(preview) > 16 {
+			preview = preview[:8] + "..." + preview[len(preview)-6:]
+		}
+
+		cd := ""
+		if !a.CooldownUntil.IsZero() {
+			cd = a.CooldownUntil.Format(time.RFC3339)
+		}
+		lastUsed := ""
+		if !a.LastUsed.IsZero() {
+			lastUsed = a.LastUsed.Format(time.RFC3339)
+		}
+		actionStartedAt := ""
+		if !a.ActionStartedAt.IsZero() {
+			actionStartedAt = a.ActionStartedAt.Format(time.RFC3339)
+		}
+		lastActionAt := ""
+		if !a.LastActionAt.IsZero() {
+			lastActionAt = a.LastActionAt.Format(time.RFC3339)
+		}
+
+		out = append(out, accounts.AccountSnapshot{
+			ID:                 a.ID,
+			Email:              a.Email,
+			Type:               accountType,
+			Status:             st,
+			PlanType:           "grok_free",
+			TokenPreview:       preview,
+			HasKamiCredentials: a.Password != "" && a.TOTPSecret != "",
+			Proxy:              a.Proxy,
+			TotalCalls:         a.TotalCalls,
+			FailedCalls:        a.FailedCalls,
+			CooldownUntil:      cd,
+			ActiveAction:       a.ActiveAction,
+			ActionPhase:        a.ActionPhase,
+			ActionPhaseLabel:   a.ActionPhaseLabel,
+			ActionQueuePos:     a.ActionQueuePos,
+			ActionTaskID:       a.ActionTaskID,
+			ActionStartedAt:    actionStartedAt,
+			LastAction:         a.LastAction,
+			LastActionOK:       a.LastActionOK,
+			LastActionSummary:  a.LastActionSummary,
+			LastActionAt:       lastActionAt,
+			LastUsed:           lastUsed,
+			LastError:          a.LastError,
+			CreatedAt:          a.CreatedAt.Format(time.RFC3339),
+			Capabilities:       []string{"chat", "image_generation"},
+		})
+	}
+	return out
+}
+
+func normalizeGrokCredentialLines(lines []string) []string {
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if trimmed := strings.TrimSpace(line); trimmed != "" && !strings.HasPrefix(trimmed, "#") {
+			out = append(out, trimmed)
+		}
+	}
+	return out
+}
+
+// ImportCredentials 导入 Grok Cookie 或卡密凭据；auto 模式逐行自动识别混合格式。
+func (p *GrokProvider) ImportCredentials(req ImportRequest) (ImportResult, error) {
+	credentialType := strings.ToLower(strings.TrimSpace(req.CredentialType))
+	if credentialType == "" {
+		credentialType = "auto"
+	}
+	if credentialType != "auto" && credentialType != "kami" && credentialType != "cookie" {
+		return ImportResult{}, errors.New("Grok 支持 auto 自动识别、kami 卡密或 cookie SSO 凭据")
+	}
+
+	rawTokens := make([]string, 0, len(req.Tokens))
+	rawTokens = append(rawTokens, req.Tokens...)
+	if strings.TrimSpace(req.RawText) != "" {
+		for _, line := range strings.Split(req.RawText, "\n") {
+			if trimmed := strings.TrimSpace(line); trimmed != "" {
+				rawTokens = append(rawTokens, trimmed)
+			}
+		}
+	}
+	tokens := normalizeGrokCredentialLines(rawTokens)
+	importTokens := make([]string, 0, len(tokens))
+	unknownLines := make([]string, 0)
+	failed := 0
+	detectedKami := 0
+	detectedCookie := 0
+	llmKami := 0
+	llmCookie := 0
+	for _, line := range tokens {
+		kind, _, err := DetectGrokCredentialLine(line)
+		if err != nil {
+			if credentialType == "auto" {
+				unknownLines = append(unknownLines, line)
+			}
+			failed++
+			continue
+		}
+		if credentialType != "auto" && kind != credentialType {
+			failed++
+			continue
+		}
+		importTokens = append(importTokens, line)
+		switch kind {
+		case "kami":
+			detectedKami++
+		case "cookie":
+			detectedCookie++
+		}
+	}
+
+	learnedPatterns := p.learnedGrokCredentialPatterns()
+	learnedKami := 0
+	learnedCookie := 0
+	llmLines := make([]string, 0, len(unknownLines))
+	for _, line := range unknownLines {
+		kind, value, matched := p.matchLearnedGrokCredential(line, learnedPatterns)
+		if !matched {
+			llmLines = append(llmLines, line)
+			continue
+		}
+		failed--
+		importTokens = append(importTokens, value)
+		switch kind {
+		case "kami":
+			learnedKami++
+		case "cookie":
+			learnedCookie++
+		}
+	}
+
+	llmFallbackUsed := false
+	var llmError string
+	if len(llmLines) > 0 && credentialType == "auto" {
+		p.mu.RLock()
+		llmFn := p.grokCredentialLLMFn
+		p.mu.RUnlock()
+		if llmFn != nil {
+			llmFallbackUsed = true
+			ctx, cancel := context.WithTimeout(context.Background(), grokCredentialLLMTimeout)
+			items, err := llmFn(ctx, llmLines)
+			cancel()
+			if err != nil {
+				llmError = grokCredentialLLMError(err)
+			} else {
+				for _, item := range items {
+					original := ""
+					if item.Index >= 0 && item.Index < len(llmLines) {
+						original = llmLines[item.Index]
+					}
+					kind, validateErr := validateGrokCredentialLLMResult(original, item)
+					if validateErr != nil || kind == "unknown" || original == "" {
+						continue
+					}
+					failed--
+					value := strings.TrimSpace(item.Value)
+					importTokens = append(importTokens, value)
+					switch kind {
+					case "kami":
+						llmKami++
+					case "cookie":
+						llmCookie++
+					}
+					_ = p.learnGrokCredentialPattern(original, value, kind)
+				}
+			}
+		}
+	}
+	if failed < 0 {
+		failed = 0
+	}
+
+	added, affectedIDs := p.addAccounts(importTokens, req.Persist)
+	p.mu.RLock()
+	total := len(p.accounts)
+	loginIDs := make([]string, 0, len(affectedIDs))
+	for _, id := range affectedIDs {
+		if account := p.findGrokAccountLocked(id); account != nil && account.Password != "" && account.TOTPSecret != "" {
+			loginIDs = append(loginIDs, id)
+		}
+	}
+	p.mu.RUnlock()
+
+	skipped := len(tokens) - added - failed
+	if skipped < 0 {
+		skipped = 0
+	}
+	messages := []string{fmt.Sprintf("成功导入 %d 个 Grok 凭据", added)}
+	if credentialType == "auto" {
+		detectionMessage := fmt.Sprintf("自动识别：卡密 %d 条，SSO Cookie %d 条", detectedKami, detectedCookie)
+		if learnedKami+learnedCookie > 0 {
+			detectionMessage += fmt.Sprintf("；记忆格式：卡密 %d 条，SSO Cookie %d 条", learnedKami, learnedCookie)
+		}
+		if llmFallbackUsed {
+			detectionMessage += fmt.Sprintf("；LLM 兜底：卡密 %d 条，SSO Cookie %d 条", llmKami, llmCookie)
+		}
+		detectionMessage += fmt.Sprintf("，无法识别 %d 条", failed)
+		messages = append(messages, detectionMessage)
+		if llmError != "" {
+			messages = append(messages, llmError)
+		}
+	}
+	var loginTask *KamiLoginTask
+	if req.AutoLogin && len(loginIDs) > 0 {
+		if task, err := p.StartKamiLoginBatch(loginIDs, true); err == nil {
+			loginTask = &task
+			messages = append(messages, fmt.Sprintf("已启动无头重登任务，队列 %d 个账号", task.Total-task.Completed))
+		} else {
+			messages = append(messages, "自动重登未启动: "+err.Error())
+		}
+	}
+
+	return ImportResult{
+		Added:     added,
+		Skipped:   skipped,
+		Failed:    failed,
+		TotalPool: total,
+		Persisted: req.Persist,
+		Messages:  messages,
+		LoginTask: loginTask,
+	}, nil
+}
+
+// ExecuteAccountAction 执行单账号运维操作
+func (p *GrokProvider) ExecuteAccountAction(id, action string) (map[string]interface{}, error) {
+	return p.ExecuteAccountActionWithOpts(id, action, true)
+}
+
+func (p *GrokProvider) executeGrokProbe(id string) (map[string]interface{}, error) {
+	p.mu.RLock()
+	target := p.findGrokAccountLocked(id)
+	if target == nil {
+		p.mu.RUnlock()
+		return nil, errors.New("账号不存在")
+	}
+	proxyURL := target.Proxy
+	cookie := target.Cookie
+	p.mu.RUnlock()
+
+	client := p.createHTTPClient(proxyURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, p.baseURL+"/rest/app-chat/conversations?limit=1", nil)
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+	req.Header.Set("Cookie", cookie)
+	req.Header.Set("Referer", p.baseURL+"/")
+	resp, err := client.Do(req)
+	if err != nil {
+		p.mu.Lock()
+		if account := p.findGrokAccountLocked(id); account != nil {
+			account.FailedCalls++
+			account.LastError = err.Error()
+		}
+		p.mu.Unlock()
+		return nil, fmt.Errorf("连通性探测失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	target = p.findGrokAccountLocked(id)
+	if target == nil {
+		return nil, errors.New("账号不存在")
+	}
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		target.Status = accounts.StatusExpired
+		target.LastError = fmt.Sprintf("凭据已失效 HTTP %d", resp.StatusCode)
+		return map[string]interface{}{"id": id, "status": "expired", "http_status": resp.StatusCode}, nil
+	}
+	target.LastError = ""
+	target.Status = accounts.StatusActive
+	return map[string]interface{}{"id": id, "status": "healthy", "ok": true, "http_status": resp.StatusCode}, nil
+}
+
+// ExecuteAccountActionWithOpts 执行单账号运维操作（带选项）。
+func (p *GrokProvider) ExecuteAccountActionWithOpts(id, action string, headless bool) (map[string]interface{}, error) {
+	action = strings.ToLower(strings.TrimSpace(action))
+
+	if action == "login" || action == "refresh" {
+		p.mu.RLock()
+		target := p.findGrokAccountLocked(id)
+		if target == nil {
+			p.mu.RUnlock()
+			return nil, errors.New("账号不存在")
+		}
+		email := target.Email
+		status := target.Status.String()
+		if target.Status == accounts.StatusDisabled {
+			p.mu.RUnlock()
+			return nil, errors.New("账号已停用，请先启用后再重登")
+		}
+		if target.Email == "" || target.Password == "" || target.TOTPSecret == "" {
+			p.mu.RUnlock()
+			return nil, errors.New("该账号未配置邮箱/密码/2FA 卡密凭据，无法自动登录")
+		}
+		p.mu.RUnlock()
+
+		task, err := p.StartKamiLoginBatch([]string{id}, headless)
+		if err != nil {
+			return nil, err
+		}
+		message := fmt.Sprintf("账号 %s 已加入 Grok 后台重登任务（将实时回显执行阶段）", email)
+		if task.CurrentAccountID != "" && task.CurrentAccountID != id {
+			for index, queuedID := range task.QueuedAccountIDs {
+				if queuedID == id {
+					message = fmt.Sprintf("账号 %s 已加入 Grok 重登队列（排队 #%d）", email, index+1)
+					break
+				}
+			}
+		}
+		return map[string]interface{}{
+			"id":      id,
+			"email":   email,
+			"status":  status,
+			"queued":  true,
+			"task_id": task.ID,
+			"task":    task,
+			"message": message,
+		}, nil
+	}
+
+	if action == "totp" {
+		p.mu.RLock()
+		target := p.findGrokAccountLocked(id)
+		if target == nil {
+			p.mu.RUnlock()
+			return nil, errors.New("账号不存在")
+		}
+		email := target.Email
+		secret := target.TOTPSecret
+		p.mu.RUnlock()
+		if secret == "" {
+			return nil, errors.New("该账号未配置 2FA 密钥")
+		}
+		code, remaining, err := accounts.GenerateTOTP(secret, time.Now())
+		if err != nil {
+			return nil, err
+		}
+		return map[string]interface{}{
+			"id":                id,
+			"email":             email,
+			"totp_code":         code,
+			"remaining_seconds": remaining,
+			"message":           fmt.Sprintf("2FA 动态码: %s (剩余 %ds)", code, remaining),
+		}, nil
+	}
+
+	if action == "probe" || action == "test" {
+		return p.executeGrokProbe(id)
+	}
+
+	p.mu.Lock()
+	var target *grokAccount
+	targetIdx := -1
+	for index, account := range p.accounts {
+		if account.ID == id {
+			target = account
+			targetIdx = index
+			break
+		}
+	}
+	if target == nil {
+		p.mu.Unlock()
+		return nil, errors.New("账号不存在")
+	}
+
+	switch action {
+	case "standby":
+		target.Status = accounts.StatusStandby
+		p.mu.Unlock()
+		return map[string]interface{}{"id": target.ID, "status": "standby"}, nil
+	case "activate", "enable":
+		target.Status = accounts.StatusActive
+		target.CooldownUntil = time.Time{}
+		target.ActivatedAt = time.Now()
+		p.mu.Unlock()
+		return map[string]interface{}{"id": target.ID, "status": "active"}, nil
+	case "disable":
+		target.Status = accounts.StatusDisabled
+		p.mu.Unlock()
+		return map[string]interface{}{"id": target.ID, "status": "disabled"}, nil
+	case "delete":
+		p.accounts = append(p.accounts[:targetIdx], p.accounts[targetIdx+1:]...)
+		p.mu.Unlock()
+		go p.persistToDisk()
+		return map[string]interface{}{"id": id, "deleted": true}, nil
+	default:
+		p.mu.Unlock()
+		return nil, fmt.Errorf("不支持的操作: %s", action)
+	}
+}
+
+// BulkUpdateAccountProxy 批量分配代理
+func (p *GrokProvider) BulkUpdateAccountProxy(accountIDs []string, proxyURL string) (int, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	idMap := make(map[string]bool, len(accountIDs))
+	for _, id := range accountIDs {
+		idMap[id] = true
+	}
+
+	updated := 0
+	for _, a := range p.accounts {
+		if len(accountIDs) == 0 || idMap[a.ID] {
+			a.Proxy = proxyURL
+			updated++
+		}
+	}
+	return updated, nil
+}
+
+// UpdateAccountCookie 更新单个账号 Cookie
+func (p *GrokProvider) UpdateAccountCookie(id, cookie string) (map[string]interface{}, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	for _, a := range p.accounts {
+		if a.ID == id {
+			a.Cookie = strings.TrimSpace(cookie)
+			a.Status = accounts.StatusActive
+			a.LastError = ""
+			go p.persistToDisk()
+			return map[string]interface{}{"id": id, "updated": true}, nil
+		}
+	}
+	return nil, errors.New("账号不存在")
+}
+
+// ChatCompletion 对话实现（支持流式 SSE 与完整文本）
+func (p *GrokProvider) ChatCompletion(ctx context.Context, originalReq officialtypes.APIRequest) (<-chan string, func(), error) {
+	acct, idx, err := p.nextAccount()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	modelName := originalReq.Model
+	if modelName == "" || strings.EqualFold(modelName, "grok") {
+		modelName = p.defaultGrokModel()
+		if modelName == "" {
+			if models, err := p.RefreshModels(ctx); err == nil && len(models) > 0 {
+				modelName = p.defaultGrokModel()
+			}
+		}
+	}
+
+	// 拼接提示词
+	var promptBuilder strings.Builder
+	for _, m := range originalReq.Messages {
+		text := m.Text()
+		if text != "" {
+			if promptBuilder.Len() > 0 {
+				promptBuilder.WriteString("\n\n")
+			}
+			promptBuilder.WriteString(fmt.Sprintf("%s: %s", strings.ToUpper(m.Role), text))
+		}
+	}
+	finalPrompt := promptBuilder.String()
+
+	payload := map[string]interface{}{
+		"temporary":             true,
+		"modelName":             modelName,
+		"message":               finalPrompt,
+		"fileAttachments":       []interface{}{},
+		"imageAttachments":      []interface{}{},
+		"disableSearch":         false,
+		"enableImageGeneration": true,
+		"returnImageBytes":      false,
+		"returnBuffers":         true,
+	}
+
+	bodyBytes, err := json.Marshal(payload)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	reqURL := p.baseURL + "/rest/app-chat/conversations/new"
+	req, err := http.NewRequestWithContext(ctx, "POST", reqURL, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return nil, nil, err
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36")
+	req.Header.Set("Origin", p.baseURL)
+	req.Header.Set("Referer", p.baseURL+"/")
+	req.Header.Set("Cookie", acct.Cookie)
+	req.Header.Set("Accept", "text/event-stream")
+
+	client := p.createHTTPClient(acct.Proxy)
+	resp, err := client.Do(req)
+	if err != nil {
+		p.reportStatus(idx, false, false, err.Error())
+		return nil, nil, err
+	}
+
+	if resp.StatusCode == 429 {
+		resp.Body.Close()
+		p.reportStatus(idx, false, true, "Rate limit 429")
+		return nil, nil, errors.New("grok upstream rate limited (429)")
+	}
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		p.reportStatus(idx, false, false, fmt.Sprintf("HTTP %d", resp.StatusCode))
+		return nil, nil, fmt.Errorf("grok upstream returned HTTP %d", resp.StatusCode)
+	}
+
+	tokenChan := make(chan string, 100)
+	cancel := func() {
+		_ = resp.Body.Close()
+	}
+
+	go func() {
+		defer close(tokenChan)
+		defer resp.Body.Close()
+
+		scanner := bufio.NewScanner(resp.Body)
+		// Grok 可能输出很长的 JSON 行
+		buf := make([]byte, 64*1024)
+		scanner.Buffer(buf, 1024*1024)
+
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" {
+				continue
+			}
+			if strings.HasPrefix(line, "data: ") {
+				line = strings.TrimPrefix(line, "data: ")
+			}
+
+			// 解析 Grok 响应行
+			var parsed struct {
+				Token  string `json:"token"`
+				Result struct {
+					Response struct {
+						Token string `json:"token"`
+					} `json:"response"`
+				} `json:"result"`
+			}
+			if err := json.Unmarshal([]byte(line), &parsed); err == nil {
+				delta := parsed.Token
+				if delta == "" {
+					delta = parsed.Result.Response.Token
+				}
+				if delta != "" {
+					select {
+					case tokenChan <- delta:
+					case <-ctx.Done():
+						return
+					}
+				}
+			}
+		}
+		p.reportStatus(idx, true, false, "")
+	}()
+
+	return tokenChan, cancel, nil
+}
+
+// GenerateImage 使用 Grok Aurora 逆向生图
+func (p *GrokProvider) GenerateImage(ctx context.Context, prompt, model, size string) (string, error) {
+	acct, idx, err := p.nextAccount()
+	if err != nil {
+		return "", err
+	}
+
+	modelName := "grok-2-image"
+	payload := map[string]interface{}{
+		"temporary":             true,
+		"modelName":             modelName,
+		"message":               "Generate an image: " + prompt,
+		"fileAttachments":       []interface{}{},
+		"imageAttachments":      []interface{}{},
+		"disableSearch":         true,
+		"enableImageGeneration": true,
+		"returnImageBytes":      false,
+		"returnBuffers":         true,
+	}
+
+	bodyBytes, _ := json.Marshal(payload)
+	reqURL := p.baseURL + "/rest/app-chat/conversations/new"
+	req, err := http.NewRequestWithContext(ctx, "POST", reqURL, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return "", err
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+	req.Header.Set("Origin", p.baseURL)
+	req.Header.Set("Referer", p.baseURL+"/")
+	req.Header.Set("Cookie", acct.Cookie)
+
+	client := p.createHTTPClient(acct.Proxy)
+	resp, err := client.Do(req)
+	if err != nil {
+		p.reportStatus(idx, false, false, err.Error())
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == 429 {
+		p.reportStatus(idx, false, true, "Rate limit 429")
+		return "", errors.New("grok image rate limited")
+	}
+	if resp.StatusCode != http.StatusOK {
+		p.reportStatus(idx, false, false, fmt.Sprintf("HTTP %d", resp.StatusCode))
+		return "", fmt.Errorf("grok upstream HTTP %d", resp.StatusCode)
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+	buf := make([]byte, 64*1024)
+	scanner.Buffer(buf, 1024*1024)
+
+	var foundURL string
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "data: ") {
+			line = strings.TrimPrefix(line, "data: ")
+		}
+
+		var parsed struct {
+			Result struct {
+				Response struct {
+					ModelOutput struct {
+						ImageURLs []string `json:"imageUrls"`
+					} `json:"modelOutput"`
+				} `json:"response"`
+			} `json:"result"`
+			ImageURL string `json:"imageUrl"`
+		}
+		if err := json.Unmarshal([]byte(line), &parsed); err == nil {
+			if len(parsed.Result.Response.ModelOutput.ImageURLs) > 0 {
+				foundURL = parsed.Result.Response.ModelOutput.ImageURLs[0]
+				break
+			}
+			if parsed.ImageURL != "" {
+				foundURL = parsed.ImageURL
+				break
+			}
+		}
+	}
+
+	if foundURL == "" {
+		p.reportStatus(idx, false, false, "no image url returned")
+		return "", errors.New("grok upstream did not return image url")
+	}
+
+	p.reportStatus(idx, true, false, "")
+	return foundURL, nil
+}

@@ -12,6 +12,7 @@ import (
 	"ai-web-free/internal/chatgpt"
 	"ai-web-free/internal/config"
 	"ai-web-free/internal/promptplaza"
+	"ai-web-free/internal/provider"
 	chatgpt_types "ai-web-free/typings/chatgpt"
 	officialtypes "ai-web-free/typings/official"
 
@@ -20,11 +21,68 @@ import (
 )
 
 // NewPoolChatExecutor 构建基于网关本机号池与 Failover 运行时的文本/联网搜索执行器。
-func NewPoolChatExecutor(rt *GatewayRuntime, pool *accounts.Pool, cfg *config.Config) promptplaza.PoolChatExecutor {
-	return func(ctx context.Context, systemPrompt, userPrompt string, useWebSearch bool) (string, error) {
-		if pool == nil || rt == nil {
-			return "", errors.New("account pool unavailable")
+func NewPoolChatExecutor(rt *GatewayRuntime, pool *accounts.Pool, cfg *config.Config, registry *provider.Registry) promptplaza.PoolChatExecutor {
+	runProviderChat := func(ctx context.Context, providerID, systemPrompt, userPrompt, model string) (string, bool, error) {
+		if registry == nil {
+			return "", false, nil
 		}
+		switch providerID {
+		case "grok":
+			p, ok := registry.Get("grok")
+			if !ok {
+				return "", false, nil
+			}
+			grok, ok := p.(*provider.GrokProvider)
+			if !ok {
+				return "", false, nil
+			}
+			req := officialtypes.APIRequest{Model: model, Messages: []officialtypes.APIMessage{{Role: "user", Content: officialtypes.MessageContent{TextValue: userPrompt}}}}
+			if strings.TrimSpace(systemPrompt) != "" {
+				req.Messages = append([]officialtypes.APIMessage{{Role: "system", Content: officialtypes.MessageContent{TextValue: systemPrompt}}}, req.Messages...)
+			}
+			tokens, cancel, err := grok.ChatCompletion(ctx, req)
+			if err != nil {
+				return "", true, err
+			}
+			defer cancel()
+			var out strings.Builder
+			for token := range tokens {
+				out.WriteString(token)
+			}
+			if out.Len() == 0 {
+				return "", true, errors.New("empty grok chat response")
+			}
+			return out.String(), true, nil
+		case "siliconflow":
+			p, ok := registry.Get("siliconflow")
+			if !ok {
+				return "", false, nil
+			}
+			sf, ok := p.(*provider.SiliconFlowProvider)
+			if !ok {
+				return "", false, nil
+			}
+			text, err := sf.ChatCompletionText(ctx, systemPrompt, userPrompt, model)
+			return text, true, err
+		case "dashscope":
+			p, ok := registry.Get("dashscope")
+			if !ok {
+				return "", false, nil
+			}
+			ds, ok := p.(*provider.DashScopeProvider)
+			if !ok {
+				return "", false, nil
+			}
+			text, err := ds.ChatCompletionText(ctx, systemPrompt, userPrompt, model)
+			return text, true, err
+		case "claude", "gemini", "deepseek":
+			return "", true, errors.New("text provider is registered as planned and not implemented: " + providerID)
+		default:
+			return "", false, nil
+		}
+	}
+
+	return func(ctx context.Context, systemPrompt, userPrompt string, useWebSearch bool, model ...string) (string, error) {
 		if ctx != nil && ctx.Err() != nil {
 			return "", ctx.Err()
 		}
@@ -41,15 +99,43 @@ func NewPoolChatExecutor(rt *GatewayRuntime, pool *accounts.Pool, cfg *config.Co
 			Content: officialtypes.MessageContent{TextValue: userPrompt},
 		})
 
+		requestedModel := "auto"
+		if len(model) > 0 && strings.TrimSpace(model[0]) != "" {
+			requestedModel = strings.TrimSpace(model[0])
+		}
+		providerID := "chatgpt"
+		if strings.EqualFold(requestedModel, "auto") {
+			var cachedModels []string
+			if pool != nil {
+				cachedModels = pool.CollectModels([]accounts.AccountType{accounts.TypeFree, accounts.TypePUID}, func(a *accounts.Account) bool {
+					return AccountSatisfies(a, accounts.CapChat.Name)
+				})
+			}
+			if selected := randomDramaProviderModel(dramaModelCatalog(pool, registry, "chat", cachedModels), nil); selected != "" {
+				requestedModel = selected
+				providerID = dramaLLMProviderForModel(requestedModel)
+			}
+		} else {
+			providerID = dramaLLMProviderForModel(requestedModel)
+		}
+		if providerID != "chatgpt" {
+			text, handled, err := runProviderChat(ctx, providerID, systemPrompt, userPrompt, requestedModel)
+			if handled {
+				return text, err
+			}
+		}
+		if pool == nil || rt == nil {
+			return "", errors.New("account pool unavailable")
+		}
 		apiReq := officialtypes.APIRequest{
-			Model:    "auto",
+			Model:    requestedModel,
 			Stream:   false,
 			Messages: messages,
 		}
 
 		res, err := rt.RunWithFailover(nil, pool, cfg, FailoverOptions{
 			Capability: accounts.CapChat.Name,
-			Model:      "auto",
+			Model:      requestedModel,
 		}, func(acct *accounts.Account, client *bogdanfinn.TlsClient) AttemptOutcome {
 			if !AccountSatisfies(acct, accounts.CapChat.Name) {
 				return AttemptOutcome{StatusCode: http.StatusForbidden, Err: errAccountCapDenied}
@@ -100,7 +186,7 @@ func NewPoolChatExecutor(rt *GatewayRuntime, pool *accounts.Pool, cfg *config.Co
 			uuid.NewString(),
 			bundle.translated,
 			false,
-			"auto",
+			requestedModel,
 			chatgpt.HandlerDetailedOptions{
 				Websocket:      res.Outcome.WSConn,
 				ClientState:    bundle.clientState,

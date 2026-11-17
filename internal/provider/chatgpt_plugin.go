@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -91,32 +92,15 @@ func (p *ChatGPTProvider) reportProbeProxyFailure(acct *accounts.Account, errMsg
 }
 
 func (p *ChatGPTProvider) Descriptor() ProviderDescriptor {
-	featured := []string{
-		"gpt-5-6",
-		"gpt-5-6-mini",
-		"gpt-6",
-		"gpt-6-mini",
-		"gpt-image-2.5",
-		"gpt-image-2.5-sunburst",
-		"gpt-image-2.5-flare",
-		"gpt-image-2.6",
-		"gpt-image-2",
-		"dall-e-3",
-	}
+	featured := []string{}
 	if p.pool != nil {
 		if cached, _ := p.pool.CachedModels(); len(cached) > 0 {
-			seen := make(map[string]bool, len(cached)+5)
-			merged := make([]string, 0, len(cached)+5)
+			seen := make(map[string]bool, len(cached))
+			merged := make([]string, 0, len(cached))
 			for _, id := range cached {
 				if id != "" && !seen[id] {
 					seen[id] = true
 					merged = append(merged, id)
-				}
-			}
-			for _, img := range []string{"gpt-image-2.5-sunburst", "gpt-image-2.5-flare", "gpt-image-2.5", "gpt-image-2.6", "dall-e-3"} {
-				if !seen[img] {
-					seen[img] = true
-					merged = append(merged, img)
 				}
 			}
 			featured = merged
@@ -159,6 +143,11 @@ func (p *ChatGPTProvider) Descriptor() ProviderDescriptor {
 		CostType:       "daily_credits",
 		AuthType:       "cookie",
 	}
+}
+
+// Rebalance 立即按热池策略执行补位/收缩/轮换。
+func (p *ChatGPTProvider) Rebalance() []accounts.RebalanceResult {
+	return p.pool.Rebalance()
 }
 
 func (p *ChatGPTProvider) Stats() accounts.PoolStats {
@@ -514,7 +503,31 @@ func (p *ChatGPTProvider) ExecuteAccountActionWithOpts(id, action string, headle
 	}
 
 	switch action {
+	case "standby":
+		p.pool.SetStatus(acct.ID, accounts.StatusStandby)
+		return map[string]interface{}{
+			"id":     acct.ID,
+			"status": accounts.StatusStandby.String(),
+		}, nil
+
+	case "activate":
+		if acct.Client == nil {
+			if err := acct.InitClient(); err != nil {
+				return nil, fmt.Errorf("初始化账号客户端失败: %w", err)
+			}
+		}
+		acct.CooldownUntil = time.Time{}
+		acct.ActivatedAt = time.Now()
+		p.pool.SetStatus(acct.ID, accounts.StatusActive)
+		return map[string]interface{}{
+			"id":     acct.ID,
+			"status": accounts.StatusActive.String(),
+		}, nil
+
 	case "enable":
+		if acct.Client == nil {
+			_ = acct.InitClient()
+		}
 		acct.CooldownUntil = time.Time{}
 		acct.ImageCooldownUntil = time.Time{}
 		acct.LastError = ""
@@ -851,18 +864,17 @@ func RegisterDefaultProviders(reg *Registry, chatgptPlugin *ChatGPTProvider) {
 		FeaturedModels:        []string{"gemini-3-pro", "gemini-3-flash", "imagen-3"},
 	}))
 
-	reg.Register(NewStubProvider(ProviderDescriptor{
-		ID:                    "grok",
-		Name:                  "Grok Web",
-		Vendor:                "xAI",
-		Status:                "planned",
-		Version:               "0.1.0-alpha",
-		Description:           "Grok.com / X 免登与 SSO 免费号池插件（支持 Grok-4 / Aurora Image 生图）",
-		SupportedAccountTypes: []string{"free", "noauth", "supergrok"},
-		CredentialFormats:     []string{"sso_cookie", "anon_token"},
-		Capabilities:          []string{"chat", "image_generation", "image_edit"},
-		FeaturedModels:        []string{"grok-4", "grok-4-mini", "grok-image"},
-	}))
+	// 注册 xAI Grok Web 免费号池插件
+	polCfg := config.LoadPoolPolicy("grok", "free")
+	grokPolicy := accounts.PoolPolicy{
+		ActiveTarget:   polCfg.ActiveTarget,
+		MinHealthy:     polCfg.MinHealthy,
+		MaxActive:      polCfg.MaxActive,
+		RotateInterval: polCfg.RotateInterval,
+		RotateRatio:    polCfg.RotateRatio,
+		ActivateBatch:  polCfg.ActivateBatch,
+	}
+	reg.Register(NewGrokProvider(pPool, "https://grok.com", "grok_accounts.txt", grokPolicy))
 
 	reg.Register(NewStubProvider(ProviderDescriptor{
 		ID:                    "deepseek",
@@ -900,6 +912,35 @@ func ApplyConfig(reg *Registry, cfg *config.Config) {
 	if p, ok := reg.Get("local_tts"); ok {
 		if localTTS, ok := p.(*LocalTTSProvider); ok {
 			localTTS.Configure(cfg.LocalTTSBaseURL, cfg.LocalTTSAPIKey, cfg.LocalTTSModel)
+		}
+	}
+	var siliconFlow *SiliconFlowProvider
+	if p, ok := reg.Get("siliconflow"); ok {
+		if silicon, ok := p.(*SiliconFlowProvider); ok {
+			siliconFlow = silicon
+		}
+	}
+	if p, ok := reg.Get("grok"); ok {
+		if grok, ok := p.(*GrokProvider); ok {
+			if cfg.GrokCredentialLLMEnabled && siliconFlow != nil {
+				model := grokCredentialLLMModel(cfg.GrokCredentialLLMModel)
+				grok.SetGrokCredentialLLM(func(ctx context.Context, lines []string) ([]grokCredentialLLMResult, error) {
+					return normalizeGrokCredentialsWithLLM(ctx, siliconFlow, model, lines)
+				})
+			}
+			polCfg := config.LoadPoolPolicy("grok", "free")
+			grok.SetPolicy(accounts.PoolPolicy{
+				ActiveTarget:   polCfg.ActiveTarget,
+				MinHealthy:     polCfg.MinHealthy,
+				MaxActive:      polCfg.MaxActive,
+				RotateInterval: polCfg.RotateInterval,
+				RotateRatio:    polCfg.RotateRatio,
+				ActivateBatch:  polCfg.ActivateBatch,
+			})
+			if cfg.GrokSSOCookies != "" {
+				grok.AddAccounts(splitConfigKeys(cfg.GrokSSOCookies), true)
+			}
+			grok.Rebalance()
 		}
 	}
 }

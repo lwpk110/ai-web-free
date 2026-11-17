@@ -217,6 +217,53 @@ func TestEngineConcurrentSkipAndPartialRetry(t *testing.T) {
 	}
 }
 
+func TestEngineForcedRetryRunsTargetOnce(t *testing.T) {
+	gdb := openTestDB(t)
+	seedSampleProject(t, gdb, "p_force_retry")
+
+	exec := &mockExecutor{}
+	eng := NewEngine(gdb, exec, func() int { return 2 })
+
+	first, _, err := eng.StartRun(context.Background(), "p_force_retry", RunOptions{})
+	if err != nil {
+		t.Fatalf("start first run: %v", err)
+	}
+	if fin := waitRunDone(t, gdb, first.ID); fin.Status != "completed" {
+		t.Fatalf("expected first run completed, got %s (%s)", fin.Status, fin.Error)
+	}
+
+	exec.mu.Lock()
+	exec.calls = nil
+	exec.mu.Unlock()
+
+	target := TTSNodeKey("sh1")
+	second, _, err := eng.StartRun(context.Background(), "p_force_retry", RunOptions{
+		Targets: []string{target},
+		Force:   []string{target},
+	})
+	if err != nil {
+		t.Fatalf("start forced run: %v", err)
+	}
+	fin := waitRunDone(t, gdb, second.ID)
+	if fin.Status != "completed" {
+		t.Fatalf("expected forced run completed, got %s (%s)", fin.Status, fin.Error)
+	}
+	exec.mu.Lock()
+	calls := append([]string(nil), exec.calls...)
+	exec.mu.Unlock()
+	if len(calls) != 1 || calls[0] != target {
+		t.Fatalf("expected forced target to execute exactly once, got %v", calls)
+	}
+	proj, _, _, err := eng.LoadOrMigrateProject("p_force_retry")
+	if err != nil {
+		t.Fatalf("load project: %v", err)
+	}
+	st := proj.Nodes[target]
+	if st == nil || st.Status != StatusReady || st.Output == "" {
+		t.Fatalf("expected forced target ready with output, got %+v", st)
+	}
+}
+
 func TestJSONPatchStalePropagationAndLockProtection(t *testing.T) {
 	gdb := openTestDB(t)
 	seedSampleProject(t, gdb, "p2")

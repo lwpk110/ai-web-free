@@ -89,6 +89,8 @@ export const DramaNodeInspector: React.FC<DramaNodeInspectorProps> = ({
   const [voiceBusy, setVoiceBusy] = useState(false);
   const [voiceMsg, setVoiceMsg] = useState<string | null>(null);
   const [cloneTargetCharId, setCloneTargetCharId] = useState("");
+  const imageProviders = Object.entries(capabilities?.image.providers || {}).sort((a, b) => a[0].localeCompare(b[0]));
+  const videoProviders = Object.entries(capabilities?.video.providers || {}).sort((a, b) => a[0].localeCompare(b[0]));
 
   if (!selectedNode) {
     return (
@@ -180,12 +182,16 @@ export const DramaNodeInspector: React.FC<DramaNodeInspectorProps> = ({
               onChange={(e) => updateNodeData<ScriptNodeData>(selectedNode.id, { imageModelOverride: e.target.value || undefined })}
               className="w-full rounded-lg border border-[var(--border-default)] bg-[var(--bg-input)] px-2 py-1.5"
             >
-              <option value="">自动路由 ({capabilities?.recommended?.[d.routingPolicy]?.image_model || "auto"})</option>
-              <option value="flux-schnell">FLUX.1-schnell</option>
-              <option value="wanx-v1">通义万相 Wanx-v1</option>
-              <option value="jimeng-2.1">字节即梦 2.1</option>
-              <option value="gpt-image-1">ChatGPT gpt-image-1</option>
-            </select>
+              <option value="auto">auto · 从可用生图模型随机</option>
+                {imageProviders.map((entry) => (
+                  <optgroup key={entry[0]} label={entry[0] + (entry[1].available ? " · 可用" : " · 未配置")}>
+                    {(entry[1].models || []).map((model) => (
+                      <option key={model} value={model} disabled={!entry[1].available}>{model}</option>
+                    ))}
+                  </optgroup>
+                ))}
+                {imageProviders.length === 0 && <option value="flux-schnell">FLUX.1-schnell</option>}
+              </select>
           </label>
           <label className="block space-y-1">
             <span className="text-[11px] text-[var(--text-muted)]">视频模型覆盖</span>
@@ -194,13 +200,16 @@ export const DramaNodeInspector: React.FC<DramaNodeInspectorProps> = ({
               onChange={(e) => updateNodeData<ScriptNodeData>(selectedNode.id, { videoModelOverride: e.target.value || undefined })}
               className="w-full rounded-lg border border-[var(--border-default)] bg-[var(--bg-input)] px-2 py-1.5"
             >
-              <option value="">自动路由</option>
-              <option value="THUDM/CogVideoX-5b">CogVideoX-5B</option>
-              <option value="wan-video-v1">通义万相 Wan2.1</option>
-              <option value="muse-video">Meta Muse Video</option>
-              <option value="muse-talk">Meta MuseTalk (对口型)</option>
-              <option value="jimeng-video-2.0">字节即梦 2.0</option>
-            </select>
+              <option value="auto">auto · 从可用视频模型随机</option>
+                {videoProviders.map((entry) => (
+                  <optgroup key={entry[0]} label={entry[0] + (entry[1].available ? " · 可用" : " · 未配置")}>
+                    {(entry[1].models || []).map((model) => (
+                      <option key={model} value={model} disabled={!entry[1].available}>{model}</option>
+                    ))}
+                  </optgroup>
+                ))}
+                {videoProviders.length === 0 && <option value="muse-video">Meta Muse Video</option>}
+              </select>
           </label>
         </div>
 

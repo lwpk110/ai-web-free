@@ -78,41 +78,22 @@ func (h *DramaHandler) Capabilities(c *gin.Context) {
 	_, sfActive := h.providerActive("siliconflow")
 	_, jmActive := h.providerActive("jimeng")
 	_, museActive := h.providerActive("meta_muse")
+	_, grokActive := h.providerActive("grok")
 	localConfigured, localActive := h.providerActive("local_tts")
 
-	imageProviders := map[string]gin.H{
-		"chatgpt": {
-			"available": cgptActive > 0,
-			"active":    cgptActive,
-			"models":    []string{"gpt-image-1", "dall-e-3"},
-		},
-		"siliconflow": {
-			"available": sfActive > 0,
-			"active":    sfActive,
-			"models":    []string{"flux-schnell", "black-forest-labs/FLUX.1-schnell"},
-		},
-		"dashscope": {
-			"available": dsActive > 0,
-			"active":    dsActive,
-			"models":    []string{"wanx-v1"},
-		},
-		"jimeng": {
-			"available": jmActive > 0,
-			"active":    jmActive,
-			"models":    []string{"jimeng-2.1"},
-		},
+	imageProviderCatalog := dramaModelCatalog(h.pool, h.registry, "image_generation", nil)
+	imageProviders := make(map[string]gin.H, len(imageProviderCatalog))
+	for _, item := range imageProviderCatalog {
+		imageProviders[item.ID] = gin.H{
+			"available": item.Available,
+			"active":    item.Active,
+			"models":    item.Models,
+			"status":    item.Status,
+			"reason":    item.Reason,
+		}
 	}
 
-	defaultImageModel := "flux-schnell"
-	if sfActive > 0 {
-		defaultImageModel = "flux-schnell"
-	} else if dsActive > 0 {
-		defaultImageModel = "wanx-v1"
-	} else if jmActive > 0 {
-		defaultImageModel = "jimeng-2.1"
-	} else if cgptActive > 0 {
-		defaultImageModel = "gpt-image-1"
-	}
+	defaultImageModel := "auto"
 
 	videoProviders := map[string]gin.H{
 		"siliconflow": {
@@ -145,7 +126,7 @@ func (h *DramaHandler) Capabilities(c *gin.Context) {
 		},
 	}
 
-	imageAvailable := cgptActive > 0 || sfActive > 0 || dsActive > 0 || jmActive > 0
+	imageAvailable := cgptActive > 0 || sfActive > 0 || dsActive > 0 || jmActive > 0 || grokActive > 0
 	videoAvailable := sfActive > 0 || dsActive > 0 || museActive > 0 || jmActive > 0
 
 	pickVideo := func(order ...string) string {
@@ -187,7 +168,7 @@ func (h *DramaHandler) Capabilities(c *gin.Context) {
 				if dsActive > 0 {
 					return candidate
 				}
-			case "jimeng-2.1":
+			case "jimeng-4.5":
 				if jmActive > 0 {
 					return candidate
 				}
@@ -196,16 +177,47 @@ func (h *DramaHandler) Capabilities(c *gin.Context) {
 		return defaultImageModel
 	}
 
+	var cachedLLMModels []string
+	if h.pool != nil {
+		cachedLLMModels = h.pool.CollectModels([]accounts.AccountType{accounts.TypeFree, accounts.TypePUID}, func(a *accounts.Account) bool {
+			return AccountSatisfies(a, accounts.CapChat.Name)
+		})
+	}
+	llmCatalog := dramaModelCatalog(h.pool, h.registry, "chat", cachedLLMModels)
+	llmModels := append([]string{"auto"}, flattenDramaModelCatalog(llmCatalog, false)...)
+	llmAvailable := false
+	llmActive := 0
+	for _, item := range llmCatalog {
+		if item.Available && len(item.Models) > 0 {
+			llmAvailable = true
+		}
+		if item.Available {
+			llmActive += item.Active
+		}
+	}
+	llmProviders := make(map[string]gin.H, len(llmCatalog))
+	for _, item := range llmCatalog {
+		llmProviders[item.ID] = gin.H{
+			"available": item.Available,
+			"active":    item.Active,
+			"models":    item.Models,
+			"status":    item.Status,
+			"name":      item.Name,
+			"reason":    item.Reason,
+		}
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"llm": gin.H{
-			"available": cgptActive > 0,
-			"active":    cgptActive,
-			"models":    []string{"gpt-4o", "gpt-5"},
+			"available": llmAvailable,
+			"active":    llmActive,
+			"models":    llmModels,
+			"providers": llmProviders,
 			"reason": func() string {
-				if cgptActive > 0 {
+				if llmAvailable {
 					return ""
 				}
-				return "暂无可用 ChatGPT 号池账号，可使用内置模板/手工编排或先导入账号"
+				return "暂无可用拆本模型凭据；auto 会从配置后的可用文本模型随机选择"
 			}(),
 		},
 		"image": gin.H{
@@ -258,21 +270,21 @@ func (h *DramaHandler) Capabilities(c *gin.Context) {
 		"recommended": gin.H{
 			"free_first": gin.H{
 				"llm_model":     "gpt-4o",
-				"image_model":   pickImage("flux-schnell", "jimeng-2.1", "wanx-v1", "gpt-image-1"),
+				"image_model":   pickImage("flux-schnell", "jimeng-4.5", "wanx-v1", "gpt-image-1"),
 				"tts_voice":     "zh-CN-YunxiNeural",
 				"video_model":   pickVideo("THUDM/CogVideoX-5b", "wan-video-v1", "jimeng-video-2.0", "muse-video"),
 				"fallback_mode": "ken_burns",
 			},
 			"quality_first": gin.H{
 				"llm_model":     "gpt-4o",
-				"image_model":   pickImage("gpt-image-1", "jimeng-2.1", "flux-schnell", "wanx-v1"),
+				"image_model":   pickImage("gpt-image-1", "jimeng-4.5", "flux-schnell", "wanx-v1"),
 				"tts_voice":     "zh-CN-XiaoxiaoNeural",
 				"video_model":   pickVideo("muse-talk", "jimeng-video-2.0", "THUDM/CogVideoX-5b", "wan-video-v1"),
 				"fallback_mode": "ken_burns",
 			},
 			"fast": gin.H{
 				"llm_model":     "gpt-4o",
-				"image_model":   pickImage("flux-schnell", "wanx-v1", "jimeng-2.1", "gpt-image-1"),
+				"image_model":   pickImage("flux-schnell", "wanx-v1", "jimeng-4.5", "gpt-image-1"),
 				"tts_voice":     "zh-CN-YunxiNeural",
 				"video_model":   pickVideo("THUDM/CogVideoX-2b", "wan-video-v1", "muse-video", "jimeng-video-2.0"),
 				"fallback_mode": "ken_burns",

@@ -113,7 +113,7 @@ export async function runScriptBreakdownToCanvas(signal?: AbortSignal): Promise<
 }
 请拆解为 2-4 个核心角色（含旁白如需要）、1-3 个固定场景、以及 4-6 个紧凑连贯的高张力分镜。`;
 
-  const llmModel = caps?.recommended?.[script.routingPolicy]?.llm_model || "gpt-4o";
+  const llmModel = script.scriptModelOverride || caps?.recommended?.[script.routingPolicy]?.llm_model || "auto";
 
   try {
     const rawText = await streamChatCompletion({
@@ -149,16 +149,19 @@ export async function runScriptBreakdownToCanvas(signal?: AbortSignal): Promise<
       }>;
     };
 
+    const defaultTTSEngine = script.defaultTTSEngine || "edge-tts";
     const chars = (parsed.characters || []).slice(0, 6).map((c, i) => {
       const hint = `${c.role || ""}${c.voiceHint || ""}`;
-      let voiceId = "zh-CN-YunxiNeural";
-      let voiceName = "云希 (Yunxi · 热血青年/解说)";
-      if (hint.includes("女") || hint.includes("千金")) {
-        voiceId = "zh-CN-XiaoxiaoNeural";
-        voiceName = "晓晓 (Xiaoxiao · 大女主/知性)";
-      } else if (hint.includes("反") || hint.includes("霸") || hint.includes("男")) {
-        voiceId = "zh-CN-YunyangNeural";
-        voiceName = "云扬 (Yunyang · 沉稳霸总/旁白)";
+      let voiceId = script.defaultTTSVoiceId || "zh-CN-YunxiNeural";
+      let voiceName = script.defaultTTSVoiceName || "云希 (Yunxi · 热血青年/解说)";
+      if (defaultTTSEngine === "edge-tts" && !script.defaultTTSVoiceId) {
+        if (hint.includes("女") || hint.includes("千金")) {
+          voiceId = "zh-CN-XiaoxiaoNeural";
+          voiceName = "晓晓 (Xiaoxiao · 大女主/知性)";
+        } else if (hint.includes("反") || hint.includes("霸") || hint.includes("男")) {
+          voiceId = "zh-CN-YunyangNeural";
+          voiceName = "云扬 (Yunyang · 沉稳霸总/旁白)";
+        }
       }
       const colors = ["#2563eb", "#ec4899", "#ef4444", "#8b5cf6", "#10b981", "#f59e0b"];
       return {
@@ -167,7 +170,7 @@ export async function runScriptBreakdownToCanvas(signal?: AbortSignal): Promise<
         role: c.role || "配角",
         avatarColor: colors[i % colors.length],
         appearanceBible: c.appearanceBible || "角色外观服装锁定特征",
-        voiceEngine: "edge-tts" as const,
+        voiceEngine: defaultTTSEngine,
         voiceId,
         voiceName,
       };
@@ -212,7 +215,27 @@ export async function runScriptBreakdownToCanvas(signal?: AbortSignal): Promise<
     );
 
     const existingAudioImports = store.nodes.filter((n) => n.type === "audioImport");
-    useDramaCanvasStore.getState().replaceGraph([...rebuilt.nodes, ...existingAudioImports], rebuilt.edges);
+    const rebuiltWithSettings = rebuilt.nodes.map((node) => {
+      if (node.type !== "script") return node;
+      return {
+        ...node,
+        data: {
+          ...node.data,
+          scriptModelOverride: script.scriptModelOverride,
+          imageModelOverride: script.imageModelOverride,
+          videoModelOverride: script.videoModelOverride,
+          allowedImageProviders: script.allowedImageProviders,
+          allowedVideoProviders: script.allowedVideoProviders,
+          allowedTTSProviders: script.allowedTTSProviders,
+          defaultTTSEngine: script.defaultTTSEngine || "edge-tts",
+          defaultTTSVoiceId: script.defaultTTSVoiceId,
+          defaultTTSVoiceName: script.defaultTTSVoiceName,
+          imageConcurrency: script.imageConcurrency,
+          autoFallbackKenBurns: script.autoFallbackKenBurns,
+        },
+      };
+    });
+    useDramaCanvasStore.getState().replaceGraph([...rebuiltWithSettings, ...existingAudioImports], rebuilt.edges);
     await useDramaCanvasStore.getState().persistNow();
   } catch (err) {
     store.updateNodeData<ScriptNodeData>(scriptNode.id, {

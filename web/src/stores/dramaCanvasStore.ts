@@ -160,6 +160,9 @@ export interface DramaCanvasState {
   checkpointAfterKeyframes: boolean;
   pipelineState: DramaPipelineState;
   pipelineStageText: string;
+  pipelineStartedAt: string | null;
+  lastActivityAt: string | null;
+  hydrating: boolean;
   capabilities: DramaCapabilities | null;
   capabilitiesLoading: boolean;
   projects: DramaProjectRecord[];
@@ -212,6 +215,8 @@ export interface DramaCanvasState {
 export const useDramaCanvasStore = create<DramaCanvasState>((set, get) => {
   const schedulePersist = () => {
     const state = get();
+    // 初始化恢复期间禁止用模块初始模板覆盖云端/IndexedDB 里的真实工程。
+    if (!state.initialized || state.hydrating) return;
     const cleanNodes = state.nodes.map(sanitizeNodeForStorage);
     const scriptNode = cleanNodes.find((n) => n.type === "script") as
       | (DramaFlowNode & { data: ScriptNodeData })
@@ -262,6 +267,9 @@ export const useDramaCanvasStore = create<DramaCanvasState>((set, get) => {
     checkpointAfterKeyframes: false,
     pipelineState: "idle",
     pipelineStageText: "",
+    pipelineStartedAt: null,
+    lastActivityAt: null,
+    hydrating: true,
     capabilities: null,
     capabilitiesLoading: false,
     projects: [],
@@ -272,6 +280,7 @@ export const useDramaCanvasStore = create<DramaCanvasState>((set, get) => {
 
     async persistNow() {
       const state = get();
+      if (state.hydrating) return;
       const cleanNodes = state.nodes.map(sanitizeNodeForStorage);
       const scriptNode = cleanNodes.find((n) => n.type === "script") as
         | (DramaFlowNode & { data: ScriptNodeData })
@@ -394,6 +403,7 @@ export const useDramaCanvasStore = create<DramaCanvasState>((set, get) => {
             if (runRec.logs) {
               set({ runLogs: runRec.logs });
             }
+            set({ lastActivityAt: new Date().toISOString() });
             if (runRec.summary) {
               set({ runSummary: runRec.summary });
             }
@@ -418,10 +428,13 @@ export const useDramaCanvasStore = create<DramaCanvasState>((set, get) => {
       };
 
       const isSameRun = get().selectedLogRunId === runId;
+      const runStartedAt = new Date().toISOString();
       set({
         activeRunId: runId,
         selectedLogRunId: runId,
         pipelineState: "running",
+        pipelineStartedAt: runStartedAt,
+        lastActivityAt: runStartedAt,
         runLogs: isSameRun ? get().runLogs : [],
         logPanelOpen: true,
       });
@@ -437,9 +450,11 @@ export const useDramaCanvasStore = create<DramaCanvasState>((set, get) => {
               return {
                 runLogs: dup ? prev.runLogs : [...prev.runLogs, incoming],
                 runSummary: ev.summary ?? prev.runSummary,
+                lastActivityAt: new Date().toISOString(),
               };
             });
           } else if (ev.type === "node.update" && ev.node_key && ev.node_state) {
+            set({ lastActivityAt: new Date().toISOString() });
             if (ev.node_state.status === "running") {
               set({ pipelineStageText: `正在并行处理节点 ${ev.node_key} ...` });
             }
@@ -471,7 +486,7 @@ export const useDramaCanvasStore = create<DramaCanvasState>((set, get) => {
                 pipelineStageText: ev.message || "执行失败",
               });
             } else if (ev.message) {
-              set({ pipelineStageText: ev.message });
+              set({ pipelineStageText: ev.message, lastActivityAt: new Date().toISOString() });
             }
             if (ev.status && ev.status !== "running") {
               if (activePollTimer !== null) {
@@ -573,102 +588,113 @@ export const useDramaCanvasStore = create<DramaCanvasState>((set, get) => {
 
     async initFromPersistence() {
       if (get().initialized) return;
-      set({ initialized: true });
-      void get().refreshCapabilities();
-
-      let targetId = DEFAULT_PROJECT_ID;
+      set({ initialized: true, hydrating: true });
       try {
-        const savedId = window.localStorage.getItem(ACTIVE_PROJECT_KEY);
-        if (savedId) targetId = savedId;
-      } catch {
-        /* noop */
-      }
+        void get().refreshCapabilities();
 
-      const [localRec, serverList] = await Promise.all([
-        idbGetProject(targetId),
-        fetchDramaProjects().catch(() => [] as DramaProjectRecord[]),
-      ]);
-
-      if (serverList.length > 0) {
-        set({ projects: serverList });
-      }
-
-      let serverRec: DramaProjectRecord | null = null;
-      try {
-        serverRec = await fetchDramaProject(targetId);
-      } catch {
-        if (!localRec && serverList.length > 0) {
-          serverRec = serverList[0];
-          targetId = serverRec.id;
-        }
-      }
-
-      const localTime = localRec?.updatedAt ? new Date(localRec.updatedAt).getTime() : 0;
-      const serverTime = serverRec?.updated_at ? new Date(serverRec.updated_at).getTime() : 0;
-
-      if (serverRec && serverRec.project && serverTime >= localTime) {
-        const derived = applyBackendProjectToFlow(serverRec.project, [], serverRec.layout);
-        const lr = serverRec.latest_run;
-        const restoredState: DramaPipelineState =
-          serverRec.active_run_id || lr?.status === "running"
-            ? "running"
-            : lr?.status === "completed"
-              ? "completed"
-              : lr?.status === "partial" || lr?.status === "failed"
-                ? "error"
-                : "idle";
-        set({
-          projectId: serverRec.id,
-          backendProject: serverRec.project,
-          nodes: derived.nodes,
-          edges: derived.edges,
-          checkpointAfterCast: Boolean(serverRec.layout?.checkpoint_after_cast),
-          checkpointAfterKeyframes: Boolean(serverRec.layout?.checkpoint_after_keyframes),
-          lastSavedAt: serverRec.updated_at || null,
-          syncStatus: "synced",
-          pipelineState: restoredState,
-          pipelineStageText: lr?.error || "",
-          runLogs: lr?.logs || [],
-          runSummary: lr?.summary || null,
-          selectedLogRunId: lr?.id || null,
-        });
-        void get().refreshRunsHistory();
-        if (serverRec.active_run_id) {
-          get().connectRunSSE(serverRec.id, serverRec.active_run_id);
-        }
-        return;
-      }
-
-      if (serverRec && serverRec.graph_json && serverTime >= localTime) {
+        let targetId = DEFAULT_PROJECT_ID;
         try {
-          const parsed = JSON.parse(serverRec.graph_json);
-          if (Array.isArray(parsed.nodes) && parsed.nodes.length > 0) {
-            set({
-              projectId: serverRec.id,
-              nodes: parsed.nodes,
-              edges: Array.isArray(parsed.edges) ? parsed.edges : [],
-              checkpointAfterCast: Boolean(parsed.checkpointAfterCast),
-              checkpointAfterKeyframes: Boolean(parsed.checkpointAfterKeyframes),
-              lastSavedAt: serverRec.updated_at || null,
-              syncStatus: "synced",
-            });
-            return;
-          }
+          const savedId = window.localStorage.getItem(ACTIVE_PROJECT_KEY);
+          if (savedId) targetId = savedId;
         } catch {
-          /* fall back */
+          /* noop */
         }
-      }
 
-      if (localRec && Array.isArray(localRec.nodes) && localRec.nodes.length > 0) {
-        set({
-          projectId: localRec.id,
-          nodes: localRec.nodes,
-          edges: localRec.edges || [],
-          checkpointAfterCast: Boolean(localRec.checkpointAfterCast),
-          checkpointAfterKeyframes: Boolean(localRec.checkpointAfterKeyframes),
-          lastSavedAt: localRec.updatedAt,
-          syncStatus: "local",
-        });
+        const [localRec, serverList] = await Promise.all([
+          idbGetProject(targetId),
+          fetchDramaProjects().catch(() => [] as DramaProjectRecord[]),
+        ]);
+
+        if (serverList.length > 0) {
+          set({ projects: serverList });
+        }
+
+        let serverRec: DramaProjectRecord | null = null;
+        try {
+          serverRec = await fetchDramaProject(targetId);
+        } catch {
+          if (!localRec && serverList.length > 0) {
+            serverRec = serverList[0];
+            targetId = serverRec.id;
+          }
+        }
+
+        const localTime = localRec?.updatedAt ? new Date(localRec.updatedAt).getTime() : 0;
+        const serverTime = serverRec?.updated_at ? new Date(serverRec.updated_at).getTime() : 0;
+
+        if (serverRec && serverRec.project && serverTime >= localTime) {
+          const derived = applyBackendProjectToFlow(serverRec.project, [], serverRec.layout);
+          const lr = serverRec.latest_run;
+          const restoredState: DramaPipelineState =
+            serverRec.active_run_id || lr?.status === "running"
+              ? "running"
+              : lr?.status === "completed"
+                ? "completed"
+                : lr?.status === "partial" || lr?.status === "failed"
+                  ? "error"
+                  : "idle";
+          set({
+            projectId: serverRec.id,
+            backendProject: serverRec.project,
+            nodes: derived.nodes,
+            edges: derived.edges,
+            checkpointAfterCast: Boolean(serverRec.layout?.checkpoint_after_cast),
+            checkpointAfterKeyframes: Boolean(serverRec.layout?.checkpoint_after_keyframes),
+            lastSavedAt: serverRec.updated_at || null,
+            syncStatus: "synced",
+            pipelineState: restoredState,
+            pipelineStageText: lr?.error || "",
+            pipelineStartedAt: serverRec.active_run_id ? lr?.created_at || serverRec.updated_at || null : null,
+            lastActivityAt: lr?.updated_at || lr?.created_at || serverRec.updated_at || null,
+            runLogs: lr?.logs || [],
+            runSummary: lr?.summary || null,
+            selectedLogRunId: lr?.id || null,
+          });
+          try {
+            window.localStorage.setItem(ACTIVE_PROJECT_KEY, serverRec.id);
+          } catch {
+            /* noop */
+          }
+          void get().refreshRunsHistory();
+          if (serverRec.active_run_id) {
+            get().connectRunSSE(serverRec.id, serverRec.active_run_id);
+          }
+          return;
+        }
+
+        if (serverRec && serverRec.graph_json && serverTime >= localTime) {
+          try {
+            const parsed = JSON.parse(serverRec.graph_json);
+            if (Array.isArray(parsed.nodes) && parsed.nodes.length > 0) {
+              set({
+                projectId: serverRec.id,
+                nodes: parsed.nodes,
+                edges: Array.isArray(parsed.edges) ? parsed.edges : [],
+                checkpointAfterCast: Boolean(parsed.checkpointAfterCast),
+                checkpointAfterKeyframes: Boolean(parsed.checkpointAfterKeyframes),
+                lastSavedAt: serverRec.updated_at || null,
+                syncStatus: "synced",
+              });
+              return;
+            }
+          } catch {
+            /* fall back */
+          }
+        }
+
+        if (localRec && Array.isArray(localRec.nodes) && localRec.nodes.length > 0) {
+          set({
+            projectId: localRec.id,
+            nodes: localRec.nodes,
+            edges: localRec.edges || [],
+            checkpointAfterCast: Boolean(localRec.checkpointAfterCast),
+            checkpointAfterKeyframes: Boolean(localRec.checkpointAfterKeyframes),
+            lastSavedAt: localRec.updatedAt,
+            syncStatus: "local",
+          });
+        }
+      } finally {
+        set({ hydrating: false });
       }
     },
 
@@ -697,6 +723,8 @@ export const useDramaCanvasStore = create<DramaCanvasState>((set, get) => {
             selectedNodeId: derived.nodes[0]?.id || null,
             pipelineState: restoredState,
             pipelineStageText: lr?.error || "",
+            pipelineStartedAt: serverRec.active_run_id ? lr?.created_at || serverRec.updated_at || null : null,
+            lastActivityAt: lr?.updated_at || lr?.created_at || serverRec.updated_at || null,
             runLogs: lr?.logs || [],
             runSummary: lr?.summary || null,
             selectedLogRunId: lr?.id || null,

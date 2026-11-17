@@ -146,6 +146,23 @@ type ProviderChannelRecord struct {
 	UpdatedAt    time.Time `json:"updated_at"`
 }
 
+// CredentialFormatPatternRecord 保存 LLM 成功归一化后的脱敏格式模板，用于后续离线自我进化识别。
+// InputTemplate / OutputTemplate 必须只包含固定文案与占位符，绝不保存邮箱、密码、TOTP、Cookie 或代理明文。
+type CredentialFormatPatternRecord struct {
+	ID             string     `gorm:"primaryKey;size:64" json:"id"`
+	Provider       string     `gorm:"size:64;uniqueIndex:idx_credential_format_provider_template" json:"provider"`
+	CredentialType string     `gorm:"size:32;index" json:"credential_type"`
+	InputTemplate  string     `gorm:"type:text;not null;uniqueIndex:idx_credential_format_provider_template" json:"input_template"`
+	OutputTemplate string     `gorm:"type:text;not null" json:"output_template"`
+	UseCount       int64      `gorm:"default:0" json:"use_count"`
+	SuccessCount   int64      `gorm:"default:0" json:"success_count"`
+	FailureCount   int64      `gorm:"default:0" json:"failure_count"`
+	Enabled        bool       `gorm:"default:true;index" json:"enabled"`
+	LastUsedAt     *time.Time `json:"last_used_at,omitempty"`
+	CreatedAt      time.Time  `gorm:"index" json:"created_at"`
+	UpdatedAt      time.Time  `gorm:"index" json:"updated_at"`
+}
+
 // AudioGenerationRecord 语音工坊配音作品历史记录持久化模型
 type AudioGenerationRecord struct {
 	ID        string    `gorm:"primaryKey;size:64" json:"id"`

@@ -41,6 +41,7 @@ const (
 	StatusRateLimited                      // 被限流，等待冷却
 	StatusDisabled                         // 手动停用
 	StatusBanned                           // 被封禁
+	StatusStandby                          // 待命：凭据保留但不参与调度、续期与连接占用
 )
 
 func (s AccountStatus) String() string {
@@ -57,6 +58,8 @@ func (s AccountStatus) String() string {
 		return "disabled"
 	case StatusBanned:
 		return "banned"
+	case StatusStandby:
+		return "standby"
 	}
 	return fmt.Sprintf("unknown(%d)", s)
 }
@@ -124,6 +127,7 @@ type Account struct {
 	TotalCalls  int64
 	FailedCalls int64
 	LastUsed    time.Time
+	ActivatedAt time.Time // 最近一次进入热池的时间（用于轮换）
 	LastChecked time.Time
 	CreatedAt   time.Time
 }

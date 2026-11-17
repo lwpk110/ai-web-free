@@ -49,7 +49,7 @@ import { DramaSettingsModal } from "../components/drama/DramaSettingsModal";
 import { DRAMA_NODE_TYPES, DramaNodeActionsProvider } from "../components/drama/DramaNodes";
 import { FlowingPulseEdge } from "../components/drama/FlowingPulseEdge";
 import { CinematicTimeline, type TimelineShotItem } from "../components/drama/CinematicTimeline";
-import { ChronoEventTracker } from "../components/drama/ChronoEventTracker";
+import { analyzeChronoBottlenecks, ChronoEventTracker } from "../components/drama/ChronoEventTracker";
 import { CloudKeyConfigModal } from "../components/CloudKeyConfigModal";
 import { DramaTimelinePlayerModal } from "../components/drama/DramaTimelinePlayerModal";
 import { DramaWizardView } from "../components/drama/DramaWizardView";
@@ -133,6 +133,8 @@ export const ShortDramaStudio: React.FC = () => {
     checkpointAfterKeyframes,
     pipelineState,
     pipelineStageText,
+    pipelineStartedAt,
+    lastActivityAt,
     capabilities,
     capabilitiesLoading,
     projects,
@@ -173,6 +175,7 @@ export const ShortDramaStudio: React.FC = () => {
   const abortRef = useRef<AbortController | null>(null);
   const lastExportBlobRef = useRef<{ blob: Blob; ext: string } | null>(null);
   const [isCanvasMaximized, setIsCanvasMaximized] = useState(false);
+  const [activityNow, setActivityNow] = useState(() => Date.now());
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -435,6 +438,21 @@ export const ShortDramaStudio: React.FC = () => {
   const isRunning = pipelineState === "running" || Boolean(activeRunId) || canvasStats.running > 0;
   const isPaused = pipelineState === "paused_cast" || pipelineState === "paused_keyframes";
 
+  useEffect(() => {
+    if (!isRunning) return;
+    setActivityNow(Date.now());
+    const timer = window.setInterval(() => setActivityNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [isRunning]);
+
+  const elapsedMs = pipelineStartedAt ? Math.max(0, activityNow - new Date(pipelineStartedAt).getTime()) : 0;
+  const elapsedText = elapsedMs >= 3_600_000
+    ? `${Math.floor(elapsedMs / 3_600_000)}h${Math.floor((elapsedMs % 3_600_000) / 60_000)}m`
+    : elapsedMs >= 60_000
+      ? `${Math.floor(elapsedMs / 60_000)}m${Math.floor((elapsedMs % 60_000) / 1000)}s`
+      : `${Math.floor(elapsedMs / 1000)}s`;
+  const idleSeconds = lastActivityAt ? Math.floor((activityNow - new Date(lastActivityAt).getTime()) / 1000) : 0;
+
   const timelineShots = useMemo<TimelineShotItem[]>(() => {
     const shotNodes = (nodes.filter((n) => n.type === "shot") as Array<DramaFlowNode & { data: ShotNodeData }>).sort(
       (a, b) => a.data.index - b.data.index,
@@ -497,16 +515,11 @@ export const ShortDramaStudio: React.FC = () => {
   }, [backendProject, nodes]);
 
   const bottleneckCount = useMemo(() => {
-    let count = 0;
-    const backendNodes = backendProject?.nodes || {};
-    Object.values(backendNodes).forEach((v) => {
-      if (v.status === "failed") count++;
-    });
-    nodes.forEach((n) => {
-      if (n.data.status === "error") count++;
-    });
-    return count;
-  }, [backendProject, nodes]);
+    return analyzeChronoBottlenecks(
+      runLogs.map((l) => ({ timestamp: l.timestamp, level: l.level, nodeKey: l.node_key, message: l.message })),
+      chronoNodeStates,
+    ).length;
+  }, [runLogs, chronoNodeStates]);
 
   const nodeActionCallbacks = useMemo(
     () => ({
@@ -590,7 +603,7 @@ export const ShortDramaStudio: React.FC = () => {
               )}
               {projects.map((p) => (
                 <option key={p.id} value={p.id}>
-                  {p.title}
+                  {p.title} · {p.shot_count ?? 0}镜 · #{p.id.slice(-6)}
                 </option>
               ))}
             </select>
@@ -778,8 +791,8 @@ export const ShortDramaStudio: React.FC = () => {
               >
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
                 {runSummary && runSummary.total > 0
-                  ? `后台生成中 (${runSummary.ready + runSummary.degraded}/${runSummary.total})`
-                  : "后台生成中..."}
+                  ? `后台生成中 (${runSummary.ready + runSummary.degraded}/${runSummary.total}) · ${elapsedText}`
+                  : `后台生成中... · ${elapsedText}`}
               </button>
             ) : isPaused ? (
               <button
@@ -883,7 +896,7 @@ export const ShortDramaStudio: React.FC = () => {
                 return (
                   <span className="inline-flex items-center gap-1.5 rounded-full border border-indigo-500/30 bg-indigo-500/10 px-2.5 py-0.5 text-[11px] font-semibold text-indigo-600 dark:text-indigo-400">
                     <Loader2 className="h-3 w-3 animate-spin" />
-                    后台制作中 · {canvasStats.ready}/{canvasStats.total} ({pct}%)
+                    后台制作中 · {canvasStats.ready}/{canvasStats.total} ({pct}%) · 已运行 {elapsedText}
                   </span>
                 );
               }
@@ -927,11 +940,22 @@ export const ShortDramaStudio: React.FC = () => {
                 <Lock className="h-2.5 w-2.5" /> 锁定 {canvasStats.locked}
               </span>
             )}
+            {isRunning && idleSeconds >= 60 && (
+              <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-500/30 bg-amber-500/10 px-2.5 py-0.5 text-[11px] font-medium text-amber-600 dark:text-amber-400">
+                <AlertTriangle className="h-3 w-3" />
+                {idleSeconds / 60 >= 1 ? `${Math.floor(idleSeconds / 60)} 分钟` : `${idleSeconds} 秒`}无新事件
+              </span>
+            )}
             {pipelineStageText && (
               <div className="flex items-center gap-1.5 font-medium text-indigo-600 dark:text-indigo-400">
                 {isRunning && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
                 {isPaused && <PauseCircle className="h-3.5 w-3.5 text-amber-500" />}
-                <span className="max-w-xs truncate" title={pipelineStageText}>{pipelineStageText}</span>
+                <span
+                  className="max-w-xs truncate"
+                  title={`运行 ${elapsedText} · 最近活动 ${idleSeconds} 秒前\n${pipelineStageText}`}
+                >
+                  {pipelineStageText}
+                </span>
               </div>
             )}
           </div>
@@ -1336,6 +1360,7 @@ export const ShortDramaStudio: React.FC = () => {
           onClose={() => setSettingsModalOpen(false)}
           capabilities={capabilities}
           scriptData={scriptNode?.data}
+          voices={voices}
           onSave={(patch) => {
             updateScriptNode(patch);
             void useDramaCanvasStore.getState().persistNow();

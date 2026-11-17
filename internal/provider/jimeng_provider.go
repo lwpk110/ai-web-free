@@ -254,7 +254,7 @@ func (p *JimengProvider) ExecuteAccountAction(id, action string) (map[string]int
 }
 
 // GenerateImage 使用即梦文生图
-func (p *JimengProvider) GenerateImage(ctx context.Context, prompt, size string) (string, error) {
+func (p *JimengProvider) GenerateImage(ctx context.Context, prompt, model, size string) (string, error) {
 	acct, acctIdx, err := p.nextAccount()
 	if err != nil {
 		return "", err

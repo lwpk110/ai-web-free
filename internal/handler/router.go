@@ -3,7 +3,9 @@ package handler
 import (
 	"context"
 	"io/fs"
+	"log"
 	"net/http"
+	"os"
 	"strings"
 
 	"ai-web-free/httpclient/bogdanfinn"
@@ -12,6 +14,7 @@ import (
 	"ai-web-free/internal/chatgpt"
 	"ai-web-free/internal/config"
 	"ai-web-free/internal/drama"
+	"ai-web-free/internal/gatewaykeys"
 	"ai-web-free/internal/health"
 	"ai-web-free/internal/opslog"
 	"ai-web-free/internal/promptplaza"
@@ -49,6 +52,8 @@ type RouterDeps struct {
 	StorageEngine storage.StorageEngine
 	VectorStore   vectorstore.VectorStore
 	HealthTracker *health.Tracker
+	// GatewayKeys 网关 API Key / 分组存储；为空时基于 DB 自动创建。
+	GatewayKeys *gatewaykeys.Store
 }
 
 func RegisterRouter(accountPool *accounts.Pool, proxyPool *proxy.Pool, registry *provider.Registry, cfg *config.Config) *gin.Engine {
@@ -99,7 +104,7 @@ func RegisterRouterWithDeps(deps RouterDeps) *gin.Engine {
 		rt.PromptPlaza = promptplaza.NewManager(promptplaza.Options{
 			PersistFile:  persistFile,
 			ProxyFunc:    proxyFn,
-			ChatExecutor: NewPoolChatExecutor(rt, accountPool, cfg),
+			ChatExecutor: NewPoolChatExecutor(rt, accountPool, cfg, registry),
 		})
 	}
 	chatHandler := NewChatHandler(accountPool, cfg)
@@ -114,6 +119,7 @@ func RegisterRouterWithDeps(deps RouterDeps) *gin.Engine {
 	imageHandler.SetRuntime(rt)
 	audioHandler.SetRuntime(rt)
 	adminHandler.SetRuntime(rt)
+	chatHandler.SetRegistry(registry)
 	audioHandler.SetRegistry(registry)
 	imageHandler.SetRegistry(registry)
 	videoHandler := NewVideoHandler(registry, deps.AuditLog)
@@ -122,7 +128,7 @@ func RegisterRouterWithDeps(deps RouterDeps) *gin.Engine {
 	dramaExecutor := NewGatewayDramaExecutor(
 		rt.DB, accountPool, registry, rt.StorageEngine,
 		imageHandler, audioHandler, videoHandler,
-		NewPoolChatExecutor(rt, accountPool, cfg),
+		NewPoolChatExecutor(rt, accountPool, cfg, registry),
 	)
 	dramaEngine := drama.NewEngine(rt.DB, dramaExecutor, dramaExecutor.AvailableImageConcurrency)
 	dramaHandler.SetEngine(dramaEngine)
@@ -208,10 +214,33 @@ func RegisterRouterWithDeps(deps RouterDeps) *gin.Engine {
 	if cfg != nil {
 		adminToken = cfg.AdminToken
 	}
+	gwStore := deps.GatewayKeys
+	if gwStore == nil {
+		secret := os.Getenv("GATEWAY_KEY_SECRET")
+		if secret == "" {
+			secret = adminToken
+		}
+		var err error
+		if gwStore, err = gatewaykeys.NewStore(deps.DB, secret); err != nil {
+			log.Printf("[Gateway] API Key store init failed: %v", err)
+		}
+	}
 	adminGroup := router.Group("/admin/api/v1")
 	adminGroup.Use(middlewares.AdminAuthorization(adminToken))
 	{
 		adminGroup.GET("/auth/status", adminHandler.AuthStatus)
+		if gwStore != nil {
+			gw := NewGatewayKeysHandler(gwStore)
+			adminGroup.GET("/gateway/groups", gw.ListGroups)
+			adminGroup.POST("/gateway/groups", gw.CreateGroup)
+			adminGroup.PUT("/gateway/groups/:id", gw.UpdateGroup)
+			adminGroup.DELETE("/gateway/groups/:id", gw.DeleteGroup)
+			adminGroup.GET("/gateway/keys", gw.ListKeys)
+			adminGroup.POST("/gateway/keys", gw.CreateKey)
+			adminGroup.PUT("/gateway/keys/:id", gw.UpdateKey)
+			adminGroup.DELETE("/gateway/keys/:id", gw.DeleteKey)
+			adminGroup.GET("/gateway/keys/:id/secret", gw.RevealKey)
+		}
 		adminGroup.GET("/overview", adminHandler.Overview)
 		adminGroup.GET("/system/status", adminHandler.SystemStatus)
 		adminGroup.GET("/models", adminHandler.ListModelsCatalog)
@@ -235,6 +264,7 @@ func RegisterRouterWithDeps(deps RouterDeps) *gin.Engine {
 		adminGroup.GET("/providers/:provider/accounts/kami-login/tasks/:taskID", adminHandler.KamiLoginTask)
 		adminGroup.POST("/providers/:provider/tasks/dismiss", adminHandler.DismissTask)
 		adminGroup.POST("/providers/:provider/accounts/:id/action", adminHandler.AccountAction)
+		adminGroup.POST("/providers/:provider/pool/rebalance", adminHandler.RebalancePool)
 		adminGroup.POST("/providers/:provider/pool/probe-all", adminHandler.ProbeAllAccounts)
 		adminGroup.GET("/prompts", adminHandler.ListPrompts)
 		adminGroup.POST("/prompts/sync", adminHandler.SyncPrompts)
@@ -360,7 +390,7 @@ func RegisterRouterWithDeps(deps RouterDeps) *gin.Engine {
 	router.GET("/storage/videos/:id", videoHandler.StreamVideoFile)
 	router.HEAD("/storage/videos/:id", videoHandler.StreamVideoFile)
 
-	authGroup := router.Group("").Use(middlewares.Authorization)
+	authGroup := router.Group("").Use(GatewayKeyAuth(gwStore), LegacyAuthorization(middlewares.Authorization))
 	authGroup.POST("/v1/chat/completions", chatHandler.Nightmare)
 	authGroup.POST("/v1/responses", chatHandler.Responses)
 	authGroup.POST("/v1/files", chatHandler.Files)

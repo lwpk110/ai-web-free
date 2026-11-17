@@ -18,10 +18,15 @@ export interface ScriptNodeData extends Record<string, unknown> {
   stylePreset: string;
   outline: string;
   routingPolicy: DramaRoutingPolicy;
+  scriptModelOverride?: string;
   imageModelOverride?: string;
   videoModelOverride?: string;
   allowedImageProviders?: string[];
   allowedVideoProviders?: string[];
+  allowedTTSProviders?: string[];
+  defaultTTSEngine?: CharacterNodeData["voiceEngine"];
+  defaultTTSVoiceId?: string;
+  defaultTTSVoiceName?: string;
   imageConcurrency?: number;
   autoFallbackKenBurns?: boolean;
   bgmUrl?: string;
@@ -38,7 +43,7 @@ export interface CharacterNodeData extends Record<string, unknown> {
   appearanceBible: string;
   portraitUrl?: string;
   portraitPrompt?: string;
-  voiceEngine: "edge-tts" | "jianying" | "dashscope" | "siliconflow" | "chatgpt";
+  voiceEngine: "edge-tts" | "local_tts" | "jianying" | "dashscope" | "siliconflow" | "chatgpt";
   voiceId: string;
   voiceName: string;
   speed: number;
@@ -805,10 +810,15 @@ export function flowGraphToSchemaProject(
       aspect_ratio: s?.aspectRatio || "9:16",
       style: s?.stylePreset || "电影感写实",
       routing_policy: s?.routingPolicy || "free_first",
+      script_model_override: s?.scriptModelOverride,
       image_model_override: s?.imageModelOverride,
       video_model_override: s?.videoModelOverride,
       allowed_image_providers: s?.allowedImageProviders,
       allowed_video_providers: s?.allowedVideoProviders,
+      allowed_tts_providers: s?.allowedTTSProviders,
+      default_tts_engine: s?.defaultTTSEngine,
+      default_tts_voice_id: s?.defaultTTSVoiceId,
+      default_tts_voice_name: s?.defaultTTSVoiceName,
       image_concurrency: s?.imageConcurrency,
       auto_fallback_ken_burns: s?.autoFallbackKenBurns,
       bgm_url: s?.bgmUrl || composerNode?.data.bgmUrl,
@@ -878,10 +888,15 @@ export function applyBackendProjectToFlow(
         position: pos,
         data: {
           ...node.data,
+          scriptModelOverride: proj.script.script_model_override,
           imageModelOverride: proj.script.image_model_override,
           videoModelOverride: proj.script.video_model_override,
           allowedImageProviders: proj.script.allowed_image_providers,
           allowedVideoProviders: proj.script.allowed_video_providers,
+          allowedTTSProviders: proj.script.allowed_tts_providers,
+          defaultTTSEngine: (proj.script.default_tts_engine as ScriptNodeData["defaultTTSEngine"]) || "edge-tts",
+          defaultTTSVoiceId: proj.script.default_tts_voice_id,
+          defaultTTSVoiceName: proj.script.default_tts_voice_name,
           imageConcurrency: proj.script.image_concurrency,
           autoFallbackKenBurns: proj.script.auto_fallback_ken_burns,
           bgmUrl: proj.script.bgm_url,

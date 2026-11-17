@@ -244,8 +244,76 @@ func (p *SiliconFlowProvider) ExecuteAccountAction(id, action string) (map[strin
 	return nil, fmt.Errorf("unsupported action: %s", action)
 }
 
+// ChatCompletionText 调用 OpenAI 兼容文本对话接口，供内部后台 DAG 使用。
+func (p *SiliconFlowProvider) ChatCompletionText(ctx context.Context, systemPrompt, userPrompt, model string) (string, error) {
+	key, keyIdx, err := p.nextKey()
+	if err != nil {
+		return "", err
+	}
+	model = strings.TrimSpace(model)
+	if model == "" || strings.EqualFold(model, "auto") {
+		model = "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
+	}
+	messages := make([]map[string]string, 0, 2)
+	if strings.TrimSpace(systemPrompt) != "" {
+		messages = append(messages, map[string]string{"role": "system", "content": systemPrompt})
+	}
+	messages = append(messages, map[string]string{"role": "user", "content": userPrompt})
+	bodyBytes, err := json.Marshal(map[string]interface{}{
+		"model":      model,
+		"messages":   messages,
+		"stream":     false,
+		"max_tokens": 4096,
+	})
+	if err != nil {
+		return "", err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/chat/completions", bytes.NewReader(bodyBytes))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+key)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := p.client.Do(req)
+	if err != nil {
+		p.reportStatus(keyIdx, false, false)
+		return "", err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		p.reportStatus(keyIdx, false, false)
+		return "", err
+	}
+	if resp.StatusCode == http.StatusTooManyRequests {
+		p.reportStatus(keyIdx, false, true)
+		return "", errors.New("siliconflow chat rate limit (429)")
+	}
+	if resp.StatusCode != http.StatusOK {
+		p.reportStatus(keyIdx, false, false)
+		return "", fmt.Errorf("siliconflow chat failed (status %d): %s", resp.StatusCode, string(data))
+	}
+	var parsed struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		p.reportStatus(keyIdx, false, false)
+		return "", err
+	}
+	if len(parsed.Choices) == 0 || strings.TrimSpace(parsed.Choices[0].Message.Content) == "" {
+		p.reportStatus(keyIdx, false, false)
+		return "", errors.New("empty siliconflow chat response")
+	}
+	p.reportStatus(keyIdx, true, false)
+	return parsed.Choices[0].Message.Content, nil
+}
+
 // GenerateImage 使用 FLUX.1-schnell 极速文生图
-func (p *SiliconFlowProvider) GenerateImage(ctx context.Context, prompt, size string) (string, error) {
+func (p *SiliconFlowProvider) GenerateImage(ctx context.Context, prompt, model, size string) (string, error) {
 	key, keyIdx, err := p.nextKey()
 	if err != nil {
 		return "", err
@@ -256,9 +324,9 @@ func (p *SiliconFlowProvider) GenerateImage(ctx context.Context, prompt, size st
 	}
 
 	reqBody := map[string]interface{}{
-		"model":  "black-forest-labs/FLUX.1-schnell",
-		"prompt": prompt,
-		"image_size": size,
+		"model":               "black-forest-labs/FLUX.1-schnell",
+		"prompt":              prompt,
+		"image_size":          size,
 		"num_inference_steps": 4,
 	}
 

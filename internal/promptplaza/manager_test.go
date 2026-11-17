@@ -157,7 +157,7 @@ func TestSyncAllSourcesAndAICurator(t *testing.T) {
 	defer hfSrv.Close()
 
 	var sawWebSearch bool
-	mockExec := func(ctx context.Context, sysPrompt, userPrompt string, useWebSearch bool) (string, error) {
+	mockExec := func(ctx context.Context, sysPrompt, userPrompt string, useWebSearch bool, model ...string) (string, error) {
 		if useWebSearch {
 			sawWebSearch = true
 			return `[{"title_zh":"AI 趋势 · 3D 透明键帽","category":"3D 与微缩","prompt_en":"Translucent crystal keycap enclosing a miniature [主体], studio macro","prompt_zh":"内部封装微缩[主体]的透明树脂键帽，棚拍微距","recommended_mode":"generations","recommended_model":"gpt-image-2.5-sunburst","recommended_size":"1024x1024","variables":[{"key":"主体","label":"内嵌景物","default_value":"glowing coral reef","options":["glowing coral reef","tiny Fuji mountain"]}]}]`, nil
@@ -260,7 +260,7 @@ func TestExpandIdeaAIAndFallback(t *testing.T) {
 
 	// AI pool path
 	mgrAI := NewManager(Options{
-		ChatExecutor: func(ctx context.Context, sys, user string, webSearch bool) (string, error) {
+		ChatExecutor: func(ctx context.Context, sys, user string, webSearch bool, model ...string) (string, error) {
 			return `{"title_zh":"霓虹雨夜咖啡猫","category":"摄影写实","prompt_en":"Cyberpunk ginger cat sipping espresso in a neon rain alley, [光影材质]","prompt_zh":"霓虹雨夜小巷里喝浓缩咖啡的赛博朋克橘猫，[光影材质]","recommended_mode":"generations","recommended_model":"gpt-image-2.5-sunburst","recommended_size":"1792x1024","variables":[{"key":"光影材质","label":"光影质感","default_value":"wet neon puddle reflections","options":["wet neon puddle reflections"]}]}`, nil
 		},
 	})
@@ -278,7 +278,7 @@ func TestExpandIdeaAIAndFallback(t *testing.T) {
 
 	// Graceful fallback when AI fails
 	mgrFail := NewManager(Options{
-		ChatExecutor: func(ctx context.Context, sys, user string, webSearch bool) (string, error) {
+		ChatExecutor: func(ctx context.Context, sys, user string, webSearch bool, model ...string) (string, error) {
 			return "", errors.New("pool exhausted")
 		},
 	})
@@ -311,7 +311,7 @@ func TestExpandVideoAIAndFallback(t *testing.T) {
 
 	// AI pool polish path
 	mgrAI := NewManager(Options{
-		ChatExecutor: func(ctx context.Context, sys, user string, webSearch bool) (string, error) {
+		ChatExecutor: func(ctx context.Context, sys, user string, webSearch bool, model ...string) (string, error) {
 			return `{"title_zh":"霓虹武士环绕","camera_move":"360° Orbit Shot / 360度环绕","prompt_zh":"360度环绕运镜，未来武士立于霓虹雨夜天台，雨水沿刀锋滑落","prompt_en":"360-degree orbital tracking shot around a futuristic samurai on a neon-drenched rooftop in heavy rain"}`, nil
 		},
 	})

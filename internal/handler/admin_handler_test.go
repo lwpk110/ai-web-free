@@ -661,7 +661,7 @@ func TestAdminPromptPlazaEndpoints(t *testing.T) {
 			HuggingFaceURL: mockEmpty.URL,
 			LexicaTopics:   []string{"glass"},
 		},
-		ChatExecutor: func(ctx context.Context, sys, user string, useWebSearch bool) (string, error) {
+		ChatExecutor: func(ctx context.Context, sys, user string, useWebSearch bool, model ...string) (string, error) {
 			if useWebSearch {
 				return `[{"title_zh":"AI 趋势测试卡","category":"3D 与微缩","prompt_en":"Tiny glowing crystal cube with [主体] inside","prompt_zh":"内部封装微缩[主体]的发光晶体方块","recommended_mode":"generations","recommended_model":"gpt-image-2.5-sunburst","recommended_size":"1024x1024","variables":[{"key":"主体","label":"核心主体","default_value":"floating bonsai","options":["floating bonsai"]}]}]`, nil
 			}
@@ -784,7 +784,7 @@ func TestAdminPromptPlazaEndpoints(t *testing.T) {
 }
 
 func TestAdminModelsCatalogCacheAndFallback(t *testing.T) {
-	// 1. No logged-in account (only noauth) -> fallback catalog with builtin models
+	// 1. No logged-in account (only noauth) -> empty fallback; static catalogs are no longer injected.
 	noauthAcct := modelTestAccount(accounts.TypeNoAuth, &modelsTestClient{status: 200, body: `{"models":[]}`})
 	emptyPool := accounts.NewPool([]*accounts.Account{noauthAcct})
 	emptyReg := provider.NewRegistry()
@@ -796,7 +796,7 @@ func TestAdminModelsCatalogCacheAndFallback(t *testing.T) {
 		Config:      &config.Config{},
 	})
 	w := httptest.NewRecorder()
-	emptyRouter.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/admin/api/v1/models?include_builtins=true", nil))
+	emptyRouter.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/admin/api/v1/models", nil))
 	if w.Code != http.StatusOK {
 		t.Fatalf("fallback status = %d: %s", w.Code, w.Body.String())
 	}
@@ -811,7 +811,7 @@ func TestAdminModelsCatalogCacheAndFallback(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &fallbackResp); err != nil {
 		t.Fatal(err)
 	}
-	if fallbackResp.Source != "fallback" || fallbackResp.UpstreamCount != 0 || len(fallbackResp.Data) < 10 {
+	if fallbackResp.Source != "fallback" || fallbackResp.UpstreamCount != 0 || len(fallbackResp.Data) != 0 {
 		t.Fatalf("unexpected fallback response: %+v", fallbackResp)
 	}
 
@@ -836,7 +836,7 @@ func TestAdminModelsCatalogCacheAndFallback(t *testing.T) {
 
 	// First fetch -> live (calls=1)
 	w = httptest.NewRecorder()
-	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/admin/api/v1/models?include_builtins=true", nil))
+	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/admin/api/v1/models", nil))
 	if w.Code != http.StatusOK {
 		t.Fatalf("first fetch status = %d: %s", w.Code, w.Body.String())
 	}
@@ -859,7 +859,7 @@ func TestAdminModelsCatalogCacheAndFallback(t *testing.T) {
 	// Second fetch without refresh -> cached (calls remains 1)
 	client.body = `{"models":[{"slug":"gpt-6-preview"}]}`
 	w = httptest.NewRecorder()
-	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/admin/api/v1/models?include_builtins=true", nil))
+	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/admin/api/v1/models", nil))
 	if w.Code != http.StatusOK {
 		t.Fatalf("cached fetch status = %d: %s", w.Code, w.Body.String())
 	}
@@ -874,9 +874,9 @@ func TestAdminModelsCatalogCacheAndFallback(t *testing.T) {
 		t.Fatalf("expected cached response calls=1, got %+v calls=%d", cacheResp, client.calls)
 	}
 
-	// Force refresh -> live again (calls=2) & merges previous models
+	// Force refresh -> live again (calls=2) and replaces stale provider cache.
 	w = httptest.NewRecorder()
-	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/admin/api/v1/models?include_builtins=true&refresh=true", nil))
+	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/admin/api/v1/models?refresh=true", nil))
 	if w.Code != http.StatusOK {
 		t.Fatalf("refresh fetch status = %d: %s", w.Code, w.Body.String())
 	}
@@ -887,8 +887,8 @@ func TestAdminModelsCatalogCacheAndFallback(t *testing.T) {
 		t.Fatalf("expected refreshed live response calls=2, got %+v calls=%d", liveResp, client.calls)
 	}
 	cached, _ := pool.CachedModels()
-	if len(cached) != 3 {
-		t.Fatalf("expected merged pool cache of 3 slugs, got %v", cached)
+	if len(cached) != 1 || cached[0] != "gpt-6-preview" {
+		t.Fatalf("expected refreshed pool cache of 1 slug, got %v", cached)
 	}
 }
 

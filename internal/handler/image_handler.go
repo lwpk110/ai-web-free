@@ -75,6 +75,18 @@ func (h *ImageHandler) getSiliconFlowProvider() *provider.SiliconFlowProvider {
 	return nil
 }
 
+func (h *ImageHandler) getGrokProvider() *provider.GrokProvider {
+	if h.registry == nil {
+		return nil
+	}
+	if p, ok := h.registry.Get("grok"); ok {
+		if casted, ok := p.(*provider.GrokProvider); ok {
+			return casted
+		}
+	}
+	return nil
+}
+
 // SetRuntime 注入网关共享的容灾、代理健康与审计运行时。
 func (h *ImageHandler) SetRuntime(rt *GatewayRuntime) {
 	h.runtime = rt
@@ -213,27 +225,32 @@ func (h *ImageHandler) Generations(c *gin.Context) {
 	}
 
 	modelLower := strings.ToLower(strings.TrimSpace(imageRequest.Model))
-	if strings.Contains(modelLower, "wanx") || strings.Contains(modelLower, "jimeng") || strings.Contains(modelLower, "flux") {
+	if strings.Contains(modelLower, "wanx") || strings.Contains(modelLower, "jimeng") || strings.Contains(modelLower, "flux") || strings.Contains(modelLower, "grok") {
 		var imgURL string
 		var genErr error
 		usedProvider := ""
 
 		if strings.Contains(modelLower, "wanx") {
 			if ds := h.getDashScopeProvider(); ds != nil {
-				imgURL, genErr = ds.GenerateImage(c.Request.Context(), imageRequest.Prompt, imageRequest.Size)
+				imgURL, genErr = ds.GenerateImage(c.Request.Context(), imageRequest.Prompt, imageRequest.Model, imageRequest.Size)
 				usedProvider = "dashscope"
 			}
 		} else if strings.Contains(modelLower, "jimeng") {
 			if jm := h.getJimengProvider(); jm != nil {
-				imgURL, genErr = jm.GenerateImage(c.Request.Context(), imageRequest.Prompt, imageRequest.Size)
+				imgURL, genErr = jm.GenerateImage(c.Request.Context(), imageRequest.Prompt, imageRequest.Model, imageRequest.Size)
 				usedProvider = "jimeng"
+			}
+		} else if strings.Contains(modelLower, "grok") {
+			if gr := h.getGrokProvider(); gr != nil {
+				imgURL, genErr = gr.GenerateImage(c.Request.Context(), imageRequest.Prompt, imageRequest.Model, imageRequest.Size)
+				usedProvider = "grok"
 			}
 		}
 
 		// 若指定 FLUX，或上述渠道异常时执行跨平台降级至硅基流动 FLUX
 		if imgURL == "" && (strings.Contains(modelLower, "flux") || genErr != nil) {
 			if sf := h.getSiliconFlowProvider(); sf != nil {
-				fallbackURL, sfErr := sf.GenerateImage(c.Request.Context(), imageRequest.Prompt, imageRequest.Size)
+				fallbackURL, sfErr := sf.GenerateImage(c.Request.Context(), imageRequest.Prompt, imageRequest.Model, imageRequest.Size)
 				if sfErr == nil && fallbackURL != "" {
 					imgURL = fallbackURL
 					usedProvider = "siliconflow"
@@ -1157,24 +1174,29 @@ func (h *ImageHandler) GenerateImageData(ctx context.Context, prompt, model, siz
 		size = "1024x1024"
 	}
 	modelLower := strings.ToLower(strings.TrimSpace(model))
-	if strings.Contains(modelLower, "wanx") || strings.Contains(modelLower, "jimeng") || strings.Contains(modelLower, "flux") {
+	if strings.Contains(modelLower, "wanx") || strings.Contains(modelLower, "jimeng") || strings.Contains(modelLower, "flux") || strings.Contains(modelLower, "grok") {
 		var genErr error
 		if strings.Contains(modelLower, "wanx") {
 			if ds := h.getDashScopeProvider(); ds != nil {
-				imgURL, genErr = ds.GenerateImage(ctx, prompt, size)
+				imgURL, genErr = ds.GenerateImage(ctx, prompt, model, size)
 				usedModel = model
 			}
 		} else if strings.Contains(modelLower, "jimeng") {
 			if jm := h.getJimengProvider(); jm != nil {
-				imgURL, genErr = jm.GenerateImage(ctx, prompt, size)
+				imgURL, genErr = jm.GenerateImage(ctx, prompt, model, size)
+				usedModel = model
+			}
+		} else if strings.Contains(modelLower, "grok") {
+			if gr := h.getGrokProvider(); gr != nil {
+				imgURL, genErr = gr.GenerateImage(ctx, prompt, model, size)
 				usedModel = model
 			}
 		}
 		if imgURL == "" && (strings.Contains(modelLower, "flux") || genErr != nil) {
 			if sf := h.getSiliconFlowProvider(); sf != nil {
-				fallbackURL, sfErr := sf.GenerateImage(ctx, prompt, size)
+				fallbackURL, sfErr := sf.GenerateImage(ctx, prompt, model, size)
 				if sfErr == nil && fallbackURL != "" {
-					return fallbackURL, "", "flux-schnell", nil
+					return fallbackURL, "", model, nil
 				}
 				if genErr == nil {
 					genErr = sfErr
@@ -1284,7 +1306,7 @@ func (h *ImageHandler) runImagePipelineData(spec imagePipelineSpec) (imgURL, b64
 			return AttemptOutcome{StatusCode: 500, Err: dlErr}
 		}
 		return AttemptOutcome{
-			Payload: imageAttemptBundle{items: items},
+			Payload:    imageAttemptBundle{items: items},
 			StatusCode: 200,
 		}
 	})

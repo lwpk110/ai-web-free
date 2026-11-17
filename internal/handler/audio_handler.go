@@ -1465,6 +1465,11 @@ func (h *AudioHandler) GetAudioFile(c *gin.Context) {
 
 // SynthesizeSpeechData 供内部后台服务直接调用 TTS 合成并返回音频字节。
 func (h *AudioHandler) SynthesizeSpeechData(ctx context.Context, input, voice, model string, speed float64) ([]byte, string, string, error) {
+	return h.SynthesizeSpeechDataWithPreferredProvider(ctx, input, voice, model, "", speed)
+}
+
+// SynthesizeSpeechDataWithPreferredProvider 按项目能力设置强制优先使用指定 TTS 引擎。
+func (h *AudioHandler) SynthesizeSpeechDataWithPreferredProvider(ctx context.Context, input, voice, model, preferredProvider string, speed float64) ([]byte, string, string, error) {
 	if strings.TrimSpace(input) == "" {
 		return nil, "", "", errors.New("input text is empty")
 	}
@@ -1474,9 +1479,13 @@ func (h *AudioHandler) SynthesizeSpeechData(ctx context.Context, input, voice, m
 	if model == "" {
 		model = "tts-1"
 	}
-	engine := h.resolveTTSEngine(voice, model, "")
+	engine := h.resolveTTSEngine(voice, model, preferredProvider)
 	if engine == "openai_auto" {
 		engine = "edge_tts"
+	}
+	// 画布后台 DAG 目前只内置直连引擎；ChatGPT 语音保留给 /v1/audio/speech 标准接口。
+	if engine == "chatgpt" {
+		return nil, "", "", errors.New("短剧画布暂不支持 ChatGPT TTS 通道，请选择 Edge-TTS / 本地兼容 / 百炼 / 硅基流动")
 	}
 	audioBytes, usedProvider, usedVoice, _, err := h.synthesizeDirectEngine(ctx, engine, input, voice, model, speed)
 	if err == nil && len(audioBytes) > 0 {

@@ -15,6 +15,7 @@ import (
 	"ai-web-free/internal/chatgpt"
 	"ai-web-free/internal/config"
 	"ai-web-free/internal/httpstream"
+	"ai-web-free/internal/provider"
 	"ai-web-free/internal/toolcall"
 	chatgpt_types "ai-web-free/typings/chatgpt"
 	officialtypes "ai-web-free/typings/official"
@@ -30,6 +31,7 @@ type ChatHandler struct {
 	sessions    *SessionManager
 	cfg         *config.Config
 	runtime     *GatewayRuntime
+	registry    *provider.Registry
 }
 
 func NewChatHandler(pool *accounts.Pool, cfg *config.Config) *ChatHandler {
@@ -38,6 +40,11 @@ func NewChatHandler(pool *accounts.Pool, cfg *config.Config) *ChatHandler {
 		sessions:    NewSessionManager(),
 		cfg:         cfg,
 	}
+}
+
+// SetRegistry 注入多供应商插件注册表
+func (h *ChatHandler) SetRegistry(reg *provider.Registry) {
+	h.registry = reg
 }
 
 // SetRuntime 注入网关共享的容灾、代理健康与审计运行时。
@@ -127,6 +134,10 @@ func (h *ChatHandler) Nightmare(c *gin.Context) {
 		return
 	}
 
+	if !applyGatewayModel(c, &original_request.Model) {
+		return
+	}
+
 	// 当客户端携带 X-OpenUI-Lang: true 且未显式传入 OpenUI System Prompt 时，自动前置注入
 	if strings.EqualFold(c.GetHeader("X-OpenUI-Lang"), "true") || c.GetHeader("X-OpenUI-Lang") == "1" {
 		hasOpenUIPrompt := false
@@ -166,6 +177,12 @@ func (h *ChatHandler) Nightmare(c *gin.Context) {
 		var clientState *chatgpt.ChatClientState
 		h.handleToolCalling(c, &original_request, &client, nil, &clientState, &reqModel, &uid, &proxyUrl, &input_tokens)
 		return
+	}
+
+	if strings.HasPrefix(strings.ToLower(reqModel), "grok") {
+		if h.handleGrokChat(c, original_request, reqModel, input_tokens) {
+			return
+		}
 	}
 
 	needPaid := original_requestHasFiles(original_request)
@@ -373,6 +390,9 @@ func (h *ChatHandler) Responses(c *gin.Context) {
 		return
 	}
 
+	if !applyGatewayModel(c, &original_request.Model) {
+		return
+	}
 	reqModel := original_request.Model
 	if reqModel == "" {
 		reqModel = "auto"
@@ -424,6 +444,12 @@ func (h *ChatHandler) Responses(c *gin.Context) {
 	inputText := strings.Join(inputTextParts, "\n")
 
 	streamRequested := responsesRequest.Stream && h.cfg.StreamMode
+	if strings.HasPrefix(strings.ToLower(reqModel), "grok") {
+		if h.handleGrokChat(c, original_request, reqModel, input_tokens) {
+			return
+		}
+	}
+
 	needPaid := original_requestHasFiles(original_request)
 	res, err := h.runChatAttemptWithFailover(c, original_request, previousClientState, streamRequested, needPaid, accounts.CapResponses.Name, reqModel)
 	if err != nil {
@@ -1080,4 +1106,107 @@ func (h *ChatHandler) ChatGPTConversation(c *gin.Context) {
 		return
 	}
 	rt.RecordAudit(c, original_request.Model, res, http.StatusOK, nil)
+}
+
+func (h *ChatHandler) handleGrokChat(c *gin.Context, req officialtypes.APIRequest, reqModel string, inputTokens int) bool {
+	if h.registry == nil {
+		return false
+	}
+	p, ok := h.registry.Get("grok")
+	if !ok {
+		return false
+	}
+	grok, ok := p.(*provider.GrokProvider)
+	if !ok {
+		return false
+	}
+
+	tokenChan, cancel, err := grok.ChatCompletion(c.Request.Context(), req)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{
+			"message": "Grok upstream error: " + err.Error(),
+			"type":    "upstream_error",
+			"code":    "grok_error",
+		}})
+		return true
+	}
+	defer cancel()
+
+	created := time.Now().Unix()
+	respID := "chatcmpl-" + uuid.NewString()
+
+	if req.Stream {
+		c.Writer.Header().Set("Content-Type", "text/event-stream")
+		c.Writer.Header().Set("Cache-Control", "no-cache")
+		c.Writer.Header().Set("Connection", "keep-alive")
+		c.Writer.WriteHeader(http.StatusOK)
+
+		for token := range tokenChan {
+			chunk := gin.H{
+				"id":      respID,
+				"object":  "chat.completion.chunk",
+				"created": created,
+				"model":   reqModel,
+				"choices": []gin.H{
+					{
+						"index":         0,
+						"delta":         gin.H{"content": token},
+						"finish_reason": nil,
+					},
+				},
+			}
+			chunkBytes, _ := json.Marshal(chunk)
+			_, _ = c.Writer.WriteString("data: " + string(chunkBytes) + "\n\n")
+			c.Writer.Flush()
+		}
+
+		stopChunk := gin.H{
+			"id":      respID,
+			"object":  "chat.completion.chunk",
+			"created": created,
+			"model":   reqModel,
+			"choices": []gin.H{
+				{
+					"index":         0,
+					"delta":         gin.H{},
+					"finish_reason": "stop",
+				},
+			},
+		}
+		stopBytes, _ := json.Marshal(stopChunk)
+		_, _ = c.Writer.WriteString("data: " + string(stopBytes) + "\n\n")
+		_, _ = c.Writer.WriteString("data: [DONE]\n\n")
+		c.Writer.Flush()
+		return true
+	}
+
+	var sb strings.Builder
+	for token := range tokenChan {
+		sb.WriteString(token)
+	}
+	fullText := sb.String()
+	outputTokens := util.CountToken(fullText)
+
+	c.JSON(http.StatusOK, gin.H{
+		"id":      respID,
+		"object":  "chat.completion",
+		"created": created,
+		"model":   reqModel,
+		"choices": []gin.H{
+			{
+				"index": 0,
+				"message": gin.H{
+					"role":    "assistant",
+					"content": fullText,
+				},
+				"finish_reason": "stop",
+			},
+		},
+		"usage": gin.H{
+			"prompt_tokens":     inputTokens,
+			"completion_tokens": outputTokens,
+			"total_tokens":      inputTokens + outputTokens,
+		},
+	})
+	return true
 }
