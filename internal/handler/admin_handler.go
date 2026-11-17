@@ -359,6 +359,12 @@ func (h *AdminHandler) BulkUpdateAccountProxy(c *gin.Context) {
 		} else {
 			result.OK = true
 			updated++
+			if acct.Email != "" {
+				_ = accounts.SetAccountProxyInFile("account_proxies.txt", acct.Email, proxyURL)
+			}
+			if acct.ChatGPTAccountID != "" {
+				_ = accounts.SetAccountProxyInFile("account_proxies.txt", acct.ChatGPTAccountID, proxyURL)
+			}
 			log.Printf("[account-proxy] updated account=%s proxy_bound=%t", acct.Email, proxyURL != "")
 			if auditLog := h.auditLog(); auditLog != nil {
 				note := "account_proxy_set_direct"

@@ -2,7 +2,9 @@ package config
 
 import (
 	"os"
+	"runtime"
 	"strconv"
+	"strings"
 )
 
 type Config struct {
@@ -30,6 +32,7 @@ type Config struct {
 	AuditLogFile            string
 	AuditLogMaxMB           int
 	KamiAutoRenew           bool
+	KamiHeadless            bool
 	PromptSyncIntervalHours int
 	PromptPlazaFile         string
 	DatabaseURL             string
@@ -80,6 +83,7 @@ func Load() Config {
 		AuditLogFile:            os.Getenv("AUDIT_LOG_FILE"),
 		AuditLogMaxMB:           getIntEnv("AUDIT_LOG_MAX_MB", 10),
 		KamiAutoRenew:           getBoolEnv("KAMI_AUTO_RENEW", true),
+		KamiHeadless:            getKamiHeadlessDefault(),
 		PromptSyncIntervalHours: getIntEnv("PROMPT_SYNC_INTERVAL_HOURS", 6),
 		PromptPlazaFile:         os.Getenv("PROMPT_PLAZA_FILE"),
 		DatabaseURL:             getEnvWithFallback("DATABASE_URL", "DB_DSN", "data/ai-web-free.db"),
@@ -144,4 +148,15 @@ func getIntEnv(key string, defaultVal int) int {
 		return defaultVal
 	}
 	return n
+}
+
+func getKamiHeadlessDefault() bool {
+	if v := os.Getenv("KAMI_HEADLESS"); v != "" {
+		return strings.EqualFold(v, "true") || v == "1"
+	}
+	// 在无图形环境（如无 DISPLAY 的 Linux 生产容器）下默认无头；桌面/调试环境下默认有头以方便人工过盾与封号呈现
+	if runtime.GOOS == "linux" && os.Getenv("DISPLAY") == "" {
+		return true
+	}
+	return false
 }

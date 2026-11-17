@@ -12,6 +12,9 @@ import {
   ChevronDown,
   ChevronUp,
   Clapperboard,
+  Clock,
+  Download,
+  Film,
   FileAudio,
   FolderPlus,
   Globe,
@@ -22,12 +25,16 @@ import {
   Loader2,
   Lock,
   MapPin,
+  Maximize2,
+  Mic,
+  Minimize2,
   Network,
   PauseCircle,
   Play,
   RefreshCw,
   ScrollText,
   Settings2,
+  ShieldAlert,
   Sparkles,
   Terminal,
   Trash2,
@@ -40,6 +47,9 @@ import { DramaAssetDrawerModal } from "../components/drama/DramaAssetDrawerModal
 import { DramaNodeInspector } from "../components/drama/DramaNodeInspector";
 import { DramaSettingsModal } from "../components/drama/DramaSettingsModal";
 import { DRAMA_NODE_TYPES, DramaNodeActionsProvider } from "../components/drama/DramaNodes";
+import { FlowingPulseEdge } from "../components/drama/FlowingPulseEdge";
+import { CinematicTimeline, type TimelineShotItem } from "../components/drama/CinematicTimeline";
+import { ChronoEventTracker } from "../components/drama/ChronoEventTracker";
 import { CloudKeyConfigModal } from "../components/CloudKeyConfigModal";
 import { DramaTimelinePlayerModal } from "../components/drama/DramaTimelinePlayerModal";
 import { DramaWizardView } from "../components/drama/DramaWizardView";
@@ -63,6 +73,10 @@ import {
   type ComposerShotItem,
 } from "../lib/dramaVideoComposer";
 import { useDramaCanvasStore } from "../stores/dramaCanvasStore";
+
+const DRAMA_EDGE_TYPES = {
+  flowingPulse: FlowingPulseEdge,
+};
 
 function downloadBlob(blob: Blob, filename: string) {
   const url = URL.createObjectURL(blob);
@@ -158,6 +172,17 @@ export const ShortDramaStudio: React.FC = () => {
   );
   const abortRef = useRef<AbortController | null>(null);
   const lastExportBlobRef = useRef<{ blob: Blob; ext: string } | null>(null);
+  const [isCanvasMaximized, setIsCanvasMaximized] = useState(false);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && isCanvasMaximized) {
+        setIsCanvasMaximized(false);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [isCanvasMaximized]);
 
   // 初始化双写持久化、探测能力 + 导入跨工坊素材（活跃后台 Run 由 store 自动重连 SSE）
   useEffect(() => {
@@ -360,23 +385,128 @@ export const ShortDramaStudio: React.FC = () => {
     return { total: vals.length, ready, running, stale, failed, locked, pending };
   }, [backendProject]);
 
+  const [bottomDrawerMode, setBottomDrawerMode] = useState<"timeline" | "chrono" | "logs">("timeline");
+  const [bottomDrawerCollapsed, setBottomDrawerCollapsed] = useState(false);
+  const reactFlowInstanceRef = useRef<any>(null);
+
   const focusNodeByKey = useCallback((nodeKey?: string) => {
     if (!nodeKey) return;
-    const [, rawId] = nodeKey.split(":");
-    if (!rawId) return;
-    const target = nodes.find((n) => {
-      if (n.type === "character") return n.data.charId === rawId;
-      if (n.type === "scene") return n.data.sceneId === rawId;
-      if (n.type === "shot") return n.data.shotId === rawId;
+    let target = nodes.find((n) => {
+      if (n.type === "character") return n.data.charId === nodeKey || `image.portrait:${n.data.charId}` === nodeKey;
+      if (n.type === "scene") return n.data.sceneId === nodeKey || `image.scene:${n.data.sceneId}` === nodeKey;
+      if (n.type === "shot") {
+        return (
+          n.data.shotId === nodeKey ||
+          `image.keyframe:${n.data.shotId}` === nodeKey ||
+          `video.clip:${n.data.shotId}` === nodeKey ||
+          `tts.line:${n.data.shotId}` === nodeKey ||
+          `tts.speech:${n.data.shotId}` === nodeKey ||
+          n.id === nodeKey
+        );
+      }
+      if (n.type === "composer") return nodeKey.startsWith("timeline.") || nodeKey.startsWith("render.");
+      if (n.type === "script") return nodeKey.startsWith("script.");
       return false;
     });
+
+    if (!target) {
+      const [, rawId] = nodeKey.split(":");
+      if (rawId) {
+        target = nodes.find((n) => {
+          if (n.type === "character") return n.data.charId === rawId;
+          if (n.type === "scene") return n.data.sceneId === rawId;
+          if (n.type === "shot") return n.data.shotId === rawId;
+          return false;
+        });
+      }
+    }
+
     if (target) {
       setSelectedNodeId(target.id);
+      if (reactFlowInstanceRef.current && target.position) {
+        reactFlowInstanceRef.current.setCenter(target.position.x + 160, target.position.y + 100, {
+          duration: 600,
+          zoom: 1.05,
+        });
+      }
     }
   }, [nodes, setSelectedNodeId]);
 
   const isRunning = pipelineState === "running" || Boolean(activeRunId) || canvasStats.running > 0;
   const isPaused = pipelineState === "paused_cast" || pipelineState === "paused_keyframes";
+
+  const timelineShots = useMemo<TimelineShotItem[]>(() => {
+    const shotNodes = (nodes.filter((n) => n.type === "shot") as Array<DramaFlowNode & { data: ShotNodeData }>).sort(
+      (a, b) => a.data.index - b.data.index,
+    );
+    return shotNodes.map((s) => {
+      const active = getActiveShotBranch(s.data);
+      return {
+        id: s.id,
+        index: s.data.index,
+        title: `${s.data.shotType} · ${s.data.cameraMove.split(" ")[0]}`,
+        durationSec: s.data.actualAudioDuration || s.data.estimatedDuration || 4,
+        status: (s.data.status as any) || "pending",
+        imageUrl: active.imageUrl,
+        voiceoverText: s.data.voiceover ? String(s.data.voiceover) : undefined,
+        speakerName: s.data.characterName ? String(s.data.characterName) : undefined,
+      };
+    });
+  }, [nodes]);
+
+  const styledEdges = useMemo(() => {
+    return edges.map((e) => {
+      let color = "#6366F1";
+      if (e.source.includes("char")) color = "#A855F7";
+      else if (e.source.includes("scene")) color = "#0EA5E9";
+      else if (e.source.includes("shot")) color = "#F59E0B";
+
+      return {
+        ...e,
+        type: "flowingPulse",
+        data: {
+          color,
+          activePulse: isRunning,
+          glow: true,
+        },
+      };
+    });
+  }, [edges, isRunning]);
+
+  const chronoNodeStates = useMemo(() => {
+    const map: Record<string, any> = {};
+    const backendNodes = backendProject?.nodes || {};
+    Object.entries(backendNodes).forEach(([k, v]) => {
+      map[k] = {
+        status: v.status,
+        statusNote: v.status_note,
+        error: v.error,
+        attempts: v.attempts,
+        updatedAt: v.updated_at,
+      };
+    });
+    nodes.forEach((n) => {
+      if (n.data.status === "error" && n.data.error) {
+        map[n.id] = {
+          status: "failed",
+          error: n.data.error,
+        };
+      }
+    });
+    return map;
+  }, [backendProject, nodes]);
+
+  const bottleneckCount = useMemo(() => {
+    let count = 0;
+    const backendNodes = backendProject?.nodes || {};
+    Object.values(backendNodes).forEach((v) => {
+      if (v.status === "failed") count++;
+    });
+    nodes.forEach((n) => {
+      if (n.data.status === "error") count++;
+    });
+    return count;
+  }, [backendProject, nodes]);
 
   const nodeActionCallbacks = useMemo(
     () => ({
@@ -437,7 +567,11 @@ export const ShortDramaStudio: React.FC = () => {
 
   return (
     <DramaNodeActionsProvider value={nodeActionCallbacks}>
-      <div className="flex h-full w-full flex-1 min-h-0 flex-col overflow-hidden bg-[var(--bg-canvas)] text-[var(--text-primary)]">
+      <div
+        className={`flex flex-col overflow-hidden bg-[var(--bg-canvas)] text-[var(--text-primary)] transition-all ${
+          isCanvasMaximized ? "fixed inset-0 z-50 h-screen w-screen" : "h-full w-full flex-1 min-h-0"
+        }`}
+      >
         {/* 顶栏：工程管理 / 模式切换 / 检查点策略 / 一键启动 */}
         <div className="flex flex-wrap items-center justify-between gap-2.5 border-b border-[var(--border-default)] bg-[var(--bg-surface)] px-4 py-2.5">
           <div className="flex flex-wrap items-center gap-2">
@@ -559,26 +693,80 @@ export const ShortDramaStudio: React.FC = () => {
               能力设置
             </button>
 
+            {bottleneckCount > 0 && (
+              <button
+                type="button"
+                onClick={() => {
+                  setBottomDrawerMode("chrono");
+                  setBottomDrawerCollapsed(false);
+                }}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-rose-500/40 bg-rose-500/15 px-2.5 py-1 text-xs font-semibold text-rose-600 dark:text-rose-400 hover:bg-rose-500/25 transition animate-pulse"
+                title="发现执行卡点，点击展开阻塞透视诊断"
+              >
+                <ShieldAlert className="h-3.5 w-3.5" />
+                <span>{bottleneckCount} 处卡点阻断</span>
+              </button>
+            )}
+
             <button
               type="button"
-              onClick={() => setLogPanelOpen(!logPanelOpen)}
+              onClick={() => {
+                if (bottomDrawerMode === "timeline" && !bottomDrawerCollapsed) {
+                  setBottomDrawerCollapsed(true);
+                } else {
+                  setBottomDrawerMode("timeline");
+                  setBottomDrawerCollapsed(false);
+                }
+              }}
               className={`inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 text-xs transition-colors ${
-                logPanelOpen
-                  ? "border-indigo-500/40 bg-indigo-500/10 text-indigo-600 dark:text-indigo-400"
+                bottomDrawerMode === "timeline" && !bottomDrawerCollapsed
+                  ? "border-amber-500/50 bg-amber-500/10 text-amber-600 dark:text-amber-400 font-medium"
                   : "border-[var(--border-default)] hover:bg-[var(--bg-surface-hover)]"
               }`}
-              title="查看后台 DAG 执行日志与节点状态追踪"
+              title="切换/折叠影视剪辑多轨时间线"
             >
-              <Terminal className="h-3.5 w-3.5" />
-              日志追踪
+              <Film className="h-3.5 w-3.5 text-amber-500" />
+              时间线
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                if (bottomDrawerMode === "chrono" && !bottomDrawerCollapsed) {
+                  setBottomDrawerCollapsed(true);
+                } else {
+                  setBottomDrawerMode("chrono");
+                  setBottomDrawerCollapsed(false);
+                }
+              }}
+              className={`inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 text-xs transition-colors ${
+                bottomDrawerMode === "chrono" && !bottomDrawerCollapsed
+                  ? "border-indigo-500/50 bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 font-medium"
+                  : "border-[var(--border-default)] hover:bg-[var(--bg-surface-hover)]"
+              }`}
+              title="查看事件时光轴与卡点根因分析"
+            >
+              <Clock className="h-3.5 w-3.5 text-indigo-500" />
+              时光轴
               {runLogs.length > 0 && (
-                <span className="rounded-full bg-[var(--bg-elevated)] px-1.5 text-[10px] font-medium">
+                <span className="rounded-full bg-[var(--bg-elevated)] px-1.5 text-[10px] font-medium font-mono">
                   {runLogs.length}
                 </span>
               )}
-              {canvasStats.failed > 0 && (
-                <span className="h-2 w-2 rounded-full bg-rose-500" />
-              )}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setIsCanvasMaximized(!isCanvasMaximized)}
+              className={`inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 text-xs transition-colors ${
+                isCanvasMaximized
+                  ? "border-indigo-500 bg-indigo-500/15 text-indigo-600 dark:text-indigo-400 font-semibold"
+                  : "border-[var(--border-default)] hover:bg-[var(--bg-surface-hover)] text-[var(--text-default)]"
+              }`}
+              title={isCanvasMaximized ? "退出最大化 (Esc)" : "最大化画布 (Zen Mode)：收缩所有导航面板，只给用户画布操作"}
+            >
+              {isCanvasMaximized ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
+              <span>{isCanvasMaximized ? "还原" : "最大化画布"}</span>
             </button>
 
             {isRunning ? (
@@ -774,8 +962,9 @@ export const ShortDramaStudio: React.FC = () => {
           />
         ) : (
           <div className="flex flex-1 overflow-hidden">
-            {/* 左侧节点箱与全平台素材引入面板 */}
-            <aside className="hidden w-60 shrink-0 flex-col gap-3 overflow-y-auto border-r border-[var(--border-default)] bg-[var(--bg-surface)] p-3 text-xs lg:flex">
+            {/* 左侧节点箱与全平台素材引入面板 (最大化时收缩) */}
+            {!isCanvasMaximized && (
+              <aside className="hidden w-60 shrink-0 flex-col gap-3 overflow-y-auto border-r border-[var(--border-default)] bg-[var(--bg-surface)] p-3 text-xs lg:flex">
               <div className="space-y-1.5">
                 <div className="px-1 text-[11px] font-semibold uppercase tracking-wide text-[var(--text-muted)]">
                   画布节点添加
@@ -859,14 +1048,40 @@ export const ShortDramaStudio: React.FC = () => {
                 ))}
               </div>
             </aside>
+            )}
 
             {/* 中央 React Flow 无限画布 */}
             <div className="relative flex-1">
+              {/* 最大化纯净画布微型悬浮退出胶囊 */}
+              {isCanvasMaximized && (
+                <div className="absolute top-3 right-3 z-40 flex items-center gap-2 rounded-xl bg-[var(--bg-surface)]/90 border border-[var(--border-default)] p-1.5 shadow-2xl backdrop-blur-md">
+                  <div className="flex items-center gap-1.5 px-2 text-xs font-medium text-[var(--text-muted)]">
+                    <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                    <span>纯净画布模式 (Zen Mode)</span>
+                    <span className="text-[10px] px-1.5 py-0.2 rounded bg-[var(--bg-elevated)] border border-[var(--border-default)] font-mono">
+                      ESC 退出
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setIsCanvasMaximized(false)}
+                    className="inline-flex items-center gap-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white px-2.5 py-1 text-xs font-semibold shadow-md transition"
+                    title="还原窗口并展开全部面板"
+                  >
+                    <Minimize2 className="h-3 w-3" />
+                    <span>退出最大化</span>
+                  </button>
+                </div>
+              )}
               <ReactFlowProvider>
                 <ReactFlow
                   nodes={nodes}
-                  edges={edges}
+                  edges={styledEdges}
                   nodeTypes={DRAMA_NODE_TYPES}
+                  edgeTypes={DRAMA_EDGE_TYPES}
+                  onInit={(instance) => {
+                    reactFlowInstanceRef.current = instance;
+                  }}
                   onNodesChange={onNodesChange}
                   onEdgesChange={onEdgesChange}
                   onConnect={onConnect}
@@ -883,96 +1098,206 @@ export const ShortDramaStudio: React.FC = () => {
               </ReactFlowProvider>
             </div>
 
-            {/* 右侧节点属性精调面板 */}
-            <aside className="w-80 shrink-0 overflow-y-auto border-l border-[var(--border-default)] bg-[var(--bg-surface)]">
-              <DramaNodeInspector
-                selectedNode={selectedNode}
-                capabilities={capabilities}
-                voices={voices}
-                onRunBreakdown={handleRunBreakdown}
-                onGenerateCharacter={nodeActionCallbacks.onGenerateCharacter}
-                onGenerateScene={nodeActionCallbacks.onGenerateScene}
-                onGenerateShotAudio={nodeActionCallbacks.onGenerateShotAudio}
-                onGenerateShotKeyframe={nodeActionCallbacks.onGenerateShotKeyframe}
-                onGenerateShotVideo={nodeActionCallbacks.onGenerateShotVideo}
-                onTranscribeAudio={(id) => void transcribeAudioImportToScript(id).catch(() => {})}
-                onOpenPlayer={() => setPlayerOpen(true)}
-                onExportVideo={() => void handleExportSingleVideo()}
-                onExportZip={() => void handleExportZip()}
-              />
-            </aside>
+            {/* 右侧节点属性精调面板 (在最大化全屏模式下自动收缩) */}
+            {!isCanvasMaximized && (
+              <aside className="w-80 shrink-0 overflow-y-auto border-l border-[var(--border-default)] bg-[var(--bg-surface)]">
+                <DramaNodeInspector
+                  selectedNode={selectedNode}
+                  capabilities={capabilities}
+                  voices={voices}
+                  onRunBreakdown={handleRunBreakdown}
+                  onGenerateCharacter={nodeActionCallbacks.onGenerateCharacter}
+                  onGenerateScene={nodeActionCallbacks.onGenerateScene}
+                  onGenerateShotAudio={nodeActionCallbacks.onGenerateShotAudio}
+                  onGenerateShotKeyframe={nodeActionCallbacks.onGenerateShotKeyframe}
+                  onGenerateShotVideo={nodeActionCallbacks.onGenerateShotVideo}
+                  onTranscribeAudio={(id) => void transcribeAudioImportToScript(id).catch(() => {})}
+                  onOpenPlayer={() => setPlayerOpen(true)}
+                  onExportVideo={() => void handleExportSingleVideo()}
+                  onExportZip={() => void handleExportZip()}
+                />
+              </aside>
+            )}
           </div>
         )}
 
-        {/* 底部可折叠 DAG 执行日志与状态追踪面板 */}
-        {logPanelOpen && (
-          <div className="flex h-52 shrink-0 flex-col border-t border-[var(--border-default)] bg-[var(--bg-surface)] text-xs">
-            <div className="flex items-center justify-between border-b border-[var(--border-default)] bg-[var(--bg-elevated)] px-4 py-1.5">
-              <div className="flex items-center gap-2.5">
-                <Terminal className="h-3.5 w-3.5 text-indigo-500" />
-                <span className="font-semibold">后台 DAG 执行日志追踪</span>
-                {runsHistory.length > 0 && (
-                  <select
-                    value={selectedLogRunId || runsHistory[0]?.id || ""}
-                    onChange={(e) => void selectRunLogView(e.target.value)}
-                    className="rounded border border-[var(--border-default)] bg-[var(--bg-surface)] px-2 py-0.5 text-[11px]"
-                  >
-                    {runsHistory.map((r) => (
-                      <option key={r.id} value={r.id}>
-                        {r.id} · {r.status} ({r.created_at ? new Date(r.created_at).toLocaleTimeString() : ""})
-                      </option>
-                    ))}
-                  </select>
-                )}
+        {/* 底部专业影视双模底栏：影视多轨时间轴 + 事件时光轴卡点分析 (最大化时收缩) */}
+        {!isCanvasMaximized && !bottomDrawerCollapsed && (
+          <div className="flex shrink-0 flex-col border-t border-[var(--border-default)] bg-[var(--bg-surface)] text-xs shadow-2xl">
+            {/* 底栏切换条 */}
+            <div className="flex items-center justify-between border-b border-[var(--border-default)] bg-[var(--bg-elevated)] px-4 py-1">
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => setBottomDrawerMode("timeline")}
+                  className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs transition ${
+                    bottomDrawerMode === "timeline"
+                      ? "bg-amber-500/15 font-semibold text-amber-600 dark:text-amber-400"
+                      : "text-[var(--text-muted)] hover:text-[var(--text-default)]"
+                  }`}
+                >
+                  <Film className="h-3.5 w-3.5" />
+                  <span>影视多轨时间轴</span>
+                  <span className="rounded bg-[var(--bg-surface)] px-1 py-0.2 text-[10px] font-mono text-[var(--text-muted)]">
+                    {timelineShots.length} 镜头
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setBottomDrawerMode("chrono")}
+                  className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs transition ${
+                    bottomDrawerMode === "chrono"
+                      ? "bg-indigo-500/15 font-semibold text-indigo-600 dark:text-indigo-400"
+                      : "text-[var(--text-muted)] hover:text-[var(--text-default)]"
+                  }`}
+                >
+                  <Clock className="h-3.5 w-3.5" />
+                  <span>事件时光轴 & 卡点分析</span>
+                  {bottleneckCount > 0 ? (
+                    <span className="rounded-full bg-rose-500/20 px-1.5 py-0.2 text-[10px] font-bold text-rose-600 animate-pulse">
+                      {bottleneckCount} 卡点
+                    </span>
+                  ) : runLogs.length > 0 ? (
+                    <span className="rounded bg-[var(--bg-surface)] px-1 py-0.2 text-[10px] font-mono text-[var(--text-muted)]">
+                      {runLogs.length}
+                    </span>
+                  ) : null}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setBottomDrawerMode("logs")}
+                  className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs transition ${
+                    bottomDrawerMode === "logs"
+                      ? "bg-slate-500/15 font-semibold text-slate-700 dark:text-slate-300"
+                      : "text-[var(--text-muted)] hover:text-[var(--text-default)]"
+                  }`}
+                >
+                  <Terminal className="h-3.5 w-3.5" />
+                  <span>终端日志</span>
+                </button>
               </div>
+
               <button
                 type="button"
-                onClick={() => setLogPanelOpen(false)}
+                onClick={() => setBottomDrawerCollapsed(true)}
                 className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-[11px] text-[var(--text-muted)] hover:bg-[var(--bg-surface-hover)]"
               >
-                收起 <ChevronDown className="h-3 w-3" />
+                最小化收起 <ChevronDown className="h-3 w-3" />
               </button>
             </div>
-            <div className="flex-1 overflow-y-auto px-4 py-2 font-mono text-[11px] leading-relaxed">
-              {runLogs.length === 0 ? (
-                <div className="flex h-full items-center justify-center text-[var(--text-muted)]">
-                  暂无执行日志，点击「一键生成连贯短片」或任意节点操作即可实时追踪执行轨迹
-                </div>
-              ) : (
-                <div className="space-y-1">
-                  {runLogs.map((entry, idx) => {
-                    const levelBadge =
-                      entry.level === "error"
-                        ? "bg-rose-500/15 text-rose-600 dark:text-rose-400"
-                        : entry.level === "warn"
-                          ? "bg-amber-500/15 text-amber-600 dark:text-amber-400"
-                          : entry.level === "success"
-                            ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
-                            : "bg-slate-500/10 text-[var(--text-muted)]";
-                    const timeStr = entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString() : "";
-                    return (
-                      <div key={`${entry.timestamp}-${idx}`} className="flex items-start gap-2">
-                        <span className="shrink-0 text-[10px] text-[var(--text-muted)]">{timeStr}</span>
-                        <span className={`shrink-0 rounded px-1.5 py-0.2 text-[10px] font-semibold uppercase ${levelBadge}`}>
-                          {entry.level}
-                        </span>
-                        {entry.node_key && (
-                          <button
-                            type="button"
-                            onClick={() => focusNodeByKey(entry.node_key)}
-                            className="shrink-0 rounded bg-indigo-500/10 px-1.5 py-0.2 text-[10px] text-indigo-600 hover:underline dark:text-indigo-400"
-                            title="点击定位画布节点"
-                          >
-                            {entry.node_key}
-                          </button>
-                        )}
-                        <span className="break-all text-[var(--text-primary)]">{entry.message}</span>
-                      </div>
-                    );
-                  })}
-                </div>
+
+            {/* 模式 1：影视剪辑多轨时间线 */}
+            {bottomDrawerMode === "timeline" && (
+              <CinematicTimeline
+                shots={timelineShots}
+                selectedShotId={selectedNodeId || undefined}
+                onSelectShot={(shotId) => focusNodeByKey(shotId)}
+                onOpenPreviewModal={() => setPlayerOpen(true)}
+                onExportDraft={() => void handleExportZip()}
+                isCollapsed={false}
+                onToggleCollapse={() => setBottomDrawerCollapsed(true)}
+              />
+            )}
+
+            {/* 模式 2：事件时光轴 & 阻塞卡点透视 */}
+            {bottomDrawerMode === "chrono" && (
+              <div className="h-72 shrink-0 overflow-hidden">
+                <ChronoEventTracker
+                  logs={runLogs.map((l) => ({
+                    timestamp: l.timestamp,
+                    level: (l.level as any) || "info",
+                    nodeKey: l.node_key,
+                    message: l.message,
+                  }))}
+                  nodeStates={chronoNodeStates}
+                  onFocusNode={(key) => focusNodeByKey(key)}
+                  onRetryNode={(key) => {
+                    void useDramaCanvasStore.getState().retrySingleNode(key).catch(() => {});
+                  }}
+                  onClose={() => setBottomDrawerCollapsed(true)}
+                  selectedLogRunId={selectedLogRunId || undefined}
+                  runsHistory={runsHistory.map((r) => ({
+                    id: r.id,
+                    status: r.status,
+                    createdAt: r.created_at || "",
+                  }))}
+                  onSelectRun={(runId) => void selectRunLogView(runId)}
+                />
+              </div>
+            )}
+
+            {/* 模式 3：原始控制台日志 */}
+            {bottomDrawerMode === "logs" && (
+              <div className="h-52 shrink-0 overflow-y-auto px-4 py-2 font-mono text-[11px] leading-relaxed">
+                {runLogs.length === 0 ? (
+                  <div className="flex h-full items-center justify-center text-[var(--text-muted)]">
+                    暂无执行日志，点击「一键生成连贯短片」或任意节点操作即可实时追踪执行轨迹
+                  </div>
+                ) : (
+                  <div className="space-y-1">
+                    {runLogs.map((entry, idx) => {
+                      const levelBadge =
+                        entry.level === "error"
+                          ? "bg-rose-500/15 text-rose-600 dark:text-rose-400"
+                          : entry.level === "warn"
+                            ? "bg-amber-500/15 text-amber-600 dark:text-amber-400"
+                            : entry.level === "success"
+                              ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
+                              : "bg-slate-500/10 text-[var(--text-muted)]";
+                      const timeStr = entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString() : "";
+                      return (
+                        <div key={`${entry.timestamp}-${idx}`} className="flex items-start gap-2">
+                          <span className="shrink-0 text-[10px] text-[var(--text-muted)]">{timeStr}</span>
+                          <span className={`shrink-0 rounded px-1.5 py-0.2 text-[10px] font-semibold uppercase ${levelBadge}`}>
+                            {entry.level}
+                          </span>
+                          {entry.node_key && (
+                            <button
+                              type="button"
+                              onClick={() => focusNodeByKey(entry.node_key)}
+                              className="shrink-0 rounded bg-indigo-500/10 px-1.5 py-0.2 text-[10px] text-indigo-600 hover:underline dark:text-indigo-400"
+                              title="点击定位画布节点"
+                            >
+                              {entry.node_key}
+                            </button>
+                          )}
+                          <span className="break-all text-[var(--text-primary)]">{entry.message}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* 当底栏折叠时的微型展开条 */}
+        {!isCanvasMaximized && bottomDrawerCollapsed && (
+          <div className="h-6 shrink-0 bg-[var(--bg-elevated)] border-t border-[var(--border-default)] px-4 flex items-center justify-between text-[11px] text-[var(--text-muted)] select-none">
+            <div className="flex items-center gap-3">
+              <span className="flex items-center gap-1 text-amber-500 font-medium">
+                <Film className="h-3 w-3" /> 多轨时间线 ({timelineShots.length})
+              </span>
+              <span>·</span>
+              <span className="flex items-center gap-1 text-indigo-500 font-medium">
+                <Clock className="h-3 w-3" /> 时光轴追踪
+              </span>
+              {bottleneckCount > 0 && (
+                <span className="text-rose-500 font-semibold flex items-center gap-1">
+                  ● 发现 {bottleneckCount} 个卡点阻断
+                </span>
               )}
             </div>
+            <button
+              type="button"
+              onClick={() => setBottomDrawerCollapsed(false)}
+              className="flex items-center gap-1 text-[var(--text-default)] hover:text-indigo-500"
+            >
+              展开底栏 <ChevronUp className="h-3 w-3" />
+            </button>
           </div>
         )}
 

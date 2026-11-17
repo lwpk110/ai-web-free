@@ -217,7 +217,11 @@ const STATUS_STYLE_MAP: Record<
     cls: "z-muted z-border z-text-muted",
     dot: "status-dot-muted",
   },
-  banned: { label: "已封禁", cls: "z-pill-danger", dot: "status-dot-red" },
+  banned: {
+    label: "已封禁",
+    cls: "z-muted z-border z-text-muted",
+    dot: "status-dot-muted",
+  },
   cooling: { label: "熔断冷却", cls: "z-pill-danger", dot: "status-dot-red" },
   unknown: {
     label: "未探测",

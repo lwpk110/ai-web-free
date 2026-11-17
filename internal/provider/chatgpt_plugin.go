@@ -519,6 +519,12 @@ func (p *ChatGPTProvider) ExecuteAccountActionWithOpts(id, action string, headle
 		acct.ImageCooldownUntil = time.Time{}
 		acct.LastError = ""
 		p.pool.SetStatus(acct.ID, accounts.StatusActive)
+		if acct.Email != "" {
+			_ = accounts.RemoveDisabledFromFile("disabled_accounts.txt", acct.Email)
+		}
+		if acct.ChatGPTAccountID != "" {
+			_ = accounts.RemoveDisabledFromFile("disabled_accounts.txt", acct.ChatGPTAccountID)
+		}
 		return map[string]interface{}{
 			"id":     acct.ID,
 			"status": accounts.StatusActive.String(),
@@ -526,6 +532,13 @@ func (p *ChatGPTProvider) ExecuteAccountActionWithOpts(id, action string, headle
 
 	case "disable":
 		p.pool.SetStatus(acct.ID, accounts.StatusDisabled)
+		key := acct.Email
+		if key == "" {
+			key = acct.ChatGPTAccountID
+		}
+		if key != "" {
+			_ = accounts.AppendDisabledToFile("disabled_accounts.txt", key, "管理员手动禁用")
+		}
 		return map[string]interface{}{
 			"id":     acct.ID,
 			"status": accounts.StatusDisabled.String(),
@@ -549,10 +562,20 @@ func (p *ChatGPTProvider) ExecuteAccountActionWithOpts(id, action string, headle
 			}, nil
 		}
 		acct.LastChecked = time.Now()
-		acct.LastError = "Token 续期失败"
-		p.pool.SetStatus(acct.ID, accounts.StatusExpired)
-		p.pool.FinishAccountAction(acct.ID, "refresh", false, "Token 续期失败")
-		return nil, errors.New("Token 续期请求失败")
+		if acct.LastError == "" {
+			acct.LastError = "Token 续期失败"
+		}
+		if chatgpt.LooksLikeAccountBanned(0, acct.LastError) {
+			p.pool.MarkBanned(acct, acct.LastError)
+			p.pool.FinishAccountAction(acct.ID, "refresh", false, "账号已被封禁: "+acct.LastError)
+			if p.auditLog != nil {
+				p.auditLog.RecordEvent("/internal/account-banned", acct.Email, acct.Proxy, "refresh_banned", acct.LastError)
+			}
+		} else {
+			p.pool.SetStatus(acct.ID, accounts.StatusExpired)
+			p.pool.FinishAccountAction(acct.ID, "refresh", false, "Token 续期失败")
+		}
+		return nil, errors.New("Token 续期请求失败: " + acct.LastError)
 
 	case "probe":
 		return p.executeProbe(acct, "")
@@ -634,6 +657,21 @@ func (p *ChatGPTProvider) executeProbe(acct *accounts.Account, taskID string) (m
 			"latency_ms": latency,
 			"message":    "免登 UUID 账号就绪",
 		}, nil
+	}
+	if acct.Token == "" {
+		errMsg := "账号未激活（缺少 AccessToken）"
+		acct.LastError = errMsg
+		p.pool.FinishAccountAction(acct.ID, "probe", false, "缺少 Token")
+		p.pool.MarkExpired(acct, errMsg)
+		if acct.Password != "" && acct.TOTPSecret != "" && p.kamiWorker != nil {
+			p.kamiWorker.Enqueue(acct, "probe_no_token")
+		}
+		return map[string]interface{}{
+			"id":      acct.ID,
+			"ok":      false,
+			"status":  acct.Status.String(),
+			"message": errMsg,
+		}, errors.New(errMsg)
 	}
 	models, httpStatus, err := chatgpt.ListModels(acct.Client, acct)
 	latency := time.Since(start).Milliseconds()

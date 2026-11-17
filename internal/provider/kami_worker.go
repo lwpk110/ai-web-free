@@ -494,6 +494,12 @@ func (w *KamiRenewWorker) processOne(acct *accounts.Account) {
 		acct.LastRenewError = ""
 		acct.LastError = ""
 		acct.LastChecked = now
+		if acct.Email != "" {
+			_ = accounts.RemoveBannedFromFile("banned_accounts.txt", acct.Email)
+		}
+		if acct.ChatGPTAccountID != "" {
+			_ = accounts.RemoveBannedFromFile("banned_accounts.txt", acct.ChatGPTAccountID)
+		}
 		w.finishAction(acct, true, "后台自动续期成功，Token 已更新")
 
 		if w.persistFn != nil {

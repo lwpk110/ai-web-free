@@ -3,6 +3,7 @@ package bootstrap
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -60,6 +61,35 @@ func Init() (*App, error) {
 	profiles := accounts.DefaultProfiles
 	var accs []*accounts.Account
 
+	// 加载已封禁账号持久化名单（防止重启后死号又变绿）
+	bannedMap := accounts.LoadBannedFromFile("banned_accounts.txt")
+	// 加载管理员手动禁用名单（防止重启后失效）
+	disabledMap := accounts.LoadDisabledFromFile("disabled_accounts.txt")
+	// 加载账号粘性代理绑定关系（保证重启后账号出口 IP 不漂移）
+	accountProxyMap := accounts.LoadAccountProxiesFromFile("account_proxies.txt")
+
+	assignStickyProxy := func(acct *accounts.Account) {
+		key := strings.ToLower(strings.TrimSpace(acct.Email))
+		if key == "" {
+			key = strings.ToLower(strings.TrimSpace(acct.ChatGPTAccountID))
+		}
+		if key == "" {
+			key = acct.ID
+		}
+		if savedProxy, ok := accountProxyMap[key]; ok && savedProxy != "" {
+			if proxyPool.Contains(savedProxy) && proxyPool.IsHealthy(savedProxy) {
+				acct.Proxy = savedProxy
+				return
+			}
+		}
+		// 无历史绑定或原绑定节点不可用时分配新节点并建立粘性映射
+		newProxy := proxyPool.Allocate()
+		acct.Proxy = newProxy
+		if key != "" && newProxy != "" {
+			accountProxyMap[key] = newProxy
+		}
+	}
+
 	// 去重 key: chatgpt_account_id (for free/puid) 或 token (for noauth/refresh)
 	seen := make(map[string]bool)
 
@@ -67,7 +97,11 @@ func Init() (*App, error) {
 	for _, t := range accounts.LoadTokensFromFile("access_tokens.txt") {
 		// 从 access_token JWT 解析 chatgpt_account_id 用于去重
 		chatGPTID := accounts.ExtractChatGPTAccountID(t.Token)
+		email := accounts.ExtractEmail(t.Token)
 		key := "access:" + chatGPTID
+		if chatGPTID == "" && email != "" {
+			key = "access:" + email
+		}
 		if seen[key] {
 			continue
 		}
@@ -76,8 +110,37 @@ func Init() (*App, error) {
 		acct := accounts.CreateAccount(t.Token, accounts.TypeFree, profiles)
 		acct.TeamUserID = t.TeamID
 		acct.ChatGPTAccountID = chatGPTID
-		acct.Status = accounts.StatusActive
-		acct.Proxy = proxyPool.Allocate()
+		if email != "" {
+			acct.Email = email
+		}
+		assignStickyProxy(acct)
+
+		banReason := ""
+		disableReason := ""
+		if chatGPTID != "" {
+			banReason = bannedMap[strings.ToLower(chatGPTID)]
+			disableReason = disabledMap[strings.ToLower(chatGPTID)]
+		}
+		if banReason == "" && email != "" {
+			banReason = bannedMap[strings.ToLower(email)]
+		}
+		if disableReason == "" && email != "" {
+			disableReason = disabledMap[strings.ToLower(email)]
+		}
+
+		if banReason != "" {
+			acct.Status = accounts.StatusBanned
+			acct.LastError = banReason
+			acct.Token = ""
+		} else if disableReason != "" {
+			acct.Status = accounts.StatusDisabled
+			acct.LastError = disableReason
+		} else if !acct.ExpiresAt.IsZero() && acct.ExpiresAt.Before(time.Now()) {
+			acct.Status = accounts.StatusExpired
+			acct.LastError = "Token 已过期"
+		} else {
+			acct.Status = accounts.StatusActive
+		}
 		accs = append(accs, acct)
 	}
 
@@ -94,7 +157,7 @@ func Init() (*App, error) {
 		acct := accounts.CreateAccount("", accounts.TypeFree, profiles)
 		acct.RefreshToken = t.Token
 		acct.TeamUserID = t.TeamID
-		acct.Proxy = proxyPool.Allocate()
+		assignStickyProxy(acct)
 		// 立即交换一次获取 access_token
 		if exchangeRefreshToken(acct) {
 			// exchange 成功后从 access_token 解析 chatgpt_account_id
@@ -117,7 +180,7 @@ func Init() (*App, error) {
 		acct := accounts.CreateAccount("", accounts.TypeFree, profiles)
 		acct.SessionToken = t.Token
 		acct.TeamUserID = t.TeamID
-		acct.Proxy = proxyPool.Allocate()
+		assignStickyProxy(acct)
 		// 立即交换一次获取 access_token
 		if exchangeSessionToken(acct) {
 			// exchange 成功后从 access_token 解析 chatgpt_account_id
@@ -138,13 +201,17 @@ func Init() (*App, error) {
 		seen[key] = true
 
 		acct := accounts.CreateAccount(t.Token, accounts.TypeNoAuth, profiles)
-		acct.Proxy = proxyPool.Allocate()
+		assignStickyProxy(acct)
 		acct.Status = accounts.StatusActive
 		accs = append(accs, acct)
 	}
 
 	// 4.5 kami_accounts.txt — 卡密账号（邮箱----密码----2FA密钥）
 	for _, k := range accounts.LoadKamiFromFile("kami_accounts.txt") {
+		emailLower := strings.ToLower(strings.TrimSpace(k.Email))
+		banReason := bannedMap[emailLower]
+		disableReason := disabledMap[emailLower]
+
 		var matched *accounts.Account
 		for _, existing := range accs {
 			if existing.Type != accounts.TypeNoAuth && strings.EqualFold(strings.TrimSpace(existing.Email), strings.TrimSpace(k.Email)) {
@@ -155,17 +222,36 @@ func Init() (*App, error) {
 		if matched != nil {
 			matched.Password = k.Password
 			matched.TOTPSecret = k.TOTPSecret
+			if banReason != "" {
+				matched.Status = accounts.StatusBanned
+				matched.LastError = banReason
+				matched.Token = ""
+			} else if disableReason != "" {
+				matched.Status = accounts.StatusDisabled
+				matched.LastError = disableReason
+			}
 			continue
 		}
 		acct := accounts.CreateAccount("", accounts.TypeFree, profiles)
 		acct.Email = k.Email
 		acct.Password = k.Password
 		acct.TOTPSecret = k.TOTPSecret
-		acct.Proxy = proxyPool.Allocate()
-		acct.Status = accounts.StatusPending
-		acct.LastError = "待浏览器登录提取 Token"
+		assignStickyProxy(acct)
+		if banReason != "" {
+			acct.Status = accounts.StatusBanned
+			acct.LastError = banReason
+		} else if disableReason != "" {
+			acct.Status = accounts.StatusDisabled
+			acct.LastError = disableReason
+		} else {
+			acct.Status = accounts.StatusPending
+			acct.LastError = "待浏览器登录提取 Token"
+		}
 		accs = append(accs, acct)
 	}
+
+	// 回写初始分配或对齐后的粘性代理配置
+	_ = accounts.SaveAccountProxiesToFile("account_proxies.txt", accountProxyMap)
 
 	// 5. FREE_ACCOUNTS — 自动生成 UUID 账号
 	if cfg.FreeAccounts {
@@ -225,6 +311,18 @@ func Init() (*App, error) {
 
 	// 初始化多供应商插件中心
 	chatgptPlugin := provider.NewChatGPTProvider(accountPool, proxyPool, &cfg, renewFn)
+	accountPool.SetOnBanned(func(acct *accounts.Account, reason string) {
+		if acct.Email != "" {
+			_ = accounts.AppendBannedToFile("banned_accounts.txt", acct.Email, reason)
+		}
+		if acct.ChatGPTAccountID != "" {
+			_ = accounts.AppendBannedToFile("banned_accounts.txt", acct.ChatGPTAccountID, reason)
+		}
+		_ = chatgptPlugin.PersistAccessTokens()
+	})
+	if len(bannedMap) > 0 {
+		_ = chatgptPlugin.PersistAccessTokens()
+	}
 	reg := provider.NewRegistry()
 	provider.RegisterDefaultProviders(reg, chatgptPlugin)
 	provider.ApplyConfig(reg, &cfg)
@@ -238,7 +336,7 @@ func Init() (*App, error) {
 		defaultProxy = proxies[0]
 	}
 	auditLog := audit.NewRingBuffer(1000, cfg.AuditLogFile, cfg.AuditLogMaxMB)
-	kamiWorker = provider.NewKamiRenewWorker(accountPool, defaultProxy, true, chatgptPlugin.PersistAccessTokens, auditLog)
+	kamiWorker = provider.NewKamiRenewWorker(accountPool, defaultProxy, cfg.KamiHeadless, chatgptPlugin.PersistAccessTokens, auditLog)
 	chatgptPlugin.SetAuditLog(auditLog)
 	chatgptPlugin.SetKamiWorker(kamiWorker)
 	stopKamiScan := func() {}
@@ -419,19 +517,37 @@ func exchangeRefreshToken(acct *accounts.Account) bool {
 	}
 	result, _, err := chatgpt.GETTokenForRefreshToken(acct.Client, acct.RefreshToken, "")
 	if err != nil {
+		acct.LastError = err.Error()
+		if chatgpt.LooksLikeAccountBanned(0, err.Error()) {
+			acct.Status = accounts.StatusBanned
+		}
 		return false
 	}
 	// 优先尝试 struct 形式 (*OpenAIAccessTokenWithSession 等)
 	if r, ok := result.(interface{ GetAccessToken() string }); ok {
 		if at := r.GetAccessToken(); at != "" {
 			acct.Token = at
+			acct.LastError = ""
 			return true
 		}
 	}
 	// fallback: map[string]interface{} (旧 API 直接返回 map)
 	if data, ok := result.(map[string]interface{}); ok {
+		if errVal, _ := data["error"].(string); errVal != "" {
+			desc, _ := data["error_description"].(string)
+			fullErr := errVal
+			if desc != "" {
+				fullErr = fmt.Sprintf("%s: %s", errVal, desc)
+			}
+			acct.LastError = fullErr
+			if chatgpt.LooksLikeAccountBanned(0, fullErr) {
+				acct.Status = accounts.StatusBanned
+			}
+			return false
+		}
 		if accessToken, ok := data["access_token"].(string); ok && accessToken != "" {
 			acct.Token = accessToken
+			acct.LastError = ""
 			return true
 		}
 	}

@@ -113,6 +113,12 @@ var accountBannedKeywords = []string{
 	"账号已封禁",
 	"账号封禁",
 	"已被停用",
+	"已被删除或停用",
+	"该账户已被删除或停用",
+	"账户已被删除",
+	"deleted or deactivated",
+	"you do not have an account because it has been deleted or deactivated",
+	"error_code: account_deactivated",
 }
 
 var cloudflareWAFKeywords = []string{

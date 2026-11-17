@@ -35,16 +35,22 @@ func ListModels(client httpclient.HttpClient, account *accounts.Account) ([]Mode
 		return nil, http.StatusBadGateway, errors.New("ChatGPT models request failed")
 	}
 	defer response.Body.Close()
+	const maxModelsResponseSize = 4 << 20
+	body, err := io.ReadAll(io.LimitReader(response.Body, maxModelsResponseSize+1))
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		status := response.StatusCode
 		if status < 400 || status > 599 {
 			status = http.StatusBadGateway
 		}
+		detail := strings.TrimSpace(string(body))
+		if len(detail) > 1000 {
+			detail = detail[:1000]
+		}
+		if detail != "" {
+			return nil, status, fmt.Errorf("ChatGPT models request failed (HTTP %d): %s", response.StatusCode, detail)
+		}
 		return nil, status, fmt.Errorf("ChatGPT models request failed (HTTP %d)", response.StatusCode)
 	}
-
-	const maxModelsResponseSize = 4 << 20
-	body, err := io.ReadAll(io.LimitReader(response.Body, maxModelsResponseSize+1))
 	if err != nil || len(body) > maxModelsResponseSize {
 		return nil, http.StatusBadGateway, errors.New("failed to read ChatGPT models response")
 	}

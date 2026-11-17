@@ -16,8 +16,10 @@ import (
 	"time"
 
 	"ai-web-free/internal/accounts"
+	"ai-web-free/internal/chatgpt"
 
 	"github.com/chromedp/cdproto/network"
+	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/chromedp"
 	"github.com/google/uuid"
 )
@@ -230,6 +232,8 @@ func loginSingleAccountCDP(chromePath, accountID, email, password, totpSecret, p
 		chromedp.NoDefaultBrowserCheck,
 		chromedp.Flag("incognito", true),
 		chromedp.Flag("disable-blink-features", "AutomationControlled"),
+		chromedp.Flag("user-agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"),
+		chromedp.Flag("lang", "zh-CN,zh,en-US,en"),
 		chromedp.WindowSize(1280, 800),
 	)
 	if runtime.GOOS == "linux" {
@@ -324,6 +328,18 @@ func loginSingleAccountCDP(chromePath, accountID, email, password, totpSecret, p
 		outcome.Error = fmt.Sprintf("启用网络监听失败: %v", err)
 		return outcome
 	}
+
+	// 注入反反爬 / 抹除 webdriver 特征脚本，防止无头模式被 Cloudflare 拦截
+	stealthScript := `
+		Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+		window.chrome = window.chrome || { runtime: {} };
+		if (!navigator.languages || navigator.languages.length === 0) {
+			Object.defineProperty(navigator, 'languages', {get: () => ['zh-CN', 'zh', 'en-US', 'en']});
+		}
+	`
+	_, _ = chromedp.Call(ctx, page.AddScriptToEvaluateOnNewDocument, page.AddScriptToEvaluateOnNewDocumentParams{
+		Source: stealthScript,
+	})
 	reportPhase("open_login")
 	if err := chromedp.Do(ctx, chromedp.Navigate("https://chatgpt.com/auth/login")); err != nil {
 		outcome.Error = fmt.Sprintf("打开登录页失败: %v", err)
@@ -355,8 +371,32 @@ func loginSingleAccountCDP(chromePath, accountID, email, password, totpSecret, p
 			lastStepError = "提交邮箱失败: " + err.Error()
 		}
 	} else {
+		if deact := detectPageDeactivatedError(ctx); deact != "" {
+			outcome.Error = deact
+			log.Printf("[kami-login] account deactivated/banned account=%s error=%s", email, deact)
+			return outcome
+		}
+		if chatgpt.LooksLikeAccountBanned(0, err.Error()) {
+			outcome.Error = err.Error()
+			log.Printf("[kami-login] account deactivated/banned account=%s error=%s", email, err.Error())
+			return outcome
+		}
 		lastStepError = "邮箱输入框未出现: " + err.Error() + "; " + loginPageState(ctx)
+		if chatgpt.LooksLikeAccountBanned(0, lastStepError) {
+			outcome.Error = lastStepError
+			return outcome
+		}
+		outcome.Error = lastStepError
 		log.Printf("[kami-login] email step failed account=%s error=%s", email, lastStepError)
+		return outcome
+	}
+
+	// 提交邮箱后快速检测是否直接出现账号停用错误
+	time.Sleep(500 * time.Millisecond)
+	if deact := detectPageDeactivatedError(ctx); deact != "" {
+		outcome.Error = deact
+		log.Printf("[kami-login] account deactivated/banned after email step account=%s error=%s", email, deact)
+		return outcome
 	}
 
 	// 2. 填写密码并点击 Continue
@@ -368,8 +408,32 @@ func loginSingleAccountCDP(chromePath, accountID, email, password, totpSecret, p
 			lastStepError = "提交密码失败: " + err.Error()
 		}
 	} else {
+		if deact := detectPageDeactivatedError(ctx); deact != "" {
+			outcome.Error = deact
+			log.Printf("[kami-login] account deactivated/banned after password wait account=%s error=%s", email, deact)
+			return outcome
+		}
+		if chatgpt.LooksLikeAccountBanned(0, err.Error()) {
+			outcome.Error = err.Error()
+			log.Printf("[kami-login] account deactivated/banned account=%s error=%s", email, err.Error())
+			return outcome
+		}
 		lastStepError = "密码输入框未出现: " + err.Error() + "; " + loginPageState(ctx)
+		if chatgpt.LooksLikeAccountBanned(0, lastStepError) {
+			outcome.Error = lastStepError
+			return outcome
+		}
+		outcome.Error = lastStepError
 		log.Printf("[kami-login] password step failed account=%s error=%s", email, lastStepError)
+		return outcome
+	}
+
+	// 提交密码后快速检测是否直接出现账号停用错误
+	time.Sleep(500 * time.Millisecond)
+	if deact := detectPageDeactivatedError(ctx); deact != "" {
+		outcome.Error = deact
+		log.Printf("[kami-login] account deactivated/banned after password submit account=%s error=%s", email, deact)
+		return outcome
 	}
 
 	// 3. 填写 2FA TOTP
@@ -388,6 +452,10 @@ func loginSingleAccountCDP(chromePath, accountID, email, password, totpSecret, p
 			time.Sleep(500 * time.Millisecond)
 			_ = clickContinueButton(ctx)
 		}
+	} else if chatgpt.LooksLikeAccountBanned(0, err.Error()) {
+		outcome.Error = err.Error()
+		log.Printf("[kami-login] account deactivated/banned during totp step account=%s error=%s", email, err.Error())
+		return outcome
 	}
 
 	// 4. 轮询等待登录完成并提取 Token
@@ -399,6 +467,11 @@ func loginSingleAccountCDP(chromePath, accountID, email, password, totpSecret, p
 	for time.Now().Before(deadline) {
 		if tok, _ := getToken(); tok != "" {
 			break
+		}
+		if deact := detectPageDeactivatedError(ctx); deact != "" {
+			outcome.Error = deact
+			log.Printf("[kami-login] account deactivated/banned during session probe account=%s error=%s", email, deact)
+			return outcome
 		}
 
 		currentURL, _ := chromedp.Run(ctx, chromedp.Location())
@@ -451,6 +524,10 @@ func loginSingleAccountCDP(chromePath, accountID, email, password, totpSecret, p
 
 	accessToken, userID := getToken()
 	if accessToken == "" {
+		if deact := detectPageDeactivatedError(ctx); deact != "" {
+			outcome.Error = deact
+			return outcome
+		}
 		currentURL, urlErr := chromedp.Run(ctx, chromedp.Location())
 		if currentURL != "" {
 			lastKnownURL = currentURL
@@ -510,6 +587,32 @@ func readSessionFromNewTab(parent context.Context) (string, error) {
 	return chromedp.Run(ctx, chromedp.Evaluate[string]("document.body.innerText"))
 }
 
+func detectPageDeactivatedError(ctx context.Context) string {
+	errText, err := chromedp.Run(ctx, chromedp.Evaluate[string](`(() => {
+		const title = (document.title || '').toLowerCase();
+		const body = (document.body?.innerText || '').toLowerCase();
+		const url = (window.location.href || '').toLowerCase();
+		const combined = title + ' ' + body + ' ' + url;
+		if (combined.includes('account_deactivated') ||
+			combined.includes('已被删除或停用') ||
+			combined.includes('该账户已被删除或停用') ||
+			combined.includes('账户已被删除') ||
+			(combined.includes('身份验证错误') && (combined.includes('删除') || combined.includes('停用') || combined.includes('没有账户'))) ||
+			(combined.includes('authentication error') && (combined.includes('deleted') || combined.includes('deactivated') || combined.includes('not have an account'))) ||
+			combined.includes('deleted or deactivated') ||
+			combined.includes('account has been deactivated') ||
+			combined.includes('user has been deactivated') ||
+			combined.includes('permanently banned')) {
+			return 'account_deactivated: 该账户已被删除或停用 (error_code: account_deactivated)';
+		}
+		return '';
+	})()`))
+	if err == nil && errText != "" {
+		return errText
+	}
+	return ""
+}
+
 func waitVisible(ctx context.Context, selector string, timeout time.Duration, headless bool, email string, reportPhase func(string), resumePhase string) error {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -517,16 +620,33 @@ func waitVisible(ctx context.Context, selector string, timeout time.Duration, he
 	expression := `(() => {
 		const title = (document.title || '').toLowerCase();
 		const body = (document.body?.innerText || '').toLowerCase();
+		const url = (window.location.href || '').toLowerCase();
+		const combined = title + ' ' + body + ' ' + url;
+		const deactivated = combined.includes('account_deactivated') ||
+			combined.includes('已被删除或停用') ||
+			combined.includes('该账户已被删除或停用') ||
+			combined.includes('账户已被删除') ||
+			(combined.includes('身份验证错误') && (combined.includes('删除') || combined.includes('停用') || combined.includes('没有账户'))) ||
+			(combined.includes('authentication error') && (combined.includes('deleted') || combined.includes('deactivated') || combined.includes('not have an account'))) ||
+			combined.includes('deleted or deactivated') ||
+			combined.includes('account has been deactivated') ||
+			combined.includes('user has been deactivated') ||
+			combined.includes('permanently banned');
 		return {
 			visible: Array.from(document.querySelectorAll(` + string(selectorJSON) + `)).some(el => el.offsetParent !== null),
-			challenge: /please wait|请稍候|checking your browser|verify you are human|验证您是人类/.test(title + ' ' + body) || Boolean(document.querySelector('#challenge-form, .cf-browser-verification, iframe[src*="challenges.cloudflare.com"]'))
+			challenge: /checking your browser|verify you are human|验证您是人类/.test(combined) || Boolean(document.querySelector('#challenge-form, .cf-browser-verification, iframe[src*="challenges.cloudflare.com"]')),
+			deactivated: deactivated
 		};
 	})()`
 	challengeReported := false
+	challengeStartTime := time.Time{}
 	for {
 		state, err := chromedp.Run(cctx, chromedp.Evaluate[map[string]bool](expression))
 		if err != nil {
 			return err
+		}
+		if state["deactivated"] {
+			return errors.New("account_deactivated: 该账户已被删除或停用 (error_code: account_deactivated)")
 		}
 		if state["visible"] {
 			if challengeReported && reportPhase != nil && resumePhase != "" {
@@ -535,16 +655,25 @@ func waitVisible(ctx context.Context, selector string, timeout time.Duration, he
 			return nil
 		}
 		if state["challenge"] {
-			if headless {
-				return errors.New("检测到浏览器安全验证页，请关闭无头模式并手动完成验证")
+			if challengeStartTime.IsZero() {
+				challengeStartTime = time.Now()
 			}
 			if !challengeReported {
-				log.Printf("[kami-login] waiting for manual browser verification account=%s", email)
 				challengeReported = true
 				if reportPhase != nil {
 					reportPhase("waiting_challenge")
 				}
+				if !headless {
+					log.Printf("[kami-login] waiting for manual browser verification account=%s", email)
+				}
 			}
+			// 无头模式下给予 Cloudflare / Turnstile 自动验盾和页面重定向 8 秒宽限缓冲；
+			// 期间若页面跳转并展示停用/封号信息，前序 state["deactivated"] 立即触发返回；
+			if headless && time.Since(challengeStartTime) > 8*time.Second {
+				return errors.New("检测到浏览器安全验证页，请关闭无头模式并手动完成验证")
+			}
+		} else {
+			challengeStartTime = time.Time{}
 		}
 		select {
 		case <-cctx.Done():
@@ -595,13 +724,14 @@ func loginPageState(ctx context.Context) string {
 		buttons: Array.from(document.querySelectorAll('button'))
 			.filter(el => el.offsetParent !== null)
 			.slice(0, 8)
-			.map(el => (el.innerText || '').trim().slice(0, 64))
+			.map(el => (el.innerText || '').trim().slice(0, 64)),
+		snippet: (document.body?.innerText || '').slice(0, 1000).replace(/\s+/g, ' ')
 	}))()`))
 	if err != nil {
 		return "页面摘要不可用: " + err.Error()
 	}
-	if len(state) > 800 {
-		state = state[:800]
+	if len(state) > 2000 {
+		state = state[:2000]
 	}
 	return "页面摘要=" + state
 }
@@ -907,6 +1037,12 @@ func (p *ChatGPTProvider) loginKamiAccountsWithProgress(targets []*accounts.Acco
 			p.pool.SetStatus(acct.ID, accounts.StatusActive)
 		} else if !o.OK && o.Error != "" {
 			acct.LastError = o.Error
+			if chatgpt.LooksLikeAccountBanned(0, o.Error) {
+				p.pool.MarkBanned(acct, o.Error)
+				if p.auditLog != nil {
+					p.auditLog.RecordEvent("/internal/account-banned", acct.Email, acct.Proxy, "kami_login_banned", o.Error)
+				}
+			}
 		}
 	}
 

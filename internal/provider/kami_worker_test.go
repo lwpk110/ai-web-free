@@ -232,3 +232,65 @@ func TestKamiRenewWorkerCancelAllQueued(t *testing.T) {
 		t.Fatalf("expected only running account to complete, got %+v", w.Stats())
 	}
 }
+
+func TestKamiRenewWorkerAccountDeactivatedBanned(t *testing.T) {
+	pool := accounts.NewPool(nil)
+	auditLog := audit.NewRingBuffer(50, "", 0)
+
+	acct := accounts.CreateAccount("", accounts.TypeFree, accounts.DefaultProfiles)
+	acct.ID = "kw-deact-1"
+	acct.Email = "dead@example.com"
+	acct.Password = "p"
+	acct.TOTPSecret = "SECRET"
+	acct.Status = accounts.StatusExpired
+	pool.AddAccount(acct)
+
+	w := NewKamiRenewWorker(pool, "", true, nil, auditLog)
+	w.SetLoginExecutor(func(a *accounts.Account, _ string, _ bool) KamiLoginOutcome {
+		return KamiLoginOutcome{
+			Email: a.Email,
+			OK:    false,
+			Error: "account_deactivated: 该账户已被删除或停用 (error_code: account_deactivated)",
+		}
+	})
+	w.Start()
+	defer w.Stop()
+
+	if !w.Enqueue(acct, "expired_test") {
+		t.Fatalf("expected initial enqueue to succeed")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		st := w.Stats()
+		if !st.Running && st.QueueLength == 0 && st.TotalFailed == 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if acct.Status != accounts.StatusBanned {
+		t.Fatalf("expected account status to become StatusBanned, got %v", acct.Status)
+	}
+	if acct.RenewState != "" || !acct.RenewCooldownUntil.IsZero() {
+		t.Fatalf("expected renew backoff state cleared for banned account, got state=%q until=%v", acct.RenewState, acct.RenewCooldownUntil)
+	}
+
+	// Banned account must NEVER be allowed into renew worker again
+	if w.Enqueue(acct, "retry_banned") {
+		t.Fatalf("expected banned account to be rejected from renew queue")
+	}
+
+	entries, _ := auditLog.Query("all", "", 10)
+	foundBannedLog := false
+	for _, entry := range entries {
+		if entry.Note == "kami_renew_banned" {
+			foundBannedLog = true
+			break
+		}
+	}
+	if !foundBannedLog {
+		t.Fatalf("expected kami_renew_banned audit event recorded")
+	}
+}
+

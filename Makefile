@@ -66,51 +66,18 @@ dev-frontend: ## 仅启动 Vite 前端热更新 (默认 WEB_PORT=5173，代理�
 		cd web && VITE_API_TARGET="http://localhost:$(PORT)" npm run dev -- --port $(WEB_PORT) \
 	'
 
-dev: stop ## 本地联调模式：自动停止已有进程，并同时启动 Go 后端与 Vite 前端热更新 (默认 PORT=18080, WEB_PORT=5173)
-	@$(BASH_EXE) -c '\
-		set -e; \
-		if [ ! -d "web/node_modules" ]; then \
-			echo ">> 未检测到 web/node_modules，正在自动执行 npm install..."; \
-			(cd web && npm install); \
-		fi; \
-		cleanup() { \
-			kill $$BACKEND_PID 2>/dev/null || true; \
-			if command -v taskkill >/dev/null 2>&1; then \
-				taskkill //F //IM $(BIN) 2>/dev/null || true; \
-				taskkill //F //IM ai-web-free.exe 2>/dev/null || true; \
-			else \
-				kill -9 $$BACKEND_PID 2>/dev/null || true; \
-				pkill -P $$BACKEND_PID 2>/dev/null || true; \
-				pkill -x $(BIN) 2>/dev/null || true; \
-			fi; \
-		}; \
-		trap cleanup EXIT INT TERM; \
-		echo ">> 启动 Go 后端: http://localhost:$(PORT)"; \
-		SERVER_PORT=$(PORT) go run . & \
-		BACKEND_PID=$$!; \
-		echo ">> 启动 Vite 前端: http://localhost:$(WEB_PORT) (代理至 http://localhost:$(PORT))"; \
-		cd web && VITE_API_TARGET="http://localhost:$(PORT)" npm run dev -- --port $(WEB_PORT) \
-	'
+dev: ## 本地联调模式：自动停止已有进程，并同时启动 Go 后端与 Vite 前端热更新 (默认 PORT=18080, WEB_PORT=5173)
+ifeq ($(OS),Windows_NT)
+	@powershell.exe -ExecutionPolicy Bypass -File scripts/dev.ps1 -Port $(PORT) -WebPort $(WEB_PORT)
+else
+	@PORT=$(PORT) WEB_PORT=$(WEB_PORT) bash scripts/dev.sh
+endif
 
 stop: ## 停止本项目的本地运行进程
 ifeq ($(OS),Windows_NT)
-	@$(BASH_EXE) -c '\
-		taskkill //F //IM $(BIN) 2>/dev/null || true; \
-		taskkill //F //IM ai-web-free.exe 2>/dev/null || true; \
-		powershell.exe -NoProfile -Command "Get-NetTCPConnection -LocalPort $(PORT),$(WEB_PORT),5174 -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object { Stop-Process -Id \$$_ -Force -ErrorAction SilentlyContinue }" 2>/dev/null || true; \
-		echo "已停止本地项目进程"; \
-	'
+	@powershell.exe -ExecutionPolicy Bypass -File scripts/stop.ps1 -Port $(PORT) -WebPort $(WEB_PORT)
 else
-	@pkill -x "$(BIN)" 2>/dev/null || true
-	@pkill -f "vite" 2>/dev/null || true
-	@pkill -f "go run \." 2>/dev/null || true
-	@if command -v lsof >/dev/null 2>&1; then \
-		PIDS=$$(lsof -ti :$(PORT) -ti :$(WEB_PORT) -ti :5174 2>/dev/null); \
-		if [ -n "$$PIDS" ]; then echo "$$PIDS" | xargs kill -9 2>/dev/null || true; fi; \
-	elif command -v fuser >/dev/null 2>&1; then \
-		fuser -k $(PORT)/tcp $(WEB_PORT)/tcp 5174/tcp 2>/dev/null || true; \
-	fi
-	@echo "已停止本地项目进程"
+	@PORT=$(PORT) WEB_PORT=$(WEB_PORT) bash scripts/stop.sh
 endif
 
 clean: ## 清理编译产物与临时日志

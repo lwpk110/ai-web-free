@@ -449,9 +449,9 @@ tr:hover .hover-reveal,
 }
 
 .openui-scope .status-pill.status-banned {
-  background: var(--pill-danger-bg);
-  color: var(--pill-danger-text);
-  border-color: var(--pill-danger-border);
+  background: var(--bg-muted);
+  color: var(--text-muted);
+  border-color: var(--hairline);
 }
 
 .openui-scope .status-pill.status-disabled {

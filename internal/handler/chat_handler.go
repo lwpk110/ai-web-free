@@ -1016,7 +1016,9 @@ func (h *ChatHandler) ChatGPTConversation(c *gin.Context) {
 		}
 		turnStile, status, callErr := chatgpt.InitSentinel(convClient, acct, acct.Proxy, 0)
 		if callErr != nil {
-			if status == http.StatusUnauthorized {
+			if chatgpt.LooksLikeAccountBanned(status, callErr.Error()) {
+				h.accountPool.MarkBanned(acct, callErr.Error())
+			} else if status == http.StatusUnauthorized {
 				h.accountPool.MarkExpired(acct, callErr.Error())
 			}
 			return AttemptOutcome{StatusCode: status, Err: callErr}

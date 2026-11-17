@@ -10,6 +10,7 @@ ai-web-free
 aurora
 tools/authenticator/.proxies.txt.swp
 .env
+.env*
 *.har
 .idea/
 /logs/

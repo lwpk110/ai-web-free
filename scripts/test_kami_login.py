@@ -79,5 +79,26 @@ class TestKamiLogin(unittest.TestCase):
             server.server_close()
 
 
+    def test_check_page_deactivated(self):
+        class MockPage:
+            def __init__(self, title, text):
+                self._title = title
+                self._text = text
+
+            def title(self):
+                return self._title
+
+            def inner_text(self, selector, timeout=1000):
+                return self._text
+
+        normal_page = MockPage("ChatGPT", "Welcome back! Enter your email")
+        self.assertEqual(kami_login.check_page_deactivated(normal_page), "")
+
+        deact_page = MockPage("身份验证错误", "你没有账户，因为该账户已被删除或停用。error_code: account_deactivated")
+        res = kami_login.check_page_deactivated(deact_page)
+        self.assertIn("account_deactivated", res)
+        self.assertIn("已被删除或停用", res)
+
+
 if __name__ == "__main__":
     unittest.main()

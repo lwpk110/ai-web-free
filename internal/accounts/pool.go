@@ -32,6 +32,9 @@ type Pool struct {
 	// 上游模型目录内存缓存（按探测/拉取结果合并去重，受 p.mu 保护）
 	cachedModels   []string
 	modelsCachedAt time.Time
+
+	// 账号永久封禁回调（用于持久化 banned 状态并剔除死 Token）
+	onBanned func(acct *Account, reason string)
 }
 
 // typeIndex 返回 AccountType 在 cursors 中的索引
@@ -175,13 +178,19 @@ func (p *Pool) MarkExpired(acct *Account, reason string) bool {
 	return true
 }
 
+// SetOnBanned 注册账号永久封禁时的全局回调。
+func (p *Pool) SetOnBanned(fn func(acct *Account, reason string)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.onBanned = fn
+}
+
 // MarkBanned 将账号标记为永久封禁/停用并终止自动续期队列跟踪。
 func (p *Pool) MarkBanned(acct *Account, reason string) bool {
 	if acct == nil {
 		return false
 	}
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	acct.Status = StatusBanned
 	acct.FailedCalls++
 	acct.LastChecked = time.Now()
@@ -191,6 +200,12 @@ func (p *Pool) MarkBanned(acct *Account, reason string) bool {
 	acct.RenewCooldownUntil = time.Time{}
 	if reason != "" {
 		acct.LastError = reason
+	}
+	callback := p.onBanned
+	p.mu.Unlock()
+
+	if callback != nil {
+		callback(acct, reason)
 	}
 	return true
 }
@@ -863,6 +878,9 @@ func (p *Pool) ExportAccessTokens() []string {
 	for _, list := range [][]*Account{p.free, p.puid} {
 		for _, a := range list {
 			if a.IsTemporary || a.Token == "" || a.RefreshToken != "" || a.SessionToken != "" {
+				continue
+			}
+			if a.Status == StatusBanned || a.Status == StatusDisabled {
 				continue
 			}
 			line := a.Token

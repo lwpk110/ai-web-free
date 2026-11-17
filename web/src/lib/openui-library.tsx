@@ -69,7 +69,7 @@ function classifyAccountReasonBadge(acc: AccountView): {
       err
     )
   ) {
-    return { label: "永久封禁", tone: "danger" };
+    return { label: "永久封禁", tone: "muted" };
   }
   if (
     /http 403|cloudflare|cf-ray|just a moment|sentinel|waf|turnstile/.test(err)

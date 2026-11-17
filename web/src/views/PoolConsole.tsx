@@ -119,7 +119,7 @@ export const PoolConsole: React.FC<{
   const trackedLoginIdRef = useRef<string | null>(null);
   const trackedProbeIdRef = useRef<string | null>(null);
   const [updatingProxy, setUpdatingProxy] = useState(false);
-  const [headlessLogin, setHeadlessLogin] = useState(true);
+  const [headlessLogin, setHeadlessLogin] = useState(false);
   const [proxyNodes, setProxyNodes] = useState<ProxyNodeStatus[]>([]);
   const [bulkProxyUrl, setBulkProxyUrl] = useState("");
   const [selectedAccountIds, setSelectedAccountIds] = useState<Set<string>>(
@@ -1795,6 +1795,7 @@ export const PoolConsole: React.FC<{
                     const isRefreshing =
                       acc.active_action === "refresh" ||
                       actionLoadingKey === `${acc.id}:refresh`;
+                    const isBanned = acc.status === "banned";
                     const ttlBar = getTtlBar(acc.remaining_days);
                     const subMeta = [
                       acc.token_preview || "",
@@ -1804,7 +1805,14 @@ export const PoolConsole: React.FC<{
                       .join(" · ");
 
                     return (
-                      <tr key={acc.id} className="z-row-hover group">
+                      <tr
+                        key={acc.id}
+                        className={`z-row-hover group ${
+                          isBanned
+                            ? "opacity-60 bg-zinc-500/5 text-zinc-400 dark:text-zinc-500"
+                            : ""
+                        }`}
+                      >
                         <td className="py-3 px-2 text-center">
                           <input
                             type="checkbox"
@@ -1821,13 +1829,20 @@ export const PoolConsole: React.FC<{
                               style={{
                                 background: "var(--bg-muted)",
                                 border: "1px solid var(--hairline)",
+                                opacity: isBanned ? 0.6 : 1,
                               }}
                             >
                               {getAvatarInitial(acc)}
                             </div>
                             <div className="min-w-0">
                               <div className="flex items-center gap-1.5">
-                                <span className="font-mono-num font-medium truncate max-w-[230px]">
+                                <span
+                                  className={`font-mono-num font-medium truncate max-w-[230px] ${
+                                    isBanned
+                                      ? "text-zinc-400 dark:text-zinc-500"
+                                      : ""
+                                  }`}
+                                >
                                   {acc.email ||
                                     acc.chatgpt_account_id ||
                                     acc.id}
@@ -1887,7 +1902,9 @@ export const PoolConsole: React.FC<{
                             <div
                               className="mt-1 max-w-[240px] truncate"
                               style={{
-                                color: acc.last_action_ok
+                                color: isBanned
+                                  ? "var(--text-muted)"
+                                  : acc.last_action_ok
                                   ? "var(--pill-success-text)"
                                   : "var(--pill-danger-text)",
                               }}
@@ -1899,7 +1916,11 @@ export const PoolConsole: React.FC<{
                           {showErrTip && (
                             <div
                               className="mt-1 max-w-[240px] truncate"
-                              style={{ color: "var(--pill-danger-text)" }}
+                              style={{
+                                color: isBanned
+                                  ? "var(--text-muted)"
+                                  : "var(--pill-danger-text)",
+                              }}
                               title={errTip}
                             >
                               {errTip}
@@ -1923,7 +1944,9 @@ export const PoolConsole: React.FC<{
                                 className="h-full rounded-full"
                                 style={{
                                   width: `${ttlBar.pct}%`,
-                                  background: ttlBar.color,
+                                  background: isBanned
+                                    ? "var(--text-muted)"
+                                    : ttlBar.color,
                                 }}
                               />
                             </div>

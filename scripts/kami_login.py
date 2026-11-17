@@ -128,6 +128,29 @@ def _extract_jwt_meta(access_token: str):
     return chatgpt_account_id, expires_at
 
 
+def check_page_deactivated(page) -> str:
+    """检查页面是否渲染了账号停用/删除/封禁等明确错误"""
+    try:
+        title = (page.title() or "").lower()
+        body = (page.inner_text("body", timeout=1000) or "").lower()
+        combined = f"{title} {body}"
+        if any(kw in combined for kw in [
+            "account_deactivated",
+            "已被删除或停用",
+            "该账户已被删除或停用",
+            "账户已被删除",
+            "you do not have an account because it has been deleted or deactivated",
+            "deleted or deactivated",
+            "account has been deactivated",
+            "user has been deactivated",
+            "permanently banned",
+        ]):
+            return "account_deactivated: 该账户已被删除或停用 (error_code: account_deactivated)"
+    except Exception:
+        pass
+    return ""
+
+
 def _login_single_account(context, page, account_info, timeout=120, quiet=False):
     email = account_info["email"]
     password = account_info["password"]
@@ -190,7 +213,15 @@ def _login_single_account(context, page, account_info, timeout=120, quiet=False)
         time.sleep(0.5)
         page.locator('button[type="submit"], button:has-text("Continue")').first.click()
     except Exception as e:
+        deact = check_page_deactivated(page)
+        if deact:
+            raise RuntimeError(deact)
         log(f"[!] 邮箱输入提示: {e}")
+
+    time.sleep(1)
+    deact = check_page_deactivated(page)
+    if deact:
+        raise RuntimeError(deact)
 
     log("[*] 等待密码输入框...")
     try:
@@ -202,7 +233,15 @@ def _login_single_account(context, page, account_info, timeout=120, quiet=False)
         time.sleep(0.5)
         page.locator('button[type="submit"], button:has-text("Continue")').first.click()
     except Exception as e:
+        deact = check_page_deactivated(page)
+        if deact:
+            raise RuntimeError(deact)
         log(f"[!] 密码提交提示: {e}")
+
+    time.sleep(1)
+    deact = check_page_deactivated(page)
+    if deact:
+        raise RuntimeError(deact)
 
     log("[*] 检查是否需要 2FA 验证码...")
     time.sleep(3)
@@ -246,6 +285,10 @@ def _login_single_account(context, page, account_info, timeout=120, quiet=False)
     while time.time() - start_time < timeout:
         if captured["access_token"]:
             break
+
+        deact = check_page_deactivated(page)
+        if deact:
+            raise RuntimeError(deact)
 
         current_url = page.url
         if current_url != last_url:
