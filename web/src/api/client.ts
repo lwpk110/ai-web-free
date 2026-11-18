@@ -1879,7 +1879,7 @@ export async function syncServerPromptFavorites(ids: string[]): Promise<string[]
 // ─── 免费多模态 API (TTS / 声音克隆 / 声音设计 / AI 视频生成) ─────────────
 
 export async function fetchVoices(): Promise<VoicesCatalogResponse> {
-  const res = await fetch("/v1/audio/voices");
+  const res = await adminFetch("/admin/api/v1/audio/voices");
   const data = await res.json();
   if (!res.ok) {
     throw new Error(data?.error?.message || `Fetch voices failed: HTTP ${res.status}`);
@@ -1904,7 +1904,7 @@ export async function synthesizeSpeechWithMeta(
   if (options?.preferProvider) {
     headers["X-Prefer-Provider"] = options.preferProvider;
   }
-  const res = await fetch("/v1/audio/speech", {
+  const res = await adminFetch("/admin/api/v1/audio/speech", {
     method: "POST",
     headers,
     signal,
@@ -1950,9 +1950,9 @@ export async function synthesizeSpeech(
 export function getVoicePreviewUrl(voiceId: string): string {
   const trimmed = voiceId.trim();
   if (trimmed.includes("/")) {
-    return `/v1/audio/voice-preview?id=${encodeURIComponent(trimmed)}`;
+    return `/admin/api/v1/audio/voice-preview?id=${encodeURIComponent(trimmed)}`;
   }
-  return `/v1/audio/voices/${encodeURIComponent(trimmed)}/preview`;
+  return `/admin/api/v1/audio/voices/${encodeURIComponent(trimmed)}/preview`;
 }
 
 export async function fetchVoicePreview(
@@ -1960,8 +1960,12 @@ export async function fetchVoicePreview(
   previewUrl?: string,
   signal?: AbortSignal,
 ): Promise<{ blob: Blob; cacheStatus: string; provider: string; voice: string }> {
-  const targetUrl = previewUrl || getVoicePreviewUrl(voiceId);
-  const res = await fetch(targetUrl, { signal });
+  let targetUrl = previewUrl || getVoicePreviewUrl(voiceId);
+  if (targetUrl.startsWith("/v1/audio/")) {
+    targetUrl = `/admin/api/v1/audio/${targetUrl.slice("/v1/audio/".length)}`;
+  }
+  const isAdminRoute = targetUrl.startsWith("/admin/api/v1/");
+  const res = isAdminRoute ? await adminFetch(targetUrl, { signal }) : await fetch(targetUrl, { signal });
   if (!res.ok) {
     let errMsg = `试听请求失败: HTTP ${res.status}`;
     try {
@@ -1987,7 +1991,7 @@ export async function pullLocalVoices(options?: {
   force?: boolean;
   limit?: number;
 }): Promise<PullLocalVoicesResult> {
-  const res = await fetch("/v1/audio/voices/pull-local", {
+  const res = await adminFetch("/admin/api/v1/audio/voices/pull-local", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -2010,7 +2014,7 @@ export async function voiceDesign(
   previewText?: string,
   preferredName?: string,
 ): Promise<{ voice_id: string; preview_url: string }> {
-  const res = await fetch("/v1/audio/voices/design", {
+  const res = await adminFetch("/admin/api/v1/audio/voices/design", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -2030,7 +2034,7 @@ export async function voiceClone(
   audioUrl: string,
   prefix?: string,
 ): Promise<{ voice_id: string }> {
-  const res = await fetch("/v1/audio/voices/clone", {
+  const res = await adminFetch("/admin/api/v1/audio/voices/clone", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -2046,7 +2050,7 @@ export async function voiceClone(
 }
 
 export async function fetchVideoModels(): Promise<VideoModelInfo[]> {
-  const res = await fetch("/v1/videos/models");
+  const res = await adminFetch("/admin/api/v1/videos/models");
   const data = await res.json();
   if (!res.ok) {
     throw new Error(data?.error?.message || `Fetch video models failed: HTTP ${res.status}`);
@@ -2062,7 +2066,7 @@ export async function submitVideo(
   audioUrl?: string,
   options?: { noMockFallback?: boolean; aspectRatio?: string },
 ): Promise<{ task_id: string; status: string; provider?: string; local_url?: string }> {
-  const res = await fetch("/v1/videos/generations", {
+  const res = await adminFetch("/admin/api/v1/videos/generations", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -2092,7 +2096,7 @@ export async function submitVideo(
 }
 
 export async function getVideoTask(taskId: string): Promise<VideoTask> {
-  const res = await fetch(`/v1/videos/tasks/${taskId}`);
+  const res = await adminFetch(`/admin/api/v1/videos/tasks/${encodeURIComponent(taskId)}`);
   const data = await res.json();
   if (!res.ok) {
     throw new Error(data?.error?.message || `Get video task failed: HTTP ${res.status}`);
@@ -2181,7 +2185,7 @@ export interface AudioHistoryItem {
 }
 
 export async function fetchAudioHistory(): Promise<{ records: AudioHistoryItem[]; total: number }> {
-  const res = await fetch("/v1/audio/history");
+  const res = await adminFetch("/admin/api/v1/audio/history");
   const data = await res.json();
   if (!res.ok) {
     throw new Error(data?.error || `Fetch audio history failed: HTTP ${res.status}`);
@@ -2663,7 +2667,7 @@ export async function transcribeAudio(
   form.append("model", "whisper-1");
   if (options?.language) form.append("language", options.language);
   if (options?.prompt) form.append("prompt", options.prompt);
-  const res = await fetch("/v1/audio/transcriptions", {
+  const res = await adminFetch("/admin/api/v1/audio/transcriptions", {
     method: "POST",
     body: form,
   });

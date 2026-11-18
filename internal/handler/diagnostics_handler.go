@@ -11,6 +11,7 @@ import (
 	"ai-web-free/internal/accounts"
 	"ai-web-free/internal/audit"
 	"ai-web-free/internal/chatgpt"
+	"ai-web-free/internal/db"
 	"ai-web-free/internal/provider"
 	"ai-web-free/internal/proxy"
 
@@ -753,6 +754,9 @@ func (h *AdminHandler) repairDisableBanned(pool *accounts.Pool) int {
 		if snap.Status == "banned" || (snap.Status != "disabled" && chatgpt.LooksLikeAccountBanned(0, snap.LastError)) {
 			if pool.SetStatus(snap.ID, accounts.StatusDisabled) {
 				disabled++
+				if a := pool.GetByID(snap.ID); a != nil {
+					_ = accounts.SaveAccountToDB(db.GetDB(), a)
+				}
 			}
 		}
 	}
@@ -765,6 +769,7 @@ func (h *AdminHandler) repairDeleteBanned(p provider.ProviderPlugin, pool *accou
 		if snap.Status == "banned" || chatgpt.LooksLikeAccountBanned(0, snap.LastError) {
 			if _, ok := pool.RemoveByID(snap.ID); ok {
 				deleted++
+				_ = accounts.DeleteAccountFromDB(db.GetDB(), snap.ID)
 			}
 		}
 	}

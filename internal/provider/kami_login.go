@@ -17,6 +17,7 @@ import (
 
 	"ai-web-free/internal/accounts"
 	"ai-web-free/internal/chatgpt"
+	"ai-web-free/internal/db"
 
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/cdproto/page"
@@ -1648,15 +1649,15 @@ func (p *ChatGPTProvider) updateKamiLoginTask(taskID string, update func(*KamiLo
 	}
 }
 
-// PersistKamiAccounts 将池内带卡密凭据的非临时账号原子写回 kami_accounts.txt。
+// PersistKamiAccounts 将池内带卡密凭据的非临时账号原子写回 kami_accounts.txt 并持久化至数据库。
 func (p *ChatGPTProvider) PersistKamiAccounts() error {
 	p.fileMu.Lock()
 	defer p.fileMu.Unlock()
 
 	list := p.pool.ExportKamiAccounts()
-	if len(list) == 0 {
-		return nil
+	if len(list) > 0 {
+		content := accounts.FormatKamiLines(list)
+		_ = writeAtomic("kami_accounts.txt", []byte(content))
 	}
-	content := accounts.FormatKamiLines(list)
-	return writeAtomic("kami_accounts.txt", []byte(content))
+	return accounts.BatchSaveAccountsToDB(db.GetDB(), p.pool.AllPersistentAccounts())
 }

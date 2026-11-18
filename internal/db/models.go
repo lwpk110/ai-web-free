@@ -131,6 +131,37 @@ type AccountRuntimeState struct {
 	UpdatedAt         time.Time  `json:"updated_at"`
 }
 
+// PoolAccountRecord ChatGPT 与通用号池账号完整持久化模型（支持凭据、Token、状态、限流与统计同步至 SQLite）
+type PoolAccountRecord struct {
+	ID                 string     `gorm:"primaryKey;size:128" json:"id"`
+	Provider           string     `gorm:"size:64;default:'chatgpt';index" json:"provider"` // chatgpt, etc.
+	Type               string     `gorm:"size:32;index" json:"type"`                     // free, puid, noauth
+	Email              string     `gorm:"size:128;index" json:"email"`
+	Password           string     `gorm:"type:text" json:"password,omitempty"`
+	TOTPSecret         string     `gorm:"column:totp_secret;size:128" json:"totp_secret,omitempty"`
+	Token              string     `gorm:"type:text" json:"token,omitempty"`
+	RefreshToken       string     `gorm:"type:text" json:"refresh_token,omitempty"`
+	SessionToken       string     `gorm:"type:text" json:"session_token,omitempty"`
+	PUID               string     `gorm:"column:puid;size:128" json:"puid,omitempty"`
+	TeamUserID         string     `gorm:"column:team_user_id;size:128" json:"team_user_id,omitempty"`
+	ChatGPTAccountID   string     `gorm:"column:chatgpt_account_id;size:128;index" json:"chatgpt_account_id,omitempty"`
+	PlanType           string     `gorm:"size:64" json:"plan_type,omitempty"`
+	Proxy              string     `gorm:"size:255" json:"proxy,omitempty"`
+	Status             string     `gorm:"size:32;index" json:"status"` // active, standby, rate_limited, expired, banned, disabled, pending
+	LastError          string     `gorm:"type:text" json:"last_error,omitempty"`
+	RenewState         string     `gorm:"size:32" json:"renew_state,omitempty"`
+	RenewFailures      int        `gorm:"default:0" json:"renew_failures"`
+	LastRenewError     string     `gorm:"type:text" json:"last_renew_error,omitempty"`
+	ExpiresAt          *time.Time `json:"expires_at,omitempty"`
+	CooldownUntil      *time.Time `json:"cooldown_until,omitempty"`
+	ImageCooldownUntil *time.Time `json:"image_cooldown_until,omitempty"`
+	TotalCalls         int64      `gorm:"default:0" json:"total_calls"`
+	FailedCalls        int64      `gorm:"default:0" json:"failed_calls"`
+	LastUsed           *time.Time `json:"last_used,omitempty"`
+	CreatedAt          time.Time  `gorm:"index" json:"created_at"`
+	UpdatedAt          time.Time  `gorm:"index" json:"updated_at"`
+}
+
 // ProviderChannelRecord 记录号池中已录入的多模态渠道与账号（持久化至 SQLite 数据库）
 type ProviderChannelRecord struct {
 	ID           string    `gorm:"primaryKey;size:64" json:"id"`

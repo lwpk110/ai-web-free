@@ -343,6 +343,21 @@ func RegisterRouterWithDeps(deps RouterDeps) *gin.Engine {
 		adminGroup.GET("/media/assets", mediaLibraryHandler.ListSystemAssets)
 		adminGroup.POST("/audio/voices/custom/:id/clone", audioHandler.CloneCustomVoice)
 		adminGroup.DELETE("/audio/voices/custom/:id", audioHandler.DeleteCustomVoice)
+
+		// 语音工坊与视频工坊管理台直连路由（走 AdminAuthorization，不受 /v1/* 对外 API Authorization 密钥拦截）
+		adminGroup.GET("/audio/voices", audioHandler.ListVoices)
+		adminGroup.GET("/audio/voices/:id/preview", audioHandler.PreviewVoice)
+		adminGroup.GET("/audio/voice-preview", audioHandler.PreviewVoice)
+		adminGroup.POST("/audio/voices/pull-local", audioHandler.PullLocalVoices)
+		adminGroup.POST("/audio/voices/design", audioHandler.VoiceDesign)
+		adminGroup.POST("/audio/voices/clone", audioHandler.VoiceClone)
+		adminGroup.POST("/audio/speech", audioHandler.TTS)
+		adminGroup.POST("/audio/transcriptions", audioHandler.Transcriptions)
+		adminGroup.GET("/audio/history", audioHandler.ListAudioHistory)
+		adminGroup.GET("/audio/files/:id", audioHandler.GetAudioFile)
+		adminGroup.GET("/videos/models", videoHandler.ListModels)
+		adminGroup.POST("/videos/generations", videoHandler.Generations)
+		adminGroup.GET("/videos/tasks/:id", videoHandler.GetTask)
 	}
 
 	// 静态生图/音频资源强缓存分发

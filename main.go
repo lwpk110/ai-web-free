@@ -87,6 +87,12 @@ func handleBackup() {
 		fmt.Fprintf(os.Stderr, "❌ 缺少七牛云配置 (QINIU_ACCESS_KEY / QINIU_SECRET_KEY)，请在 .env 或环境变量中配置\n")
 		os.Exit(1)
 	}
+
+	// 备份前先对齐：将本地凭据文件中的账号同步增量写入 SQLite 数据库
+	if count, err := bootstrap.SyncLocalFilesToDB(&cfg); err == nil {
+		fmt.Printf("📦 已对齐 %d 个号池账号至数据库\n", count)
+	}
+
 	client := storage.NewQiniuClient(storage.QiniuConfig{
 		AccessKey: cfg.QiniuAccessKey,
 		SecretKey: cfg.QiniuSecretKey,
@@ -127,6 +133,11 @@ func handleRestore() {
 	if err := storage.PullRestore(client, cfg.DatabaseURL, ".env", pullAll); err != nil {
 		fmt.Fprintf(os.Stderr, "恢复失败: %v\n", err)
 		os.Exit(1)
+	}
+
+	// 恢复后对齐：从恢复出的 SQLite 数据库回写本地凭据文件
+	if count, err := bootstrap.ExportDBToLocalFiles(&cfg); err == nil && count > 0 {
+		fmt.Printf("📦 已将数据库中 %d 个号池账号回写同步至本地凭据文件 (kami_accounts.txt / access_tokens.txt)\n", count)
 	}
 }
 

@@ -94,6 +94,7 @@ func InitDB(dsn string) (*gorm.DB, error) {
 		&PromptFavorite{},
 		&VideoTaskRecord{},
 		&AccountRuntimeState{},
+		&PoolAccountRecord{},
 		&ProviderChannelRecord{},
 		&CredentialFormatPatternRecord{},
 		&AudioGenerationRecord{},

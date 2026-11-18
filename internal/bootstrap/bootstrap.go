@@ -56,6 +56,25 @@ func Init() (*App, error) {
 	proxies := loadProxyList()
 	proxyPool := proxy.NewPool(proxies)
 
+	// ─── 初始化持久化数据库与云端同步引擎 ────────────────────────
+	var qiniuClient *storage.QiniuClient
+	if cfg.QiniuAccessKey != "" && cfg.QiniuSecretKey != "" && cfg.QiniuBucket != "" {
+		qiniuClient = storage.NewQiniuClient(storage.QiniuConfig{
+			AccessKey: cfg.QiniuAccessKey,
+			SecretKey: cfg.QiniuSecretKey,
+			Bucket:    cfg.QiniuBucket,
+			Domain:    cfg.QiniuDomain,
+			Region:    cfg.QiniuRegion,
+			UploadURL: cfg.QiniuUploadURL,
+		})
+		storage.AutoRestoreDBIfMissing(cfg.DatabaseURL, qiniuClient)
+	}
+
+	database, dbErr := db.InitDB(cfg.DatabaseURL)
+	if dbErr != nil {
+		log.Printf("[Bootstrap] 严重警告: 数据库初始化失败: %v", dbErr)
+	}
+
 	// ─── 加载账号 ────────────────────────────────────────────────
 
 	profiles := accounts.DefaultProfiles
@@ -90,31 +109,9 @@ func Init() (*App, error) {
 		}
 	}
 
-	// 去重 key: chatgpt_account_id (for free/puid) 或 token (for noauth/refresh)
-	seen := make(map[string]bool)
-
-	// 1. access_tokens.txt — 纯 access token，不可续期
-	for _, t := range accounts.LoadTokensFromFile("access_tokens.txt") {
-		// 从 access_token JWT 解析 chatgpt_account_id 用于去重
-		chatGPTID := accounts.ExtractChatGPTAccountID(t.Token)
-		email := accounts.ExtractEmail(t.Token)
-		key := "access:" + chatGPTID
-		if chatGPTID == "" && email != "" {
-			key = "access:" + email
-		}
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-
-		acct := accounts.CreateAccount(t.Token, accounts.TypeFree, profiles)
-		acct.TeamUserID = t.TeamID
-		acct.ChatGPTAccountID = chatGPTID
-		if email != "" {
-			acct.Email = email
-		}
-		assignStickyProxy(acct)
-
+	applyRestrictions := func(acct *accounts.Account) {
+		chatGPTID := strings.TrimSpace(acct.ChatGPTAccountID)
+		email := strings.TrimSpace(acct.Email)
 		banReason := ""
 		disableReason := ""
 		if chatGPTID != "" {
@@ -138,29 +135,90 @@ func Init() (*App, error) {
 		} else if !acct.ExpiresAt.IsZero() && acct.ExpiresAt.Before(time.Now()) {
 			acct.Status = accounts.StatusExpired
 			acct.LastError = "Token 已过期"
-		} else {
+		}
+	}
+
+	// 1. 优先从 SQLite 数据库加载已持久化号池账号
+	dbAccounts, dbLoadErr := accounts.LoadAccountsFromDB(database, profiles)
+	if dbLoadErr != nil {
+		log.Printf("[Bootstrap] 警告: 从数据库加载号池失败: %v", dbLoadErr)
+	}
+	for _, acct := range dbAccounts {
+		assignStickyProxy(acct)
+		applyRestrictions(acct)
+		accs = append(accs, acct)
+	}
+	if len(dbAccounts) > 0 {
+		log.Printf("[Bootstrap] 从持久化数据库成功加载 %d 个号池账号", len(dbAccounts))
+	}
+
+	findExisting := func(email, chatGPTID, token string) *accounts.Account {
+		emailClean := strings.ToLower(strings.TrimSpace(email))
+		idClean := strings.TrimSpace(chatGPTID)
+		tokenClean := strings.TrimSpace(token)
+		for _, a := range accs {
+			if emailClean != "" && strings.ToLower(strings.TrimSpace(a.Email)) == emailClean {
+				return a
+			}
+			if idClean != "" && strings.TrimSpace(a.ChatGPTAccountID) == idClean {
+				return a
+			}
+			if tokenClean != "" && (a.Token == tokenClean || a.RefreshToken == tokenClean || a.SessionToken == tokenClean) {
+				return a
+			}
+		}
+		return nil
+	}
+
+	// 2. access_tokens.txt — 纯 access token，不可续期
+	for _, t := range accounts.LoadTokensFromFile("access_tokens.txt") {
+		chatGPTID := accounts.ExtractChatGPTAccountID(t.Token)
+		email := accounts.ExtractEmail(t.Token)
+		if matched := findExisting(email, chatGPTID, t.Token); matched != nil {
+			if matched.Token == "" {
+				matched.Token = t.Token
+			}
+			if matched.TeamUserID == "" {
+				matched.TeamUserID = t.TeamID
+			}
+			if matched.ChatGPTAccountID == "" {
+				matched.ChatGPTAccountID = chatGPTID
+			}
+			if matched.Email == "" {
+				matched.Email = email
+			}
+			applyRestrictions(matched)
+			continue
+		}
+
+		acct := accounts.CreateAccount(t.Token, accounts.TypeFree, profiles)
+		acct.TeamUserID = t.TeamID
+		acct.ChatGPTAccountID = chatGPTID
+		if email != "" {
+			acct.Email = email
+		}
+		assignStickyProxy(acct)
+		applyRestrictions(acct)
+		if acct.Status == accounts.StatusPending {
 			acct.Status = accounts.StatusActive
 		}
 		accs = append(accs, acct)
 	}
 
-	// 2. refresh_tokens.txt — 带 refresh_token，可续期
+	// 3. refresh_tokens.txt — 带 refresh_token，可续期
 	for _, t := range accounts.LoadTokensFromFile("refresh_tokens.txt") {
-		// 立即交换一次获取 access_token 才能解析 chatgpt_account_id
-		// 先用 refresh_token 本身做去重 key,避免重复交换
-		key := "refresh:" + t.Token
-		if seen[key] {
+		if matched := findExisting("", "", t.Token); matched != nil {
+			if matched.RefreshToken == "" {
+				matched.RefreshToken = t.Token
+			}
 			continue
 		}
-		seen[key] = true
 
 		acct := accounts.CreateAccount("", accounts.TypeFree, profiles)
 		acct.RefreshToken = t.Token
 		acct.TeamUserID = t.TeamID
 		assignStickyProxy(acct)
-		// 立即交换一次获取 access_token
 		if exchangeRefreshToken(acct) {
-			// exchange 成功后从 access_token 解析 chatgpt_account_id
 			acct.ChatGPTAccountID = accounts.ExtractChatGPTAccountID(acct.Token)
 			acct.Status = accounts.StatusActive
 		} else {
@@ -169,21 +227,20 @@ func Init() (*App, error) {
 		accs = append(accs, acct)
 	}
 
-	// 3. session_tokens.txt — ChatGPT session token，用于免费账号续期
+	// 4. session_tokens.txt — ChatGPT session token，用于免费账号续期
 	for _, t := range accounts.LoadTokensFromFile("session_tokens.txt") {
-		key := "session:" + t.Token
-		if seen[key] {
+		if matched := findExisting("", "", t.Token); matched != nil {
+			if matched.SessionToken == "" {
+				matched.SessionToken = t.Token
+			}
 			continue
 		}
-		seen[key] = true
 
 		acct := accounts.CreateAccount("", accounts.TypeFree, profiles)
 		acct.SessionToken = t.Token
 		acct.TeamUserID = t.TeamID
 		assignStickyProxy(acct)
-		// 立即交换一次获取 access_token
 		if exchangeSessionToken(acct) {
-			// exchange 成功后从 access_token 解析 chatgpt_account_id
 			acct.ChatGPTAccountID = accounts.ExtractChatGPTAccountID(acct.Token)
 			acct.Status = accounts.StatusActive
 		} else {
@@ -192,13 +249,11 @@ func Init() (*App, error) {
 		accs = append(accs, acct)
 	}
 
-	// 4. free_tokens.txt — 设备 UUID
+	// 5. free_tokens.txt — 设备 UUID
 	for _, t := range accounts.LoadTokensFromFile("free_tokens.txt") {
-		key := "free:" + t.Token
-		if seen[key] {
+		if matched := findExisting("", "", t.Token); matched != nil {
 			continue
 		}
-		seen[key] = true
 
 		acct := accounts.CreateAccount(t.Token, accounts.TypeNoAuth, profiles)
 		assignStickyProxy(acct)
@@ -206,62 +261,47 @@ func Init() (*App, error) {
 		accs = append(accs, acct)
 	}
 
-	// 4.5 kami_accounts.txt — 卡密账号（邮箱----密码----2FA密钥）
+	// 6. kami_accounts.txt — 卡密账号（邮箱----密码----2FA密钥）
 	for _, k := range accounts.LoadKamiFromFile("kami_accounts.txt") {
-		emailLower := strings.ToLower(strings.TrimSpace(k.Email))
-		banReason := bannedMap[emailLower]
-		disableReason := disabledMap[emailLower]
-
-		var matched *accounts.Account
-		for _, existing := range accs {
-			if existing.Type != accounts.TypeNoAuth && strings.EqualFold(strings.TrimSpace(existing.Email), strings.TrimSpace(k.Email)) {
-				matched = existing
-				break
-			}
-		}
-		if matched != nil {
+		if matched := findExisting(k.Email, "", ""); matched != nil {
 			matched.Password = k.Password
 			matched.TOTPSecret = k.TOTPSecret
-			if banReason != "" {
-				matched.Status = accounts.StatusBanned
-				matched.LastError = banReason
-				matched.Token = ""
-			} else if disableReason != "" {
-				matched.Status = accounts.StatusDisabled
-				matched.LastError = disableReason
-			}
+			applyRestrictions(matched)
 			continue
 		}
+
 		acct := accounts.CreateAccount("", accounts.TypeFree, profiles)
 		acct.Email = k.Email
 		acct.Password = k.Password
 		acct.TOTPSecret = k.TOTPSecret
 		assignStickyProxy(acct)
-		if banReason != "" {
-			acct.Status = accounts.StatusBanned
-			acct.LastError = banReason
-		} else if disableReason != "" {
-			acct.Status = accounts.StatusDisabled
-			acct.LastError = disableReason
-		} else {
-			acct.Status = accounts.StatusPending
+		applyRestrictions(acct)
+		if acct.Status == accounts.StatusPending {
 			acct.LastError = "待浏览器登录提取 Token"
 		}
 		accs = append(accs, acct)
 	}
 
-	// 回写初始分配或对齐后的粘性代理配置
+	// 7. 回写初始分配或对齐后的粘性代理配置
 	_ = accounts.SaveAccountProxiesToFile("account_proxies.txt", accountProxyMap)
 
-	// 5. FREE_ACCOUNTS — 自动生成 UUID 账号
+	// 8. FREE_ACCOUNTS — 自动生成 UUID 账号
 	if cfg.FreeAccounts {
 		for i := 0; i < cfg.FreeAccountsNum; i++ {
 			uid := uuid.NewString()
-			// UUID 设备号天然唯一,不需要去重
 			acct := accounts.CreateAccount(uid, accounts.TypeNoAuth, profiles)
 			acct.Proxy = proxyPool.Allocate()
 			acct.Status = accounts.StatusActive
 			accs = append(accs, acct)
+		}
+	}
+
+	// 9. 将合并后的全量账号持久化同步写入 SQLite 数据库
+	if database != nil {
+		if err := accounts.BatchSaveAccountsToDB(database, accs); err != nil {
+			log.Printf("[Bootstrap] 同步账号至持久化数据库失败: %v", err)
+		} else {
+			log.Printf("[Bootstrap] 已成功将 %d 个号池账号同步持久化至 SQLite 数据库", len(accs))
 		}
 	}
 
@@ -287,10 +327,18 @@ func Init() (*App, error) {
 	// 启动健康检查（每 10 分钟续期过期 token）
 	renewFn := func(acct *accounts.Account) bool {
 		if acct.RefreshToken != "" {
-			return exchangeRefreshToken(acct)
+			ok := exchangeRefreshToken(acct)
+			if ok {
+				_ = accounts.SaveAccountToDB(database, acct)
+			}
+			return ok
 		}
 		if acct.SessionToken != "" {
-			return exchangeSessionToken(acct)
+			ok := exchangeSessionToken(acct)
+			if ok {
+				_ = accounts.SaveAccountToDB(database, acct)
+			}
+			return ok
 		}
 		if cfg.KamiAutoRenew && kamiWorker != nil && acct.Password != "" && acct.TOTPSecret != "" {
 			kamiWorker.Enqueue(acct, "health_check")
@@ -408,24 +456,6 @@ func Init() (*App, error) {
 			false,
 			false,
 		)
-	}
-	// 初始化持久化数据库与文件存储引擎（严格零 CGO，优雅降级；支持七牛云两级分层缓存与冷启动自动恢复）
-	var qiniuClient *storage.QiniuClient
-	if cfg.QiniuAccessKey != "" && cfg.QiniuSecretKey != "" && cfg.QiniuBucket != "" {
-		qiniuClient = storage.NewQiniuClient(storage.QiniuConfig{
-			AccessKey: cfg.QiniuAccessKey,
-			SecretKey: cfg.QiniuSecretKey,
-			Bucket:    cfg.QiniuBucket,
-			Domain:    cfg.QiniuDomain,
-			Region:    cfg.QiniuRegion,
-			UploadURL: cfg.QiniuUploadURL,
-		})
-		storage.AutoRestoreDBIfMissing(cfg.DatabaseURL, qiniuClient)
-	}
-
-	database, dbErr := db.InitDB(cfg.DatabaseURL)
-	if dbErr != nil {
-		log.Printf("[Bootstrap] 严重警告: 数据库初始化失败: %v", dbErr)
 	}
 	if database != nil {
 		if grokAny, ok := reg.Get("grok"); ok {

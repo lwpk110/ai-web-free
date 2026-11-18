@@ -15,6 +15,7 @@ import (
 	"ai-web-free/internal/audit"
 	"ai-web-free/internal/chatgpt"
 	"ai-web-free/internal/config"
+	"ai-web-free/internal/db"
 	"ai-web-free/internal/proxy"
 
 	"github.com/google/uuid"
@@ -489,7 +490,15 @@ func (p *ChatGPTProvider) ExecuteAccountActionWithOpts(id, action string, headle
 		if !ok {
 			return nil, errors.New("未找到对应账号")
 		}
+		_ = accounts.DeleteAccountFromDB(db.GetDB(), removed.ID)
+		if removed.Email != "" {
+			_ = accounts.DeleteAccountFromDB(db.GetDB(), removed.Email)
+		}
+		if removed.ChatGPTAccountID != "" {
+			_ = accounts.DeleteAccountFromDB(db.GetDB(), removed.ChatGPTAccountID)
+		}
 		_ = p.PersistAccessTokens()
+		_ = p.PersistKamiAccounts()
 		return map[string]interface{}{
 			"id":      removed.ID,
 			"action":  "delete",
@@ -505,6 +514,7 @@ func (p *ChatGPTProvider) ExecuteAccountActionWithOpts(id, action string, headle
 	switch action {
 	case "standby":
 		p.pool.SetStatus(acct.ID, accounts.StatusStandby)
+		_ = accounts.SaveAccountToDB(db.GetDB(), acct)
 		return map[string]interface{}{
 			"id":     acct.ID,
 			"status": accounts.StatusStandby.String(),
@@ -519,6 +529,7 @@ func (p *ChatGPTProvider) ExecuteAccountActionWithOpts(id, action string, headle
 		acct.CooldownUntil = time.Time{}
 		acct.ActivatedAt = time.Now()
 		p.pool.SetStatus(acct.ID, accounts.StatusActive)
+		_ = accounts.SaveAccountToDB(db.GetDB(), acct)
 		return map[string]interface{}{
 			"id":     acct.ID,
 			"status": accounts.StatusActive.String(),
@@ -538,6 +549,7 @@ func (p *ChatGPTProvider) ExecuteAccountActionWithOpts(id, action string, headle
 		if acct.ChatGPTAccountID != "" {
 			_ = accounts.RemoveDisabledFromFile("disabled_accounts.txt", acct.ChatGPTAccountID)
 		}
+		_ = accounts.SaveAccountToDB(db.GetDB(), acct)
 		return map[string]interface{}{
 			"id":     acct.ID,
 			"status": accounts.StatusActive.String(),
@@ -552,6 +564,7 @@ func (p *ChatGPTProvider) ExecuteAccountActionWithOpts(id, action string, headle
 		if key != "" {
 			_ = accounts.AppendDisabledToFile("disabled_accounts.txt", key, "管理员手动禁用")
 		}
+		_ = accounts.SaveAccountToDB(db.GetDB(), acct)
 		return map[string]interface{}{
 			"id":     acct.ID,
 			"status": accounts.StatusDisabled.String(),
@@ -760,7 +773,7 @@ func (p *ChatGPTProvider) executeProbe(acct *accounts.Account, taskID string) (m
 	}, nil
 }
 
-// PersistAccessTokens 将池内非临时 access_token 原子写回 access_tokens.txt
+// PersistAccessTokens 将池内非临时 access_token 原子写回 access_tokens.txt 并持久化至数据库
 func (p *ChatGPTProvider) PersistAccessTokens() error {
 	p.fileMu.Lock()
 	defer p.fileMu.Unlock()
@@ -770,7 +783,8 @@ func (p *ChatGPTProvider) PersistAccessTokens() error {
 	if len(lines) > 0 {
 		content += "\n"
 	}
-	return writeAtomic("access_tokens.txt", []byte(content))
+	_ = writeAtomic("access_tokens.txt", []byte(content))
+	return accounts.BatchSaveAccountsToDB(db.GetDB(), p.pool.AllPersistentAccounts())
 }
 
 func writeAtomic(path string, data []byte) error {
