@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -364,12 +363,6 @@ func (h *AdminHandler) BulkUpdateAccountProxy(c *gin.Context) {
 		} else {
 			result.OK = true
 			updated++
-			if acct.Email != "" {
-				_ = accounts.SetAccountProxyInFile("account_proxies.txt", acct.Email, proxyURL)
-			}
-			if acct.ChatGPTAccountID != "" {
-				_ = accounts.SetAccountProxyInFile("account_proxies.txt", acct.ChatGPTAccountID, proxyURL)
-			}
 			_ = accounts.SaveAccountToDB(db.GetDB(), acct)
 			log.Printf("[account-proxy] updated account=%s proxy_bound=%t", acct.Email, proxyURL != "")
 			if auditLog := h.auditLog(); auditLog != nil {
@@ -919,11 +912,6 @@ func (h *AdminHandler) UpdateProxies(c *gin.Context) {
 		)
 	}
 	if body.Persist {
-		content := strings.Join(list, "\n")
-		if len(list) > 0 {
-			content += "\n"
-		}
-		_ = os.WriteFile("proxies.txt", []byte(content), 0644)
 		_ = db.ReplaceProxiesInDB(db.GetDB(), list)
 	}
 	if logBuf := h.auditLog(); logBuf != nil {

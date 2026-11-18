@@ -285,6 +285,10 @@ func (p *GrokProvider) loadFromDisk() {
 
 func (p *GrokProvider) persistToDisk() {
 	p.persistToDB()
+	// 当 SQLite 数据库已连接时，数据库即为唯一事实源，不再写回离线文本文件
+	if gdb := p.grokCredentialPatternDB; gdb != nil || db.GetDB() != nil {
+		return
+	}
 	if p.persistFile == "" {
 		return
 	}

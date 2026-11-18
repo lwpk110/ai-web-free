@@ -135,10 +135,7 @@ func handleRestore() {
 		os.Exit(1)
 	}
 
-	// 恢复后对齐：从恢复出的 SQLite 数据库回写本地凭据文件
-	if count, err := bootstrap.ExportDBToLocalFiles(&cfg); err == nil && count > 0 {
-		fmt.Printf("📦 已将数据库中 %d 个号池账号回写同步至本地凭据文件 (kami_accounts.txt / access_tokens.txt)\n", count)
-	}
+	fmt.Printf("✅ 数据恢复成功！SQLite 数据库已对齐为单一事实源。\n")
 }
 
 func handleGrokLogin() {

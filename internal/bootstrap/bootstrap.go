@@ -302,10 +302,7 @@ func Init() (*App, error) {
 		accs = append(accs, acct)
 	}
 
-	// 7. 回写初始分配或对齐后的粘性代理配置
-	_ = accounts.SaveAccountProxiesToFile("account_proxies.txt", accountProxyMap)
-
-	// 8. FREE_ACCOUNTS — 自动生成 UUID 账号
+	// 7. FREE_ACCOUNTS — 自动生成 UUID 账号
 	if cfg.FreeAccounts {
 		for i := 0; i < cfg.FreeAccountsNum; i++ {
 			uid := uuid.NewString()
@@ -389,15 +386,11 @@ func Init() (*App, error) {
 	// 初始化多供应商插件中心
 	chatgptPlugin := provider.NewChatGPTProvider(accountPool, proxyPool, &cfg, renewFn)
 	accountPool.SetOnBanned(func(acct *accounts.Account, reason string) {
-		if acct.Email != "" {
-			_ = accounts.AppendBannedToFile("banned_accounts.txt", acct.Email, reason)
-			if database != nil {
+		if database != nil {
+			if acct.Email != "" {
 				_ = db.SaveRestrictionToDB(database, acct.Email, "banned", reason)
 			}
-		}
-		if acct.ChatGPTAccountID != "" {
-			_ = accounts.AppendBannedToFile("banned_accounts.txt", acct.ChatGPTAccountID, reason)
-			if database != nil {
+			if acct.ChatGPTAccountID != "" {
 				_ = db.SaveRestrictionToDB(database, acct.ChatGPTAccountID, "banned", reason)
 			}
 		}
@@ -680,7 +673,11 @@ func exchangeSessionToken(acct *accounts.Account) bool {
 	if rotated != "" && rotated != acct.SessionToken {
 		oldToken := acct.SessionToken
 		acct.SessionToken = rotated
-		persistRotatedSessionToken(oldToken, rotated, acct.TeamUserID)
+		if db.GetDB() != nil {
+			_ = accounts.SaveAccountToDB(db.GetDB(), acct)
+		} else {
+			persistRotatedSessionToken(oldToken, rotated, acct.TeamUserID)
+		}
 	}
 	return true
 }
@@ -795,11 +792,10 @@ func loadProxyList(database *gorm.DB) []string {
 		}
 	}
 
-	// 5. 对齐持久化至 SQLite 数据库与 proxies.txt
+	// 5. 持久化至 SQLite 数据库（无数据库时才回退至 proxies.txt）
 	if database != nil && len(proxies) > 0 {
 		_ = db.SaveProxiesToDB(database, proxies)
-	}
-	if len(proxies) > 0 {
+	} else if len(proxies) > 0 {
 		content := strings.Join(proxies, "\n") + "\n"
 		_ = os.WriteFile("proxies.txt", []byte(content), 0644)
 	}
