@@ -90,11 +90,13 @@ endif
 sync-push: ## 备份 SQLite 数据库、.env 与多媒体缓存全量同步到七牛云
 	@$(BASH_EXE) -c 'go run scripts/sync_qiniu.go push'
 
-sync-pull: ## 跨机一键恢复：从七牛云拉取最新 SQLite 数据库、.env 与多媒体快照
-	@$(BASH_EXE) -c 'go run scripts/sync_qiniu.go pull'
+sync-pull: ## 跨机一键恢复：从七牛云拉取最新 SQLite 数据库与 .env (传参 ALL=1 全量拉取多媒体)
+	@$(BASH_EXE) -c 'if [ "$(ALL)" = "1" ] || [ "$(all)" = "1" ]; then go run scripts/sync_qiniu.go pull --all; else go run scripts/sync_qiniu.go pull; fi'
 
 backup: sync-push ## 别名：备份到云存储
-restore: sync-pull ## 别名：从云存储恢复
+restore: sync-pull ## 别名：从云存储恢复数据库与配置 (若需拉取全部历史多媒体请用: make restore-all 或 make restore ALL=1)
+restore-all: ## 别名：从云存储全量恢复（含 SQLite 数据库、.env 及全部历史图片、音频、短剧视频）
+	@$(BASH_EXE) -c 'go run scripts/sync_qiniu.go pull --all'
 
 docker-build: ## 构建 Docker 镜像
 	docker build -t $(IMAGE) .
