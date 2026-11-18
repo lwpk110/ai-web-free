@@ -13,6 +13,17 @@ import (
 	_ "github.com/glebarez/go-sqlite"
 )
 
+var tokenCredentialFiles = []string{
+	"access_tokens.txt",
+	"kami_accounts.txt",
+	"refresh_tokens.txt",
+	"session_tokens.txt",
+	"free_tokens.txt",
+	"proxies.txt",
+	"account_proxies.txt",
+	"banned_accounts.txt",
+}
+
 // AutoRestoreDBIfMissing 检查本地 SQLite 数据库是否存在，若不存在且云端存在备份，则自动从七牛云拉取恢复冷启动
 func AutoRestoreDBIfMissing(dbPath string, client *QiniuClient) {
 	if client == nil {
@@ -107,8 +118,8 @@ func PushBackup(client *QiniuClient, dbPath, envPath, storageDir, videosDir stri
 		fmt.Printf("⚠️ 未找到本地 SQLite 数据库文件 (%s)，跳过数据库备份\n", dbPath)
 	}
 
-	// 2. 同步 .env
-	fmt.Printf("\n🔑 [2/3] 正在同步 .env 凭据配置...\n")
+	// 2. 同步 .env 与号池凭据
+	fmt.Printf("\n🔑 [2/3] 正在同步 .env 与号池凭据...\n")
 	if envBytes, err := os.ReadFile(envPath); err == nil {
 		if _, err := client.Upload(ctx, "_backups/env.snapshot", envBytes, "text/plain"); err != nil {
 			fmt.Printf("❌ 上传 .env 凭据配置失败: %v\n", err)
@@ -117,6 +128,16 @@ func PushBackup(client *QiniuClient, dbPath, envPath, storageDir, videosDir stri
 		}
 	} else {
 		fmt.Printf("⚠️ 未找到本地 .env 文件，跳过环境配置备份\n")
+	}
+	for _, tf := range tokenCredentialFiles {
+		if data, err := os.ReadFile(tf); err == nil && len(data) > 0 {
+			cloudKey := "_backups/" + tf
+			if _, err := client.Upload(ctx, cloudKey, data, "text/plain"); err != nil {
+				fmt.Printf("❌ 上传号池凭据 [%s] 失败: %v\n", tf, err)
+			} else {
+				fmt.Printf("✅ 已备份号池凭据至云端: %s (大小: %d 字节)\n", cloudKey, len(data))
+			}
+		}
 	}
 
 	// 3. 增量同步多媒体
@@ -194,8 +215,8 @@ func PullRestore(client *QiniuClient, dbPath, envPath string, pullAllMedia bool)
 
 	ctx := context.Background()
 
-	// 1. 恢复 .env
-	fmt.Printf("🔑 [1/3] 正在检查云端 .env 配置...\n")
+	// 1. 恢复 .env 与号池凭据
+	fmt.Printf("🔑 [1/3] 正在检查云端 .env 与号池凭据...\n")
 	envBytes, err := client.Download(ctx, "_backups/env.snapshot")
 	if err != nil {
 		fmt.Printf("⚠️ 未在云端找到 _backups/env.snapshot 或下载失败: %v\n", err)
@@ -209,6 +230,21 @@ func PullRestore(client *QiniuClient, dbPath, envPath string, pullAllMedia bool)
 			fmt.Printf("❌ 写入 %s 失败: %v\n", envPath, err)
 		} else {
 			fmt.Printf("✅ 成功恢复 %s！\n", envPath)
+		}
+	}
+	for _, tf := range tokenCredentialFiles {
+		cloudKey := "_backups/" + tf
+		if client.Exists(ctx, cloudKey) {
+			tBytes, err := client.Download(ctx, cloudKey)
+			if err == nil && len(tBytes) > 0 {
+				if _, err := os.Stat(tf); err == nil {
+					backupOld := tf + ".bak." + time.Now().Format("20060102150405")
+					_ = os.Rename(tf, backupOld)
+				}
+				if err := os.WriteFile(tf, tBytes, 0644); err == nil {
+					fmt.Printf("✅ 成功从云端恢复号池凭据: %s (大小: %d 字节)\n", tf, len(tBytes))
+				}
+			}
 		}
 	}
 
