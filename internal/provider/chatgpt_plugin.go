@@ -545,9 +545,11 @@ func (p *ChatGPTProvider) ExecuteAccountActionWithOpts(id, action string, headle
 		p.pool.SetStatus(acct.ID, accounts.StatusActive)
 		if acct.Email != "" {
 			_ = accounts.RemoveDisabledFromFile("disabled_accounts.txt", acct.Email)
+			_ = db.DeleteRestrictionFromDB(db.GetDB(), acct.Email, "disabled")
 		}
 		if acct.ChatGPTAccountID != "" {
 			_ = accounts.RemoveDisabledFromFile("disabled_accounts.txt", acct.ChatGPTAccountID)
+			_ = db.DeleteRestrictionFromDB(db.GetDB(), acct.ChatGPTAccountID, "disabled")
 		}
 		_ = accounts.SaveAccountToDB(db.GetDB(), acct)
 		return map[string]interface{}{
@@ -563,6 +565,7 @@ func (p *ChatGPTProvider) ExecuteAccountActionWithOpts(id, action string, headle
 		}
 		if key != "" {
 			_ = accounts.AppendDisabledToFile("disabled_accounts.txt", key, "管理员手动禁用")
+			_ = db.SaveRestrictionToDB(db.GetDB(), key, "disabled", "管理员手动禁用")
 		}
 		_ = accounts.SaveAccountToDB(db.GetDB(), acct)
 		return map[string]interface{}{

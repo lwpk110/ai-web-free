@@ -924,6 +924,7 @@ func (h *AdminHandler) UpdateProxies(c *gin.Context) {
 			content += "\n"
 		}
 		_ = os.WriteFile("proxies.txt", []byte(content), 0644)
+		_ = db.ReplaceProxiesInDB(db.GetDB(), list)
 	}
 	if logBuf := h.auditLog(); logBuf != nil {
 		logBuf.RecordEvent("/admin/api/v1/proxies", "", "", fmt.Sprintf("updated_%d_migrated_%d", len(list), migrated), "")

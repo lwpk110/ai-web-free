@@ -31,6 +31,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
+	"gorm.io/gorm"
 )
 
 // App 封装应用启动所需的所有依赖
@@ -53,9 +54,6 @@ func Init() (*App, error) {
 
 	cfg := config.Load()
 
-	proxies := loadProxyList()
-	proxyPool := proxy.NewPool(proxies)
-
 	// ─── 初始化持久化数据库与云端同步引擎 ────────────────────────
 	var qiniuClient *storage.QiniuClient
 	if cfg.QiniuAccessKey != "" && cfg.QiniuSecretKey != "" && cfg.QiniuBucket != "" {
@@ -75,15 +73,37 @@ func Init() (*App, error) {
 		log.Printf("[Bootstrap] 严重警告: 数据库初始化失败: %v", dbErr)
 	}
 
+	proxies := loadProxyList(database)
+	proxyPool := proxy.NewPool(proxies)
+
 	// ─── 加载账号 ────────────────────────────────────────────────
 
 	profiles := accounts.DefaultProfiles
 	var accs []*accounts.Account
 
-	// 加载已封禁账号持久化名单（防止重启后死号又变绿）
+	// 加载已封禁账号持久化名单（结合 SQLite 数据库与本地文件双向对齐）
 	bannedMap := accounts.LoadBannedFromFile("banned_accounts.txt")
-	// 加载管理员手动禁用名单（防止重启后失效）
+	// 加载管理员手动禁用名单（结合 SQLite 数据库与本地文件双向对齐）
 	disabledMap := accounts.LoadDisabledFromFile("disabled_accounts.txt")
+
+	if database != nil {
+		for id, reason := range db.LoadRestrictionsFromDB(database, "banned") {
+			if _, ok := bannedMap[id]; !ok {
+				bannedMap[id] = reason
+			}
+		}
+		for id, reason := range db.LoadRestrictionsFromDB(database, "disabled") {
+			if _, ok := disabledMap[id]; !ok {
+				disabledMap[id] = reason
+			}
+		}
+		for id, reason := range bannedMap {
+			_ = db.SaveRestrictionToDB(database, id, "banned", reason)
+		}
+		for id, reason := range disabledMap {
+			_ = db.SaveRestrictionToDB(database, id, "disabled", reason)
+		}
+	}
 	// 加载账号粘性代理绑定关系（保证重启后账号出口 IP 不漂移）
 	accountProxyMap := accounts.LoadAccountProxiesFromFile("account_proxies.txt")
 
@@ -371,9 +391,15 @@ func Init() (*App, error) {
 	accountPool.SetOnBanned(func(acct *accounts.Account, reason string) {
 		if acct.Email != "" {
 			_ = accounts.AppendBannedToFile("banned_accounts.txt", acct.Email, reason)
+			if database != nil {
+				_ = db.SaveRestrictionToDB(database, acct.Email, "banned", reason)
+			}
 		}
 		if acct.ChatGPTAccountID != "" {
 			_ = accounts.AppendBannedToFile("banned_accounts.txt", acct.ChatGPTAccountID, reason)
+			if database != nil {
+				_ = db.SaveRestrictionToDB(database, acct.ChatGPTAccountID, "banned", reason)
+			}
 		}
 		_ = chatgptPlugin.PersistAccessTokens()
 	})
@@ -725,32 +751,57 @@ func writeFileAtomic(path string, data []byte) {
 	}
 }
 
-// loadProxyList 从 proxies.txt / PROXY_URL / http_proxy 加载代理列表
-func loadProxyList() []string {
+// loadProxyList 从 SQLite 数据库 / proxies.txt / PROXY_URL / http_proxy 加载代理列表并双向对齐
+func loadProxyList(database *gorm.DB) []string {
 	var proxies []string
-	proxyUrl := os.Getenv("PROXY_URL")
-	if proxyUrl != "" {
-		proxies = append(proxies, proxyUrl)
+	seen := make(map[string]bool)
+
+	addProxy := func(raw string) {
+		clean := strings.TrimSpace(raw)
+		if clean == "" || strings.HasPrefix(clean, "#") || seen[clean] {
+			return
+		}
+		seen[clean] = true
+		proxies = append(proxies, clean)
 	}
 
-	if _, err := os.Stat("proxies.txt"); err == nil {
-		data, err := os.ReadFile("proxies.txt")
-		if err == nil {
-			lines := string(data)
-			for _, line := range strings.Split(lines, "\n") {
-				line = strings.TrimSpace(line)
-				if line != "" {
-					proxies = append(proxies, line)
-				}
+	// 1. 优先从 SQLite 数据库加载
+	if database != nil {
+		if dbProxies, err := db.LoadProxiesFromDB(database); err == nil {
+			for _, p := range dbProxies {
+				addProxy(p)
 			}
 		}
 	}
 
-	if len(proxies) == 0 {
-		proxy := os.Getenv("http_proxy")
-		if proxy != "" {
-			proxies = append(proxies, proxy)
+	// 2. 合并 PROXY_URL 环境变量
+	if p := os.Getenv("PROXY_URL"); p != "" {
+		addProxy(p)
+	}
+
+	// 3. 合并 proxies.txt
+	if _, err := os.Stat("proxies.txt"); err == nil {
+		if data, err := os.ReadFile("proxies.txt"); err == nil {
+			for _, line := range strings.Split(string(data), "\n") {
+				addProxy(line)
+			}
 		}
+	}
+
+	// 4. 合并 http_proxy 环境变量
+	if len(proxies) == 0 {
+		if p := os.Getenv("http_proxy"); p != "" {
+			addProxy(p)
+		}
+	}
+
+	// 5. 对齐持久化至 SQLite 数据库与 proxies.txt
+	if database != nil && len(proxies) > 0 {
+		_ = db.SaveProxiesToDB(database, proxies)
+	}
+	if len(proxies) > 0 {
+		content := strings.Join(proxies, "\n") + "\n"
+		_ = os.WriteFile("proxies.txt", []byte(content), 0644)
 	}
 
 	return proxies

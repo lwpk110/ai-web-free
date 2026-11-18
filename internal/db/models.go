@@ -162,6 +162,49 @@ type PoolAccountRecord struct {
 	UpdatedAt          time.Time  `gorm:"index" json:"updated_at"`
 }
 
+// ProxyNodeRecord 代理节点持久化模型（支持出口代理 IP 列表持久化与健康状态持久化）
+type ProxyNodeRecord struct {
+	ID        string    `gorm:"primaryKey;size:64" json:"id"`
+	URL       string    `gorm:"size:255;uniqueIndex" json:"url"`
+	Protocol  string    `gorm:"size:32" json:"protocol"`
+	LatencyMs int64     `gorm:"default:0" json:"latency_ms"`
+	Status    string    `gorm:"size:32;default:'active';index" json:"status"` // active | cooling | disabled
+	LastError string    `gorm:"type:text" json:"last_error,omitempty"`
+	CreatedAt time.Time `gorm:"index" json:"created_at"`
+	UpdatedAt time.Time `gorm:"index" json:"updated_at"`
+}
+
+// AccountRestrictionRecord 账号黑名单/手动禁用名单持久化模型
+type AccountRestrictionRecord struct {
+	ID        string    `gorm:"primaryKey;size:128" json:"id"` // 邮箱或 chatgpt_account_id（小写去重）
+	Type      string    `gorm:"size:32;index" json:"type"`     // banned | disabled
+	Reason    string    `gorm:"type:text" json:"reason"`
+	CreatedAt time.Time `gorm:"index" json:"created_at"`
+	UpdatedAt time.Time `gorm:"index" json:"updated_at"`
+}
+
+// CustomVoiceModelRecord 自定义/克隆音色持久化模型
+type CustomVoiceModelRecord struct {
+	ID            string    `gorm:"primaryKey;size:64" json:"id"`
+	Name          string    `gorm:"size:128;index" json:"name"`
+	Role          string    `gorm:"size:64" json:"role,omitempty"`
+	Category      string    `gorm:"size:64" json:"category,omitempty"`
+	Gender        string    `gorm:"size:32" json:"gender,omitempty"`
+	Locale        string    `gorm:"size:32" json:"locale,omitempty"`
+	Transcript    string    `gorm:"type:text" json:"transcript,omitempty"`
+	TagsJSON      string    `gorm:"type:text" json:"tags_json,omitempty"`
+	SourceURL     string    `gorm:"type:text" json:"source_url,omitempty"`
+	SourcePage    string    `gorm:"type:text" json:"source_page,omitempty"`
+	SampleExt     string    `gorm:"size:16" json:"sample_ext,omitempty"`
+	SampleBytes   int       `gorm:"default:0" json:"sample_bytes,omitempty"`
+	CloneEngine   string    `gorm:"size:64" json:"clone_engine,omitempty"`
+	ClonedVoiceID string    `gorm:"size:128;index" json:"cloned_voice_id,omitempty"`
+	CloneStatus   string    `gorm:"size:32;index" json:"clone_status"`
+	Error         string    `gorm:"type:text" json:"error,omitempty"`
+	CreatedAt     time.Time `gorm:"index" json:"created_at"`
+	UpdatedAt     time.Time `gorm:"index" json:"updated_at"`
+}
+
 // ProviderChannelRecord 记录号池中已录入的多模态渠道与账号（持久化至 SQLite 数据库）
 type ProviderChannelRecord struct {
 	ID           string    `gorm:"primaryKey;size:64" json:"id"`

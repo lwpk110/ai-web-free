@@ -9,6 +9,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"ai-web-free/internal/db"
+	"gorm.io/gorm/clause"
 )
 
 const customVoicesStorageID = "custom_voices"
@@ -86,20 +89,85 @@ func (s *VoiceCatalogStore) LoadCustomVoices(ctx context.Context) ([]CustomVoice
 		}
 	}
 	customVoiceMemMu.RLock()
-	defer customVoiceMemMu.RUnlock()
 	list := customVoiceMemCache[s.memKey()]
 	out := make([]CustomVoiceRecord, len(list))
 	copy(out, list)
+	customVoiceMemMu.RUnlock()
+
+	// 内存与文件均为空时，尝试从 SQLite 数据库恢复
+	if len(out) == 0 {
+		if gdb := db.GetDB(); gdb != nil {
+			var dbRecords []db.CustomVoiceModelRecord
+			if err := gdb.Order("created_at asc").Find(&dbRecords).Error; err == nil && len(dbRecords) > 0 {
+				for _, r := range dbRecords {
+					tags := []string{}
+					if r.TagsJSON != "" {
+						tags = strings.Split(r.TagsJSON, ",")
+					}
+					out = append(out, CustomVoiceRecord{
+						ID:            r.ID,
+						Name:          r.Name,
+						Role:          r.Role,
+						Category:      r.Category,
+						Gender:        r.Gender,
+						Locale:        r.Locale,
+						Transcript:    r.Transcript,
+						Tags:          tags,
+						SourceURL:     r.SourceURL,
+						SourcePage:    r.SourcePage,
+						SampleExt:     r.SampleExt,
+						SampleBytes:   r.SampleBytes,
+						CloneEngine:   r.CloneEngine,
+						ClonedVoiceID: r.ClonedVoiceID,
+						CloneStatus:   r.CloneStatus,
+						Error:         r.Error,
+						CreatedAt:     r.CreatedAt,
+						UpdatedAt:     r.UpdatedAt,
+					})
+				}
+				customVoiceMemMu.Lock()
+				customVoiceMemCache[s.memKey()] = out
+				customVoiceMemMu.Unlock()
+			}
+		}
+	}
 	return out, nil
 }
 
-// SaveCustomVoices 持久化保存自定义/克隆音色列表。
+// SaveCustomVoices 持久化保存自定义/克隆音色列表至存储引擎与 SQLite 数据库。
 func (s *VoiceCatalogStore) SaveCustomVoices(ctx context.Context, list []CustomVoiceRecord) error {
 	customVoiceMemMu.Lock()
 	cp := make([]CustomVoiceRecord, len(list))
 	copy(cp, list)
 	customVoiceMemCache[s.memKey()] = cp
 	customVoiceMemMu.Unlock()
+
+	// 同步持久化写入 SQLite 数据库
+	if gdb := db.GetDB(); gdb != nil {
+		for _, v := range cp {
+			rec := db.CustomVoiceModelRecord{
+				ID:            v.ID,
+				Name:          v.Name,
+				Role:          v.Role,
+				Category:      v.Category,
+				Gender:        v.Gender,
+				Locale:        v.Locale,
+				Transcript:    v.Transcript,
+				TagsJSON:      strings.Join(v.Tags, ","),
+				SourceURL:     v.SourceURL,
+				SourcePage:    v.SourcePage,
+				SampleExt:     v.SampleExt,
+				SampleBytes:   v.SampleBytes,
+				CloneEngine:   v.CloneEngine,
+				ClonedVoiceID: v.ClonedVoiceID,
+				CloneStatus:   v.CloneStatus,
+				Error:         v.Error,
+				CreatedAt:     v.CreatedAt,
+				UpdatedAt:     v.UpdatedAt,
+			}
+			_ = gdb.Clauses(clause.OnConflict{UpdateAll: true}).Create(&rec).Error
+		}
+	}
 
 	if s == nil || !s.Enabled() {
 		return nil

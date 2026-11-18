@@ -22,6 +22,8 @@ var tokenCredentialFiles = []string{
 	"proxies.txt",
 	"account_proxies.txt",
 	"banned_accounts.txt",
+	"disabled_accounts.txt",
+	"grok_accounts.txt",
 }
 
 // AutoRestoreDBIfMissing 检查本地 SQLite 数据库是否存在，若不存在且云端存在备份，则自动从七牛云拉取恢复冷启动

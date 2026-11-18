@@ -17,11 +17,13 @@ import (
 	"time"
 
 	"ai-web-free/internal/accounts"
+	"ai-web-free/internal/db"
 	"ai-web-free/internal/proxy"
 	officialtypes "ai-web-free/typings/official"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 var (
@@ -121,9 +123,152 @@ func NewGrokProvider(pPool *proxy.Pool, baseURL, persistFile string, policy acco
 			return results[0].Cookie, nil
 		},
 	}
+	p.loadFromDB()
 	p.loadFromDisk()
+	p.persistToDB()
 	p.Rebalance()
 	return p
+}
+
+func (p *GrokProvider) loadFromDB() {
+	gdb := p.grokCredentialPatternDB
+	if gdb == nil {
+		gdb = db.GetDB()
+	}
+	if gdb == nil {
+		return
+	}
+	var records []db.PoolAccountRecord
+	if err := gdb.Where("provider = ?", "grok").Order("created_at asc").Find(&records).Error; err != nil || len(records) == 0 {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	existingCookie := make(map[string]bool, len(p.accounts))
+	existingEmail := make(map[string]*grokAccount, len(p.accounts))
+	for _, a := range p.accounts {
+		if a.Cookie != "" {
+			existingCookie[a.Cookie] = true
+		}
+		if a.Email != "" {
+			existingEmail[strings.ToLower(a.Email)] = a
+		}
+	}
+
+	for _, r := range records {
+		recEmail := strings.ToLower(strings.TrimSpace(r.Email))
+		if recEmail != "" {
+			if matched, ok := existingEmail[recEmail]; ok {
+				if matched.Password == "" && r.Password != "" {
+					matched.Password = r.Password
+				}
+				if matched.TOTPSecret == "" && r.TOTPSecret != "" {
+					matched.TOTPSecret = r.TOTPSecret
+				}
+				if matched.Cookie == "" && r.Token != "" {
+					matched.Cookie = r.Token
+				}
+				continue
+			}
+		}
+		if r.Token != "" && existingCookie[r.Token] {
+			continue
+		}
+		acct := &grokAccount{
+			ID:          r.ID,
+			Email:       r.Email,
+			Password:    r.Password,
+			TOTPSecret:  r.TOTPSecret,
+			LegacyToken: r.SessionToken,
+			Cookie:      r.Token,
+			Proxy:       r.Proxy,
+			CreatedAt:   r.CreatedAt,
+			TotalCalls:  r.TotalCalls,
+			FailedCalls: r.FailedCalls,
+			LastError:   r.LastError,
+		}
+		if acct.ID == "" {
+			acct.ID = uuid.NewString()
+		}
+		if r.Status == "banned" {
+			acct.Status = accounts.StatusBanned
+		} else if r.Status == "disabled" {
+			acct.Status = accounts.StatusDisabled
+		} else if r.Status == "rate_limited" {
+			acct.Status = accounts.StatusRateLimited
+		} else if r.Status == "standby" {
+			acct.Status = accounts.StatusStandby
+		} else {
+			acct.Status = accounts.StatusActive
+		}
+		if r.CooldownUntil != nil {
+			acct.CooldownUntil = *r.CooldownUntil
+		}
+		if r.LastUsed != nil {
+			acct.LastUsed = *r.LastUsed
+		}
+		p.accounts = append(p.accounts, acct)
+		if acct.Cookie != "" {
+			existingCookie[acct.Cookie] = true
+		}
+		if acct.Email != "" {
+			existingEmail[strings.ToLower(acct.Email)] = acct
+		}
+	}
+}
+
+func (p *GrokProvider) persistToDB() {
+	gdb := p.grokCredentialPatternDB
+	if gdb == nil {
+		gdb = db.GetDB()
+	}
+	if gdb == nil {
+		return
+	}
+	p.mu.RLock()
+	list := make([]*grokAccount, len(p.accounts))
+	copy(list, p.accounts)
+	p.mu.RUnlock()
+
+	for _, a := range list {
+		if a == nil {
+			continue
+		}
+		rec := db.PoolAccountRecord{
+			ID:           a.ID,
+			Provider:     "grok",
+			Type:         "free",
+			Email:        a.Email,
+			Password:     a.Password,
+			TOTPSecret:   a.TOTPSecret,
+			SessionToken: a.LegacyToken,
+			Token:        a.Cookie,
+			Proxy:        a.Proxy,
+			Status:       a.Status.String(),
+			LastError:    a.LastError,
+			TotalCalls:   a.TotalCalls,
+			FailedCalls:  a.FailedCalls,
+			CreatedAt:    a.CreatedAt,
+			UpdatedAt:    time.Now(),
+		}
+		if rec.ID == "" {
+			rec.ID = uuid.NewString()
+			a.ID = rec.ID
+		}
+		if rec.CreatedAt.IsZero() {
+			rec.CreatedAt = time.Now()
+		}
+		if !a.CooldownUntil.IsZero() {
+			t := a.CooldownUntil
+			rec.CooldownUntil = &t
+		}
+		if !a.LastUsed.IsZero() {
+			t := a.LastUsed
+			rec.LastUsed = &t
+		}
+		_ = gdb.Clauses(clause.OnConflict{UpdateAll: true}).Create(&rec).Error
+	}
 }
 
 func (p *GrokProvider) loadFromDisk() {
@@ -139,6 +284,7 @@ func (p *GrokProvider) loadFromDisk() {
 }
 
 func (p *GrokProvider) persistToDisk() {
+	p.persistToDB()
 	if p.persistFile == "" {
 		return
 	}

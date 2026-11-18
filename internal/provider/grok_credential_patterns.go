@@ -19,11 +19,13 @@ var (
 	grokPossibleSecretPattern        = regexp.MustCompile(`[A-Za-z0-9_/+=:.@-]{12,}`)
 )
 
-// SetGrokCredentialPatternDB attaches the persistent credential-format memory database.
+// SetGrokCredentialPatternDB attaches the persistent credential-format memory database and synchronizes grok accounts with DB.
 func (p *GrokProvider) SetGrokCredentialPatternDB(database *gorm.DB) {
 	p.grokCredentialPatternMu.Lock()
-	defer p.grokCredentialPatternMu.Unlock()
 	p.grokCredentialPatternDB = database
+	p.grokCredentialPatternMu.Unlock()
+	p.loadFromDB()
+	p.persistToDB()
 }
 
 func (p *GrokProvider) learnedGrokCredentialPatterns() []appdb.CredentialFormatPatternRecord {

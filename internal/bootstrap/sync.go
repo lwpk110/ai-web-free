@@ -5,10 +5,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"ai-web-free/internal/accounts"
 	"ai-web-free/internal/config"
 	"ai-web-free/internal/db"
+	"gorm.io/gorm/clause"
 )
 
 // SyncLocalFilesToDB 扫描本地凭据文件并增量写入 SQLite 数据库（用于备份前对齐）
@@ -134,10 +136,87 @@ func SyncLocalFilesToDB(cfg *config.Config) (int, error) {
 	if err := accounts.BatchSaveAccountsToDB(database, accs); err != nil {
 		return len(accs), fmt.Errorf("批量保存至数据库失败: %w", err)
 	}
+
+	// 6. 同步 proxies.txt 至数据库
+	if _, err := os.Stat("proxies.txt"); err == nil {
+		if data, err := os.ReadFile("proxies.txt"); err == nil {
+			var pLines []string
+			for _, line := range strings.Split(string(data), "\n") {
+				line = strings.TrimSpace(line)
+				if line != "" && !strings.HasPrefix(line, "#") {
+					pLines = append(pLines, line)
+				}
+			}
+			if len(pLines) > 0 {
+				_ = db.SaveProxiesToDB(database, pLines)
+			}
+		}
+	}
+
+	// 7. 同步 banned_accounts.txt 与 disabled_accounts.txt 至数据库
+	for id, reason := range accounts.LoadBannedFromFile("banned_accounts.txt") {
+		_ = db.SaveRestrictionToDB(database, id, "banned", reason)
+	}
+	for id, reason := range accounts.LoadDisabledFromFile("disabled_accounts.txt") {
+		_ = db.SaveRestrictionToDB(database, id, "disabled", reason)
+	}
+
+	// 8. 同步 grok_accounts.txt 至数据库
+	if _, err := os.Stat("grok_accounts.txt"); err == nil {
+		if data, err := os.ReadFile("grok_accounts.txt"); err == nil {
+			for _, line := range strings.Split(string(data), "\n") {
+				line = strings.TrimSpace(line)
+				if line == "" || strings.HasPrefix(line, "#") {
+					continue
+				}
+				gRec := db.PoolAccountRecord{
+					Provider:  "grok",
+					Type:      "free",
+					Status:    "active",
+					CreatedAt: time.Now(),
+					UpdatedAt: time.Now(),
+				}
+				if strings.Contains(line, "|") {
+					parts := strings.Split(line, "|")
+					if len(parts) > 0 {
+						gRec.Email = strings.TrimSpace(parts[0])
+					}
+					if len(parts) > 1 {
+						gRec.Password = strings.TrimSpace(parts[1])
+					}
+					if len(parts) > 2 {
+						gRec.TOTPSecret = strings.TrimSpace(parts[2])
+					}
+					if len(parts) > 3 {
+						gRec.SessionToken = strings.TrimSpace(parts[3])
+					}
+					if len(parts) > 4 {
+						gRec.Token = strings.TrimSpace(parts[4])
+					}
+				} else if strings.Contains(line, "----") {
+					parts := strings.SplitN(line, "----", 2)
+					gRec.Email = strings.TrimSpace(parts[0])
+					if len(parts) > 1 {
+						gRec.Token = strings.TrimSpace(parts[1])
+					}
+				} else {
+					gRec.Token = line
+				}
+				if gRec.ID == "" {
+					gRec.ID = "grok:" + gRec.Email
+					if gRec.Email == "" {
+						gRec.ID = "grok:" + gRec.Token
+					}
+				}
+				_ = database.Clauses(clause.OnConflict{UpdateAll: true}).Create(&gRec).Error
+			}
+		}
+	}
+
 	return len(accs), nil
 }
 
-// ExportDBToLocalFiles 从 SQLite 数据库读取账号并回写至本地文本文件（用于恢复后对齐）
+// ExportDBToLocalFiles 从 SQLite 数据库读取全部账号、代理与黑白名单并回写至本地文本文件（用于恢复后对齐）
 func ExportDBToLocalFiles(cfg *config.Config) (int, error) {
 	if cfg == nil {
 		loaded := config.Load()
@@ -153,11 +232,8 @@ func ExportDBToLocalFiles(cfg *config.Config) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	if len(accs) == 0 {
-		return 0, nil
-	}
 
-	// 导出 access_tokens.txt
+	// 1. 导出 access_tokens.txt
 	var accessLines []string
 	for _, a := range accs {
 		if a.Type != accounts.TypeNoAuth && a.Token != "" {
@@ -172,7 +248,7 @@ func ExportDBToLocalFiles(cfg *config.Config) (int, error) {
 		_ = writeAtomicFile("access_tokens.txt", []byte(strings.Join(accessLines, "\n")+"\n"))
 	}
 
-	// 导出 kami_accounts.txt
+	// 2. 导出 kami_accounts.txt
 	var kamiList []accounts.KamiAccount
 	for _, a := range accs {
 		if a.Email != "" && a.Password != "" {
@@ -185,6 +261,59 @@ func ExportDBToLocalFiles(cfg *config.Config) (int, error) {
 	}
 	if len(kamiList) > 0 {
 		_ = writeAtomicFile("kami_accounts.txt", []byte(accounts.FormatKamiLines(kamiList)))
+	}
+
+	// 3. 导出 proxies.txt
+	if proxies, err := db.LoadProxiesFromDB(database); err == nil && len(proxies) > 0 {
+		_ = writeAtomicFile("proxies.txt", []byte(strings.Join(proxies, "\n")+"\n"))
+	}
+
+	// 4. 导出 banned_accounts.txt
+	bannedMap := db.LoadRestrictionsFromDB(database, "banned")
+	if len(bannedMap) > 0 {
+		var bLines []string
+		for id, reason := range bannedMap {
+			bLines = append(bLines, fmt.Sprintf("%s----%s", id, reason))
+		}
+		_ = writeAtomicFile("banned_accounts.txt", []byte(strings.Join(bLines, "\n")+"\n"))
+	}
+
+	// 5. 导出 disabled_accounts.txt
+	disabledMap := db.LoadRestrictionsFromDB(database, "disabled")
+	if len(disabledMap) > 0 {
+		var dLines []string
+		for id, reason := range disabledMap {
+			dLines = append(dLines, fmt.Sprintf("%s----%s", id, reason))
+		}
+		_ = writeAtomicFile("disabled_accounts.txt", []byte(strings.Join(dLines, "\n")+"\n"))
+	}
+
+	// 6. 导出 grok_accounts.txt
+	var grokRecords []db.PoolAccountRecord
+	if err := database.Where("provider = ?", "grok").Find(&grokRecords).Error; err == nil && len(grokRecords) > 0 {
+		var gLines []string
+		for _, g := range grokRecords {
+			if g.Password != "" {
+				parts := []string{g.Email, g.Password}
+				if g.TOTPSecret != "" {
+					parts = append(parts, g.TOTPSecret)
+				}
+				if g.SessionToken != "" {
+					parts = append(parts, g.SessionToken)
+				}
+				if g.Token != "" {
+					parts = append(parts, g.Token)
+				}
+				gLines = append(gLines, strings.Join(parts, "|"))
+			} else if g.Email != "" && g.Token != "" {
+				gLines = append(gLines, fmt.Sprintf("%s----%s", g.Email, g.Token))
+			} else if g.Token != "" {
+				gLines = append(gLines, g.Token)
+			}
+		}
+		if len(gLines) > 0 {
+			_ = writeAtomicFile("grok_accounts.txt", []byte(strings.Join(gLines, "\n")+"\n"))
+		}
 	}
 
 	return len(accs), nil
