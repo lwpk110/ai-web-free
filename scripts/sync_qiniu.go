@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 
+	"ai-web-free/internal/bootstrap"
 	"ai-web-free/internal/config"
 	"ai-web-free/internal/storage"
 
@@ -61,6 +62,10 @@ func main() {
 
 	switch cmd {
 	case "push", "backup":
+		// 备份前先对齐：将本地凭据文件中的账号同步增量写入 SQLite 数据库
+		if count, err := bootstrap.SyncLocalFilesToDB(&cfg); err == nil {
+			fmt.Printf("📦 已对齐 %d 个号池账号至数据库\n", count)
+		}
 		fmt.Printf("🚀 开始向七牛云存储桶 [%s] 推送数据...\n\n", cfg.QiniuBucket)
 		if err := storage.PushBackup(client, cfg.DatabaseURL, ".env", cfg.StorageDir, "data/videos"); err != nil {
 			fmt.Fprintf(os.Stderr, "备份推送失败: %v\n", err)
