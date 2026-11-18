@@ -2,6 +2,7 @@ package handler
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -221,5 +222,28 @@ func TestUnifiedMediaCrawlImportCloneAndReuseAcrossStudios(t *testing.T) {
 	r.ServeHTTP(delW, httptest.NewRequest(http.MethodDelete, "/v1/audio/voices/custom/"+impVoiceRes.ID, nil))
 	if delW.Code != http.StatusOK {
 		t.Fatalf("expected delete custom voice 200, got %d: %s", delW.Code, delW.Body.String())
+	}
+}
+
+func TestSearchExistingSystemVoicesChineseCompoundQuery(t *testing.T) {
+	memStore := storage.NewMemoryStorageEngine()
+	reg := provider.NewRegistry()
+	reg.Register(provider.NewSiliconFlowProvider(nil, ""))
+	reg.Register(provider.NewDashScopeProvider(nil, ""))
+	audioH := NewAudioHandler(accounts.NewPool(nil), &config.Config{})
+	audioH.SetRuntime(&GatewayRuntime{StorageEngine: memStore})
+	audioH.SetRegistry(reg)
+
+	matches := audioH.searchExistingSystemVoices(context.Background(), "霸总低沉男声", 8)
+	if len(matches) == 0 {
+		t.Fatalf("expected compound Chinese voice query '霸总低沉男声' to match system voices, got 0")
+	}
+	for _, v := range matches {
+		if v.Gender != "male" {
+			t.Fatalf("expected male voices for '霸总低沉男声', got %s (%s)", v.ID, v.Gender)
+		}
+	}
+	if matches[0].ID != "zh-CN-YunyangNeural" {
+		t.Fatalf("expected top match zh-CN-YunyangNeural for '霸总低沉男声', got %s (%s)", matches[0].ID, matches[0].Name)
 	}
 }

@@ -160,6 +160,42 @@ func (t *TieredStorageEngine) Exists(ctx context.Context, path string) bool {
 	return false
 }
 
+func (t *TieredStorageEngine) ListPrefix(ctx context.Context, prefix string) ([]string, error) {
+	seen := make(map[string]struct{})
+	out := make([]string, 0)
+	add := func(item string) {
+		norm := strings.TrimPrefix(strings.ReplaceAll(strings.TrimSpace(item), "\\", "/"), "storage/")
+		if norm == "" {
+			return
+		}
+		if _, ok := seen[norm]; !ok {
+			seen[norm] = struct{}{}
+			out = append(out, norm)
+		}
+	}
+	if localItems, err := t.local.ListPrefix(ctx, prefix); err == nil {
+		for _, item := range localItems {
+			add(item)
+		}
+	}
+	if t.qiniu != nil {
+		normalized := strings.TrimPrefix(strings.ReplaceAll(strings.TrimSpace(prefix), "\\", "/"), "/")
+		if qItems, err := t.qiniu.List(ctx, normalized, 1000); err == nil {
+			for _, item := range qItems {
+				add(item)
+			}
+		}
+		if !strings.HasPrefix(normalized, "storage/") {
+			if qItems, err := t.qiniu.List(ctx, "storage/"+normalized, 1000); err == nil {
+				for _, item := range qItems {
+					add(item)
+				}
+			}
+		}
+	}
+	return out, nil
+}
+
 func splitCategoryAndID(relPath string) (string, string) {
 	clean := strings.TrimPrefix(strings.ReplaceAll(relPath, "\\", "/"), "storage/")
 	idx := strings.Index(clean, "/")

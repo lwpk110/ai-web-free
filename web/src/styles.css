@@ -1,5 +1,20 @@
 @import "tailwindcss";
 
+@theme inline {
+  --color-primary: var(--brand-primary);
+  --color-primary-foreground: var(--brand-fg);
+  --color-muted: var(--bg-muted);
+  --color-muted-foreground: var(--text-muted);
+  --color-secondary: var(--bg-muted);
+  --color-secondary-foreground: var(--text-secondary);
+  --color-destructive: #ef4444;
+  --color-destructive-foreground: #ffffff;
+  --color-input: var(--bg-input);
+  --color-ring: var(--ring-focus);
+  --color-surface: var(--bg-surface);
+  --color-foreground: var(--text-primary);
+}
+
 :root {
   color-scheme: light;
   --bg-canvas: #f8f9fb;
@@ -21,6 +36,8 @@
   --text-muted: #64748b;
   --brand-primary: #0f172a;
   --brand-fg: #f8fafc;
+  --accent-indigo: #6366f1;
+  --accent-indigo-fg: #ffffff;
   --code-bg: #f1f4f9;
   --code-text: #1e293b;
 
@@ -62,6 +79,8 @@
   --text-muted: #727988;
   --brand-primary: #f4f5f7;
   --brand-fg: #090a0d;
+  --accent-indigo: #6366f1;
+  --accent-indigo-fg: #ffffff;
   --code-bg: #0c0e13;
   --code-text: #e2e8f0;
 
@@ -98,6 +117,17 @@
       "PingFang SC", "Microsoft YaHei", sans-serif;
     -webkit-font-smoothing: antialiased;
     transition: background-color 0.2s ease, color 0.2s ease;
+  }
+
+  button:focus:not(:focus-visible),
+  a:focus:not(:focus-visible) {
+    outline: none;
+  }
+
+  button:focus-visible,
+  a:focus-visible {
+    outline: 2px solid rgba(99, 102, 241, 0.5);
+    outline-offset: 2px;
   }
 
   code,
@@ -166,6 +196,48 @@
   box-shadow: inset 0 1px 0 var(--specular), 0 1px 2px rgba(0, 0, 0, 0.1);
 }
 
+.p-card-selected {
+  background: rgba(99, 102, 241, 0.055);
+  border-color: rgba(99, 102, 241, 0.55);
+  color: var(--text-primary);
+  box-shadow: inset 0 1px 0 var(--specular),
+    0 0 0 3px rgba(99, 102, 241, 0.1),
+    0 2px 8px rgba(99, 102, 241, 0.08);
+}
+
+:root[data-theme="dark"] .p-card-selected {
+  background: rgba(99, 102, 241, 0.11);
+  border-color: rgba(129, 140, 248, 0.6);
+  box-shadow: inset 0 1px 0 var(--specular),
+    0 0 0 3px rgba(99, 102, 241, 0.14),
+    0 4px 14px rgba(0, 0, 0, 0.35);
+}
+
+.p-seg-active {
+  background: var(--accent-indigo);
+  color: var(--accent-indigo-fg);
+  box-shadow: 0 1px 3px rgba(99, 102, 241, 0.28);
+}
+
+.p-chip-active {
+  background: var(--accent-indigo);
+  border-color: transparent;
+  color: var(--accent-indigo-fg);
+  box-shadow: 0 1px 3px rgba(99, 102, 241, 0.24);
+}
+
+.p-badge-indigo {
+  background: rgba(99, 102, 241, 0.12);
+  color: #4f46e5;
+  border-color: rgba(99, 102, 241, 0.25);
+}
+
+:root[data-theme="dark"] .p-badge-indigo {
+  background: rgba(129, 140, 248, 0.15);
+  color: #a5b4fc;
+  border-color: rgba(129, 140, 248, 0.28);
+}
+
 .p-input {
   background: var(--bg-input);
   border: 1px solid var(--hairline);
@@ -217,6 +289,16 @@ tr:hover .hover-reveal,
   border-radius: 9999px;
   background: #f59e0b;
   box-shadow: 0 0 8px rgba(245, 158, 11, 0.55);
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+.status-dot-indigo {
+  width: 7px;
+  height: 7px;
+  border-radius: 9999px;
+  background: #6366f1;
+  box-shadow: 0 0 8px rgba(99, 102, 241, 0.72);
   display: inline-block;
   flex-shrink: 0;
 }

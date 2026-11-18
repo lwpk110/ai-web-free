@@ -817,16 +817,16 @@ export function VideoStudio(): React.JSX.Element {
                 <label className="font-medium z-text">生成时长（动态秒数）</label>
                 <span className="font-mono font-semibold text-primary">{duration} 秒</span>
               </div>
-              <div className="grid grid-cols-5 gap-1.5 text-xs">
+              <div className="p-surface p-1 rounded-xl grid grid-cols-5 gap-1 text-xs">
                 {[3, 5, 8, 10, 15].map((sec) => (
                   <button
                     key={sec}
                     type="button"
                     onClick={() => setDuration(sec)}
-                    className={`py-1.5 rounded-lg border transition-all ${
+                    className={`py-1.5 rounded-lg transition-all cursor-pointer font-mono-num ${
                       duration === sec
-                        ? "border-primary bg-primary/10 text-primary font-semibold"
-                        : "z-border hover:bg-muted/50 z-text"
+                        ? "p-seg-active font-semibold"
+                        : "z-ghost-btn z-text-muted"
                     }`}
                   >
                     {sec}s
@@ -841,7 +841,7 @@ export function VideoStudio(): React.JSX.Element {
                   step={1}
                   value={Math.min(30, Math.max(1, duration))}
                   onChange={(e) => setDuration(Number(e.target.value) || 5)}
-                  className="flex-1 accent-primary cursor-pointer"
+                  className="flex-1 accent-indigo-500 cursor-pointer"
                 />
                 <div className="flex items-center gap-1 shrink-0">
                   <input
@@ -864,11 +864,11 @@ export function VideoStudio(): React.JSX.Element {
         </div>
 
         {/* 左栏底部固定提交操作条 */}
-        <div className="p-3 border-t z-border bg-surface shrink-0">
+        <div className="p-3 border-t z-border z-surface shrink-0">
           <button
             type="submit"
             disabled={submitting || (!prompt.trim() && !imageUrl.trim())}
-            className="w-full py-2.5 px-4 rounded-lg bg-primary text-primary-foreground font-medium text-xs hover:bg-primary/90 transition-all flex items-center justify-center gap-2 shadow disabled:opacity-50 cursor-pointer"
+            className="w-full py-2.5 px-4 rounded-xl z-primary-btn font-semibold text-xs flex items-center justify-center gap-2 cursor-pointer"
           >
             {submitting ? (
               <>
@@ -888,7 +888,7 @@ export function VideoStudio(): React.JSX.Element {
       {/* 右栏：主视区（提示说明、运镜风格库、活跃任务监视、作品画廊） */}
       <div className="flex-1 flex flex-col min-h-0 h-full overflow-hidden z-canvas">
         {/* 右栏顶栏 */}
-        <div className="px-4 py-2.5 border-b z-border bg-surface flex flex-wrap items-center justify-between gap-2 shrink-0">
+        <div className="px-4 py-2.5 border-b z-border z-surface flex flex-wrap items-center justify-between gap-2 shrink-0">
           <div className="flex flex-wrap items-center gap-2 text-xs">
             <div className="flex items-center gap-2">
               <Film className="w-4 h-4 text-primary" />
@@ -926,7 +926,7 @@ export function VideoStudio(): React.JSX.Element {
         </div>
 
         {/* 右栏主体滚动区 */}
-        <div className="flex-1 overflow-y-auto p-4 space-y-4 min-h-0">
+        <div className="flex-1 overflow-y-auto p-5 space-y-4 min-h-0 studio-grid-bg">
           {/* 模式说明条 */}
       <div className="p-3 text-xs rounded-lg bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20 flex items-start gap-2">
         <Sparkles className="w-4 h-4 shrink-0 mt-0.5 text-blue-500" />
@@ -982,10 +982,10 @@ export function VideoStudio(): React.JSX.Element {
                     key={cat}
                     type="button"
                     onClick={() => setCameraCategory(cat)}
-                    className={`text-[11px] px-2.5 py-1 rounded-full border transition-colors ${
+                    className={`text-[11px] px-2.5 py-1 rounded-full border transition-all cursor-pointer ${
                       active
-                        ? "bg-primary text-primary-foreground border-transparent font-medium"
-                        : "z-border hover:bg-muted/60 z-text-muted"
+                        ? "p-chip-active font-medium"
+                        : "z-border z-ghost-btn z-text-muted"
                     }`}
                   >
                     {cat}
@@ -996,7 +996,7 @@ export function VideoStudio(): React.JSX.Element {
                 <button
                   type="button"
                   onClick={() => setSelectedCameraId(null)}
-                  className="ml-auto inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20 hover:bg-amber-500/20 transition-colors"
+                  className="ml-auto inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full border p-badge-indigo hover:opacity-85 transition-opacity cursor-pointer"
                 >
                   已选：{selectedCameraPreset.nameZh}
                   <X className="w-3 h-3" />
@@ -1019,7 +1019,7 @@ export function VideoStudio(): React.JSX.Element {
               onApplyExample={handleApplyCameraExample}
             />
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-2 max-h-[210px] overflow-y-auto pr-1">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-2 max-h-[192px] overflow-y-auto pr-1">
               {filteredCameraPresets.map((preset) => {
                 const isSelected = selectedCameraId === preset.id;
                 return (
@@ -1030,20 +1030,29 @@ export function VideoStudio(): React.JSX.Element {
                     onClick={() =>
                       setSelectedCameraId((prev) => (prev === preset.id ? null : preset.id))
                     }
-                    className={`group cursor-pointer rounded-lg border p-2.5 transition-all flex flex-col justify-between gap-1.5 ${
+                    className={`group cursor-pointer rounded-xl border p-2 transition-all flex flex-col justify-between gap-1.5 ${
                       isSelected
-                        ? "border-primary bg-primary/5 ring-1 ring-primary/30"
-                        : "z-border hover:bg-muted/40"
+                        ? "p-card-selected"
+                        : "p-card p-card-interactive"
                     }`}
                   >
                     <div className="space-y-0.5">
                       <div className="flex items-center justify-between gap-1">
-                        <span className="text-xs font-semibold z-text truncate">
-                          {musePreviewUrls[preset.id] ? "🎬 " : ""}
-                          {preset.nameZh}
+                        <span className="text-xs font-semibold z-text truncate flex items-center gap-1.5">
+                          <span
+                            className={
+                              isSelected
+                                ? "status-dot-indigo"
+                                : "w-1.5 h-1.5 rounded-full border z-border shrink-0 opacity-60"
+                            }
+                          />
+                          <span className="truncate">
+                            {musePreviewUrls[preset.id] ? "🎬 " : ""}
+                            {preset.nameZh}
+                          </span>
                         </span>
-                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-muted z-text-muted shrink-0">
-                          {preset.category}
+                        <span className={`text-[10px] px-1.5 py-0.5 rounded shrink-0 ${isSelected ? "border p-badge-indigo" : "bg-muted z-text-muted"}`}>
+                          {isSelected ? "已选" : preset.category}
                         </span>
                       </div>
                       <div className="text-[10px] font-mono text-primary/80 truncate">
@@ -1129,13 +1138,13 @@ export function VideoStudio(): React.JSX.Element {
               )}
 
               {activeTask.video_url && (
-                <div className="space-y-2 pt-2 border-t z-border">
+                <div className="space-y-2.5 pt-2 border-t z-border">
                   <video
                     src={activeTask.video_url}
                     controls
                     autoPlay
                     loop
-                    className="w-full rounded-lg aspect-video bg-black shadow"
+                    className="w-full max-w-xl max-h-[300px] rounded-xl aspect-video bg-black shadow"
                   />
                   <div className="flex items-center justify-end gap-3">
                     <button
@@ -1208,41 +1217,43 @@ export function VideoStudio(): React.JSX.Element {
             </div>
 
             {/* 状态分类标签 */}
-            <div className="flex flex-wrap items-center gap-1.5 border-b z-border pb-3">
-              {[
-                { key: "all" as const, label: "全部", count: tasks.length },
-                {
-                  key: "succeeded" as const,
-                  label: "已完成",
-                  count: tasks.filter((t) => t.status === "SUCCEEDED").length,
-                },
-                {
-                  key: "pending" as const,
-                  label: "排队中",
-                  count: tasks.filter((t) => t.status === "PENDING" || t.status === "RUNNING").length,
-                },
-                {
-                  key: "failed" as const,
-                  label: "已失败",
-                  count: tasks.filter((t) => t.status === "FAILED").length,
-                },
-              ].map((tab) => {
-                const active = historyFilter === tab.key;
-                return (
-                  <button
-                    key={tab.key}
-                    type="button"
-                    onClick={() => setHistoryFilter(tab.key)}
-                    className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${
-                      active
-                        ? "bg-primary text-primary-foreground shadow-sm"
-                        : "bg-muted/60 z-text-muted hover:bg-muted"
-                    }`}
-                  >
-                    {tab.label} ({tab.count})
-                  </button>
-                );
-              })}
+            <div className="flex flex-wrap items-center gap-2 border-b z-border pb-3">
+              <div className="p-surface p-1 rounded-xl inline-flex flex-wrap items-center gap-1">
+                {[
+                  { key: "all" as const, label: "全部", count: tasks.length },
+                  {
+                    key: "succeeded" as const,
+                    label: "已完成",
+                    count: tasks.filter((t) => t.status === "SUCCEEDED").length,
+                  },
+                  {
+                    key: "pending" as const,
+                    label: "排队中",
+                    count: tasks.filter((t) => t.status === "PENDING" || t.status === "RUNNING").length,
+                  },
+                  {
+                    key: "failed" as const,
+                    label: "已失败",
+                    count: tasks.filter((t) => t.status === "FAILED").length,
+                  },
+                ].map((tab) => {
+                  const active = historyFilter === tab.key;
+                  return (
+                    <button
+                      key={tab.key}
+                      type="button"
+                      onClick={() => setHistoryFilter(tab.key)}
+                      className={`px-2.5 py-1 rounded-lg text-[11px] transition-all cursor-pointer ${
+                        active
+                          ? "p-seg-active font-semibold"
+                          : "z-ghost-btn z-text-muted"
+                      }`}
+                    >
+                      {tab.label} <span className="font-mono-num opacity-80">({tab.count})</span>
+                    </button>
+                  );
+                })}
+              </div>
             </div>
 
             {(() => {
@@ -1255,8 +1266,8 @@ export function VideoStudio(): React.JSX.Element {
 
               if (filteredTasks.length === 0) {
                 return (
-                  <div className="py-16 text-center text-xs z-text-muted space-y-2">
-                    <Film className="w-8 h-8 mx-auto opacity-40" />
+                  <div className="py-12 text-center text-xs z-text-muted space-y-2">
+                    <Film className="w-7 h-7 mx-auto opacity-40" />
                     <p>
                       {tasks.length === 0
                         ? "暂无生成的视频记录，在左侧输入 Prompt 立即体验"
@@ -1267,11 +1278,11 @@ export function VideoStudio(): React.JSX.Element {
               }
 
               return (
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 max-h-[620px] overflow-y-auto pr-1">
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4 gap-3 max-h-[640px] overflow-y-auto pr-1">
                   {filteredTasks.map((t) => (
                     <div
                       key={t.task_id}
-                      className="rounded-lg border z-border p-card overflow-hidden shadow-sm flex flex-col justify-between"
+                      className="rounded-xl border z-border p-card p-card-interactive overflow-hidden flex flex-col justify-between"
                     >
                       {t.video_url ? (
                         <video
@@ -1280,13 +1291,13 @@ export function VideoStudio(): React.JSX.Element {
                           className="w-full aspect-video bg-black object-cover"
                         />
                       ) : (
-                        <div className="w-full aspect-video bg-muted/40 p-3 flex flex-col items-center justify-center text-center text-xs z-text-muted space-y-1">
+                        <div className="w-full aspect-video bg-muted/40 p-2.5 flex flex-col items-center justify-center text-center text-xs z-text-muted space-y-1">
                           {t.status === "FAILED" ? (
                             <>
-                              <AlertCircle className="w-5 h-5 text-destructive mb-1" />
-                              <span className="font-semibold text-destructive">生成失败</span>
+                              <AlertCircle className="w-4 h-4 text-destructive mb-0.5" />
+                              <span className="text-[11px] font-semibold text-destructive">生成失败</span>
                               <span
-                                className="text-[11px] text-destructive/80 font-mono line-clamp-2"
+                                className="text-[10px] text-destructive/80 font-mono line-clamp-2"
                                 title={t.error_msg}
                               >
                                 {t.error_msg || "上游接口响应异常"}
@@ -1294,22 +1305,22 @@ export function VideoStudio(): React.JSX.Element {
                             </>
                           ) : (
                             <>
-                              <Clock className="w-5 h-5 animate-spin text-purple-500 mb-1" />
-                              <span>渲染排队中...</span>
+                              <Clock className="w-4 h-4 animate-spin text-primary mb-0.5" />
+                              <span className="text-[11px]">渲染排队中...</span>
                             </>
                           )}
                         </div>
                       )}
 
-                      <div className="p-3 space-y-2">
-                        <p className="text-xs z-text line-clamp-2 font-medium" title={t.prompt}>
+                      <div className="p-2.5 space-y-1.5">
+                        <p className="text-[11.5px] z-text line-clamp-2 font-medium leading-snug" title={t.prompt}>
                           {t.prompt || "（基于参考图生成）"}
                         </p>
                         {(t.vid_id || t.account_email || t.upstream_seq || t.expected_bytes) && (
-                          <div className="flex flex-wrap items-center gap-1.5 text-[10px] font-mono z-text-muted">
+                          <div className="flex flex-wrap items-center gap-1 text-[10px] font-mono z-text-muted">
                             {t.vid_id && (
                               <span
-                                className="px-1.5 py-0.5 rounded bg-primary/10 text-primary"
+                                className="px-1.5 py-0.25 rounded bg-primary/10 text-primary truncate max-w-[110px]"
                                 title={t.upstream_asset_path || t.vid_id}
                               >
                                 {t.vid_id}
@@ -1317,35 +1328,27 @@ export function VideoStudio(): React.JSX.Element {
                             )}
                             {t.account_email && (
                               <span
-                                className="px-1.5 py-0.5 rounded bg-muted truncate max-w-[160px]"
+                                className="px-1.5 py-0.25 rounded bg-muted truncate max-w-[120px]"
                                 title={t.account_email}
                               >
                                 {t.account_email}
                               </span>
                             )}
-                            {typeof t.upstream_seq === "number" && t.upstream_seq > 0 && (
-                              <span
-                                className="px-1.5 py-0.5 rounded bg-muted"
-                                title={`msg_id: ${t.upstream_msg_id || "-"}`}
-                              >
-                                seq#{t.upstream_seq}
-                              </span>
-                            )}
                             {typeof t.expected_bytes === "number" && t.expected_bytes > 0 && (
                               <span
-                                className="px-1.5 py-0.5 rounded bg-muted"
+                                className="px-1.5 py-0.25 rounded bg-muted"
                                 title={t.upstream_asset_path || ""}
                               >
-                                {(t.expected_bytes / (1024 * 1024)).toFixed(2)} MB
+                                {(t.expected_bytes / (1024 * 1024)).toFixed(1)} MB
                               </span>
                             )}
                           </div>
                         )}
-                        <div className="flex items-center justify-between gap-2 text-[11px] z-text-muted pt-1 border-t z-border">
-                          <span className="px-1.5 py-0.5 rounded bg-muted text-[10px]">
+                        <div className="flex items-center justify-between gap-1.5 text-[11px] z-text-muted pt-1.5 border-t z-border">
+                          <span className="px-1.5 py-0.25 rounded bg-muted text-[10px] truncate max-w-[120px]" title={t.model}>
                             {t.model}
                           </span>
-                          <div className="flex items-center gap-2">
+                          <div className="flex items-center gap-1.5 shrink-0">
                             {t.status === "FAILED" &&
                               (t.provider === "meta_muse" || t.model.includes("muse")) && (
                                 <button

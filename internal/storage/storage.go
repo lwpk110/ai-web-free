@@ -25,6 +25,11 @@ type MediaStorageEngine interface {
 	Read(ctx context.Context, path string) ([]byte, error)
 }
 
+// PrefixLister 可选扩展接口：按前缀一次性列举已存在的对象相对路径，避免逐条 Exists 探测引发 N+1 远程请求。
+type PrefixLister interface {
+	ListPrefix(ctx context.Context, prefix string) ([]string, error)
+}
+
 func resolveExtForMime(category, mimeType string) string {
 	lower := strings.ToLower(strings.TrimSpace(mimeType))
 	if idx := strings.Index(lower, ";"); idx > 0 {
@@ -207,6 +212,36 @@ func (s *LocalStorageEngine) Exists(ctx context.Context, path string) bool {
 	return err == nil && !info.IsDir() && info.Size() > 0
 }
 
+func (s *LocalStorageEngine) ListPrefix(ctx context.Context, prefix string) ([]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	cleanPrefix := strings.Trim(strings.ReplaceAll(strings.TrimSpace(prefix), "\\", "/"), "/")
+	if cleanPrefix == "" || strings.Contains(cleanPrefix, "..") {
+		return nil, nil
+	}
+	dir := filepath.Join(s.baseDir, filepath.FromSlash(cleanPrefix))
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	out := make([]string, 0, len(entries))
+	for _, ent := range entries {
+		if ent.IsDir() {
+			continue
+		}
+		info, err := ent.Info()
+		if err != nil || info.Size() <= 0 {
+			continue
+		}
+		out = append(out, cleanPrefix+"/"+ent.Name())
+	}
+	return out, nil
+}
+
 // MemoryStorageEngine 纯内存临时存储引擎（用于降级或单元测试）
 type MemoryStorageEngine struct {
 	files map[string][]byte
@@ -273,4 +308,17 @@ func (m *MemoryStorageEngine) Exists(ctx context.Context, path string) bool {
 	defer m.mu.RUnlock()
 	data, ok := m.files[path]
 	return ok && len(data) > 0
+}
+
+func (m *MemoryStorageEngine) ListPrefix(ctx context.Context, prefix string) ([]string, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	cleanPrefix := strings.TrimPrefix(strings.ReplaceAll(strings.TrimSpace(prefix), "\\", "/"), "/")
+	out := make([]string, 0)
+	for k, v := range m.files {
+		if len(v) > 0 && strings.HasPrefix(k, cleanPrefix) {
+			out = append(out, k)
+		}
+	}
+	return out, nil
 }

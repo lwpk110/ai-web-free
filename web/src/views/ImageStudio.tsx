@@ -49,7 +49,6 @@ import { dispatchDramaCanvas } from "../lib/dramaCanvasBridge";
 import { useModelsCatalog } from "../lib/models";
 import {
   base64ToBlob,
-  checkLocalLegacyImagesCount,
   clearUnifiedImages,
   dataUrlToBlob,
   deleteUnifiedImage,
@@ -57,7 +56,6 @@ import {
   loadUnifiedFavoritePromptIds,
   loadUnifiedImages,
   saveUnifiedImage,
-  syncLocalImagesToServer,
   toggleUnifiedFavorite,
   toggleUnifiedFavoritePromptId,
   updateUnifiedImageMetadata,
@@ -346,9 +344,9 @@ const PlazaPromptCard: React.FC<PlazaPromptCardProps> = ({
   };
 
   return (
-    <div className="p-card p-card-interactive rounded-2xl overflow-hidden flex flex-col group">
+    <div className="p-card p-card-interactive rounded-xl overflow-hidden flex flex-col group">
       {/* Visual Preview Header */}
-      <div className="relative h-40 overflow-hidden z-muted">
+      <div className="relative h-32 overflow-hidden z-muted">
         {showRealImage ? (
           <img
             src={item.preview_url}
@@ -451,18 +449,18 @@ const PlazaPromptCard: React.FC<PlazaPromptCardProps> = ({
       </div>
 
       {/* Card Body */}
-      <div className="p-3.5 flex-1 flex flex-col justify-between gap-2.5">
-        <div className="space-y-2">
+      <div className="p-2.5 flex-1 flex flex-col justify-between gap-2">
+        <div className="space-y-1.5">
           <div className="flex items-start justify-between gap-2">
             <div className="min-w-0">
-              <h3 className="text-[13px] font-semibold leading-snug truncate">
+              <h3 className="text-xs font-semibold leading-snug truncate">
                 {item.title_zh}
               </h3>
-              <div className="flex items-center gap-1.5 mt-1 flex-wrap">
-                <span className="px-1.5 py-0.5 rounded border z-border z-canvas z-text-muted text-[10px]">
+              <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
+                <span className="px-1.5 py-0.25 rounded border z-border z-canvas z-text-muted text-[10px]">
                   {item.category}
                 </span>
-                <span className="font-mono-num text-[10px] z-text-muted truncate max-w-[140px]">
+                <span className="font-mono-num text-[10px] z-text-muted truncate max-w-[130px]">
                   {item.recommended_model}
                 </span>
               </div>
@@ -472,7 +470,7 @@ const PlazaPromptCard: React.FC<PlazaPromptCardProps> = ({
               <button
                 type="button"
                 onClick={() => setLang((prev) => (prev === "en" ? "zh" : "en"))}
-                className="px-1.5 py-1 rounded-lg border z-border z-canvas z-ghost-btn font-mono-num text-[10px] cursor-pointer"
+                className="px-1.5 py-0.5 rounded-md border z-border z-canvas z-ghost-btn font-mono-num text-[10px] cursor-pointer"
                 title="切换中/英文 Prompt 预览与填入"
               >
                 {lang === "en" ? "EN" : "中"}
@@ -480,25 +478,25 @@ const PlazaPromptCard: React.FC<PlazaPromptCardProps> = ({
               <button
                 type="button"
                 onClick={handleCopy}
-                className="p-1 rounded-lg border z-border z-canvas z-ghost-btn cursor-pointer"
+                className="p-1 rounded-md border z-border z-canvas z-ghost-btn cursor-pointer"
                 title="复制完整提示词"
               >
-                {copied ? <Check size={12} /> : <Copy size={12} />}
+                {copied ? <Check size={11} /> : <Copy size={11} />}
               </button>
             </div>
           </div>
 
-          <p className="z-text-sec leading-relaxed line-clamp-3 text-[11.5px]">
+          <p className="z-text-sec leading-relaxed line-clamp-2 text-[11px]">
             {previewText}
           </p>
 
           {item.variables && item.variables.length > 0 && (
             <div className="flex items-center gap-1 flex-wrap">
               <span className="text-[10px] z-text-muted">可调槽位:</span>
-              {item.variables.map((v) => (
+              {item.variables.slice(0, 3).map((v) => (
                 <span
                   key={v.key}
-                  className="px-1.5 py-0.5 rounded-md z-muted z-text-sec font-mono-num text-[10px]"
+                  className="px-1.5 py-0.25 rounded-md z-muted z-text-sec font-mono-num text-[10px]"
                 >
                   [{v.key}]
                 </span>
@@ -508,27 +506,27 @@ const PlazaPromptCard: React.FC<PlazaPromptCardProps> = ({
         </div>
 
         {/* Actions */}
-        <div className="flex items-center gap-1.5 pt-1 border-t z-border">
+        <div className="flex items-center gap-1.5 pt-1.5 border-t z-border">
           <button
             type="button"
             onClick={() => onApply(item, lang)}
-            className="flex-1 inline-flex items-center justify-center gap-1 py-1.5 rounded-xl border z-border z-canvas z-ghost-btn font-medium cursor-pointer"
+            className="flex-1 inline-flex items-center justify-center gap-1 py-1.5 rounded-lg border z-border z-canvas z-ghost-btn text-[11px] font-medium cursor-pointer"
             title="同步推荐模式、模型、画幅与变量槽位到左侧参数台"
           >
-            <SlidersHorizontal size={12} />
+            <SlidersHorizontal size={11} />
             <span>做同款</span>
           </button>
           <button
             type="button"
             onClick={() => onQuickGenerate(item, lang)}
-            className="flex-1 inline-flex items-center justify-center gap-1 py-1.5 rounded-xl z-primary-btn font-medium cursor-pointer"
+            className="flex-1 inline-flex items-center justify-center gap-1 py-1.5 rounded-lg z-primary-btn text-[11px] font-medium cursor-pointer"
             title={
               isEdits
                 ? "同步编辑参数并前往上传参考图"
                 : "同步全套参数并直接生成图像"
             }
           >
-            <Wand2 size={12} />
+            <Wand2 size={11} />
             <span>{isEdits ? "去垫图" : "立即生成"}</span>
           </button>
         </div>
@@ -625,13 +623,6 @@ export const ImageStudio: React.FC = () => {
   const [plazaSort, setPlazaSort] = useState<"popular" | "latest">("popular");
   const [plazaQuery, setPlazaQuery] = useState<string>("");
   const [favoriteIds, setFavoriteIds] = useState<string[]>([]);
-  const [legacyLocalCount, setLegacyLocalCount] = useState(0);
-  const [dismissedMigration, setDismissedMigration] = useState(false);
-  const [isMigrating, setIsMigrating] = useState(false);
-  const [migrationProgress, setMigrationProgress] = useState<{
-    current: number;
-    total: number;
-  } | null>(null);
   const [expandingPrompt, setExpandingPrompt] = useState(false);
   const [cloudKeyModalOpen, setCloudKeyModalOpen] = useState(false);
   const [activeTemplate, setActiveTemplate] =
@@ -752,11 +743,6 @@ export const ImageStudio: React.FC = () => {
         setHydratedIdb(true);
       })
       .catch(() => setHydratedIdb(true));
-
-    checkLocalLegacyImagesCount().then((cnt) => {
-      if (!alive) return;
-      setLegacyLocalCount(cnt);
-    });
 
     loadUnifiedFavoritePromptIds().then((ids) => {
       if (!alive) return;
@@ -1152,27 +1138,6 @@ export const ImageStudio: React.FC = () => {
     }
   };
 
-  const handleSyncLegacyToServer = async () => {
-    setIsMigrating(true);
-    try {
-      const res = await syncLocalImagesToServer((curr, tot) => {
-        setMigrationProgress({ current: curr, total: tot });
-      });
-      setLegacyLocalCount(0);
-      setNotice({
-        type: "success",
-        text: `已成功将 ${res.migrated} 张作品同步至服务端持久化数据库（已存在跳过 ${res.skipped} 张），换浏览器登录同一服务即可随时查看！`,
-      });
-      const refreshed = await loadUnifiedImages();
-      setResults(refreshed);
-    } catch (err: any) {
-      setError(err?.message || "同步到服务端失败");
-    } finally {
-      setIsMigrating(false);
-      setMigrationProgress(null);
-    }
-  };
-
   const handleDeleteOne = async (item: HydratedImageItem) => {
     await deleteUnifiedImage(item.id);
     if (item.isObjectUrl) {
@@ -1362,9 +1327,9 @@ export const ImageStudio: React.FC = () => {
                 setMode("generations");
                 setError(null);
               }}
-              className={`inline-flex items-center justify-center gap-1.5 py-1.5 rounded-lg cursor-pointer transition-colors ${
+              className={`inline-flex items-center justify-center gap-1.5 py-1.5 rounded-lg cursor-pointer transition-all ${
                 mode === "generations"
-                  ? "z-primary-btn font-medium"
+                  ? "p-seg-active font-semibold"
                   : "z-text-muted z-ghost-btn"
               }`}
             >
@@ -1377,9 +1342,9 @@ export const ImageStudio: React.FC = () => {
                 setMode("edits");
                 setError(null);
               }}
-              className={`inline-flex items-center justify-center gap-1.5 py-1.5 rounded-lg cursor-pointer transition-colors ${
+              className={`inline-flex items-center justify-center gap-1.5 py-1.5 rounded-lg cursor-pointer transition-all ${
                 mode === "edits"
-                  ? "z-primary-btn font-medium"
+                  ? "p-seg-active font-semibold"
                   : "z-text-muted z-ghost-btn"
               }`}
             >
@@ -1425,23 +1390,32 @@ export const ImageStudio: React.FC = () => {
                     key={m.id}
                     type="button"
                     onClick={() => setModel(m.id)}
-                    className={`w-full p-2.5 rounded-xl flex items-center justify-between gap-2 text-left cursor-pointer border transition-colors ${
+                    className={`w-full p-2 rounded-xl flex items-center justify-between gap-2 text-left cursor-pointer border transition-all ${
                       active
-                        ? "p-nav-active"
+                        ? "p-card-selected"
                         : "z-border z-canvas z-ghost-btn z-text-sec"
                     }`}
                   >
-                    <div className="min-w-0">
-                      <div className="font-mono-num font-medium truncate">
-                        {m.id}
-                      </div>
-                      <div className="z-text-muted truncate mt-0.5">
-                        {m.desc}
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span
+                        className={
+                          active
+                            ? "status-dot-indigo"
+                            : "w-2 h-2 rounded-full border z-border shrink-0 opacity-60"
+                        }
+                      />
+                      <div className="min-w-0">
+                        <div className="font-mono-num font-medium truncate">
+                          {m.id}
+                        </div>
+                        <div className="text-[11px] z-text-muted truncate mt-0.5">
+                          {m.desc}
+                        </div>
                       </div>
                     </div>
                     <span
-                      className={`px-2 py-0.5 rounded-md border shrink-0 ${
-                        active ? "z-pill-success" : "z-border z-muted z-text-muted"
+                      className={`px-1.5 py-0.5 rounded-md border text-[10px] shrink-0 ${
+                        active ? "p-badge-indigo font-medium" : "z-border z-muted z-text-muted"
                       }`}
                     >
                       {m.tag}
@@ -1455,7 +1429,7 @@ export const ImageStudio: React.FC = () => {
           {/* SVG Aspect Ratio Wireframes */}
           <div className="space-y-1.5">
             <label className="font-medium z-text-sec block">画幅比例</label>
-            <div className="grid grid-cols-3 gap-2">
+            <div className="grid grid-cols-3 gap-1.5">
               {ASPECT_OPTIONS.map((opt) => {
                 const active = size === opt.value;
                 return (
@@ -1463,9 +1437,9 @@ export const ImageStudio: React.FC = () => {
                     key={opt.value}
                     type="button"
                     onClick={() => setSize(opt.value)}
-                    className={`p-2 rounded-xl border flex flex-col items-center gap-1 cursor-pointer transition-colors ${
+                    className={`p-1.5 rounded-xl border flex flex-col items-center gap-1 cursor-pointer transition-all ${
                       active
-                        ? "z-primary-btn border-transparent font-medium"
+                        ? "p-card-selected font-semibold text-indigo-600 dark:text-indigo-300"
                         : "z-border z-canvas z-text-sec z-ghost-btn"
                     }`}
                   >
@@ -1500,9 +1474,9 @@ export const ImageStudio: React.FC = () => {
               <button
                 type="button"
                 onClick={() => setQuality("hd")}
-                className={`py-1.5 rounded-lg cursor-pointer transition-colors ${
+                className={`py-1.5 rounded-lg cursor-pointer transition-all ${
                   quality === "hd"
-                    ? "z-primary-btn font-medium"
+                    ? "p-seg-active font-semibold"
                     : "z-text-muted z-ghost-btn"
                 }`}
               >
@@ -1511,9 +1485,9 @@ export const ImageStudio: React.FC = () => {
               <button
                 type="button"
                 onClick={() => setQuality("standard")}
-                className={`py-1.5 rounded-lg cursor-pointer transition-colors ${
+                className={`py-1.5 rounded-lg cursor-pointer transition-all ${
                   quality === "standard"
-                    ? "z-primary-btn font-medium"
+                    ? "p-seg-active font-semibold"
                     : "z-text-muted z-ghost-btn"
                 }`}
               >
@@ -1711,9 +1685,9 @@ export const ImageStudio: React.FC = () => {
                                   onClick={() =>
                                     handleUpdateVariable(v.key, opt)
                                   }
-                                  className={`px-2 py-0.5 rounded-md border text-[10px] cursor-pointer truncate max-w-full ${
+                                  className={`px-2 py-0.5 rounded-md border text-[10px] cursor-pointer truncate max-w-full transition-all ${
                                     selected
-                                      ? "z-primary-btn border-transparent"
+                                      ? "p-chip-active font-medium"
                                       : "z-border z-canvas z-text-muted z-ghost-btn"
                                   }`}
                                   title={opt}
@@ -1786,9 +1760,9 @@ export const ImageStudio: React.FC = () => {
               <button
                 type="button"
                 onClick={() => setActiveTab("plaza")}
-                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg cursor-pointer transition-colors ${
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg cursor-pointer transition-all ${
                   activeTab === "plaza"
-                    ? "z-primary-btn font-semibold"
+                    ? "p-seg-active font-semibold"
                     : "z-text-muted z-ghost-btn"
                 }`}
               >
@@ -1801,9 +1775,9 @@ export const ImageStudio: React.FC = () => {
               <button
                 type="button"
                 onClick={() => setActiveTab("gallery")}
-                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg cursor-pointer transition-colors ${
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg cursor-pointer transition-all ${
                   activeTab === "gallery"
-                    ? "z-primary-btn font-semibold"
+                    ? "p-seg-active font-semibold"
                     : "z-text-muted z-ghost-btn"
                 }`}
               >
@@ -1900,51 +1874,6 @@ export const ImageStudio: React.FC = () => {
           />
         )}
 
-        {legacyLocalCount > 0 && !dismissedMigration && (
-          <div className="rounded-xl border border-sky-500/30 bg-sky-500/10 p-3.5 flex flex-wrap items-center justify-between gap-3 text-xs md:text-sm">
-            <div className="flex items-center gap-2.5 text-sky-800 dark:text-sky-200">
-              <Database className="w-4 h-4 shrink-0 text-sky-500 animate-pulse" />
-              <span>
-                检测到当前浏览器本地 IndexedDB 存有{" "}
-                <strong className="underline decoration-sky-500">{legacyLocalCount}</strong> 张历史作品。
-                换浏览器或无痕模式将无法访问，建议立即一键同步至服务端持久化数据库！
-              </span>
-            </div>
-            <div className="flex items-center gap-2 shrink-0">
-              <button
-                type="button"
-                disabled={isMigrating}
-                onClick={handleSyncLegacyToServer}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-medium text-xs shadow-sm transition disabled:opacity-50 cursor-pointer"
-              >
-                {isMigrating ? (
-                  <>
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    <span>
-                      同步中
-                      {migrationProgress
-                        ? ` (${migrationProgress.current}/${migrationProgress.total})`
-                        : "..."}
-                    </span>
-                  </>
-                ) : (
-                  <>
-                    <UploadCloud className="w-3.5 h-3.5" />
-                    <span>一键同步到云端数据库</span>
-                  </>
-                )}
-              </button>
-              <button
-                type="button"
-                onClick={() => setDismissedMigration(true)}
-                className="text-xs text-muted-foreground hover:text-foreground px-2 py-1 cursor-pointer"
-              >
-                暂不提醒
-              </button>
-            </div>
-          </div>
-        )}
-
         {/* TAB 1: PROMPT PLAZA */}
         {activeTab === "plaza" && (
           <div className="space-y-4">
@@ -1964,9 +1893,9 @@ export const ImageStudio: React.FC = () => {
                       key={cat}
                       type="button"
                       onClick={() => setPlazaCategory(cat)}
-                      className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full border cursor-pointer transition-colors ${
+                      className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full border cursor-pointer transition-all ${
                         active
-                          ? "z-primary-btn border-transparent font-medium"
+                          ? "p-chip-active font-medium"
                           : "z-border z-canvas z-text-sec z-ghost-btn"
                       }`}
                     >
@@ -1992,9 +1921,9 @@ export const ImageStudio: React.FC = () => {
                       key={opt.value}
                       type="button"
                       onClick={() => setPlazaSource(opt.value)}
-                      className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full border text-[11px] cursor-pointer transition-colors ${
+                      className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full border text-[11px] cursor-pointer transition-all ${
                         active
-                          ? "z-primary-btn border-transparent font-medium"
+                          ? "p-chip-active font-medium"
                           : "z-border z-canvas z-text-sec z-ghost-btn"
                       } ${!active && opt.value !== "all" && count === 0 ? "opacity-60" : ""}`}
                     >
@@ -2024,9 +1953,9 @@ export const ImageStudio: React.FC = () => {
                   <button
                     type="button"
                     onClick={() => setPlazaSort("popular")}
-                    className={`px-2.5 py-1 rounded-lg cursor-pointer ${
+                    className={`px-2.5 py-1 rounded-lg cursor-pointer transition-all ${
                       plazaSort === "popular"
-                        ? "z-primary-btn font-medium"
+                        ? "p-seg-active font-medium"
                         : "z-text-muted z-ghost-btn"
                     }`}
                   >
@@ -2035,9 +1964,9 @@ export const ImageStudio: React.FC = () => {
                   <button
                     type="button"
                     onClick={() => setPlazaSort("latest")}
-                    className={`px-2.5 py-1 rounded-lg cursor-pointer ${
+                    className={`px-2.5 py-1 rounded-lg cursor-pointer transition-all ${
                       plazaSort === "latest"
-                        ? "z-primary-btn font-medium"
+                        ? "p-seg-active font-medium"
                         : "z-text-muted z-ghost-btn"
                     }`}
                   >
@@ -2063,7 +1992,7 @@ export const ImageStudio: React.FC = () => {
                 </div>
               </div>
             ) : (
-              <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4 gap-3">
                 {filteredPlazaItems.map((item) => (
                   <PlazaPromptCard
                     key={item.id}
@@ -2093,7 +2022,7 @@ export const ImageStudio: React.FC = () => {
                       key={category.value}
                       type="button"
                       onClick={() => setGalleryCategory(category.value)}
-                      className={`px-2.5 py-1 rounded-md border text-xs transition ${galleryCategory === category.value ? "z-primary-btn border-transparent" : "z-border z-ghost-btn"}`}
+                      className={`px-2.5 py-1 rounded-full border text-xs transition-all cursor-pointer ${galleryCategory === category.value ? "p-chip-active font-medium" : "z-border z-ghost-btn"}`}
                     >
                       {category.label} <span className="font-mono-num opacity-70">{count}</span>
                     </button>
@@ -2164,155 +2093,158 @@ export const ImageStudio: React.FC = () => {
                   没有符合当前筛选条件的作品。
                 </div>
               ) : (
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
                 {loading && (
-                  <div className="p-card rounded-2xl overflow-hidden flex flex-col">
-                    <div className="aspect-square z-muted flex flex-col items-center justify-center gap-2 z-text-muted">
-                      <Loader2 size={24} className="animate-spin" />
+                  <div className="p-card rounded-xl overflow-hidden flex flex-col">
+                    <div className="aspect-[4/3] z-muted flex flex-col items-center justify-center gap-2 z-text-muted">
+                      <Loader2 size={22} className="animate-spin" />
                       <span className="font-medium">正在绘制中...</span>
                     </div>
-                    <div className="p-3 space-y-1.5">
-                      <div className="font-mono-num z-text-muted">
+                    <div className="p-2.5 space-y-1">
+                      <div className="font-mono-num text-[11px] z-text-muted truncate">
                         {model} · {size.replace("x", "×")}
                       </div>
-                      <p className="line-clamp-2 z-text-sec">{prompt}</p>
+                      <p className="line-clamp-2 text-[11px] z-text-sec">{prompt}</p>
                     </div>
                   </div>
                 )}
                 {filteredGalleryResults.map((item) => (
                   <div
                     key={item.id}
-                    className="p-card rounded-2xl overflow-hidden flex flex-col group"
+                    className="p-card p-card-interactive rounded-xl overflow-hidden flex flex-col justify-between group"
                   >
-                    <div
-                      className="relative aspect-square z-muted cursor-pointer overflow-hidden"
-                      onClick={() => setLightboxItem(item)}
-                    >
-                      <img
-                        src={item.url}
-                        alt={item.prompt}
-                        className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-[1.02]"
-                      />
-                      <div className="absolute inset-x-0 top-0 p-2 flex items-center justify-between gap-2 bg-gradient-to-b from-black/50 to-transparent text-white">
-                        <span className="px-2 py-0.5 rounded-md bg-black/55 backdrop-blur-xs font-mono-num truncate max-w-[170px]">
-                          {item.model}
-                        </span>
-                        <div className="flex items-center gap-1">
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleToggleWorkFavorite(item);
-                            }}
-                            className={`p-1.5 rounded-lg bg-black/55 hover:bg-black/75 cursor-pointer transition ${
-                              item.isFavorite
-                                ? "text-amber-400"
-                                : "text-white/80 hover:text-white"
-                            }`}
-                            title={item.isFavorite ? "取消收藏作品" : "收藏该作品"}
-                          >
-                            <Star
-                              size={13}
-                              className={item.isFavorite ? "fill-amber-400" : ""}
-                            />
-                          </button>
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setLightboxItem(item);
-                            }}
-                            className="p-1.5 rounded-lg bg-black/55 hover:bg-black/75 text-white cursor-pointer"
-                            title="放大检视与 Remix"
-                          >
-                            <Maximize2 size={13} />
-                          </button>
+                    <div>
+                      <div
+                        className="relative aspect-[4/3] z-muted cursor-pointer overflow-hidden"
+                        onClick={() => setLightboxItem(item)}
+                      >
+                        <img
+                          src={item.url}
+                          alt={item.prompt}
+                          className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-[1.02]"
+                        />
+                        <div className="absolute inset-x-0 top-0 p-2 flex items-center justify-between gap-1.5 bg-gradient-to-b from-black/55 to-transparent text-white">
+                          <span className="px-1.5 py-0.5 rounded-md bg-black/55 backdrop-blur-xs font-mono-num text-[10px] truncate max-w-[140px]">
+                            {item.model}
+                          </span>
+                          <div className="flex items-center gap-1">
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleToggleWorkFavorite(item);
+                              }}
+                              className={`p-1 rounded-md bg-black/55 hover:bg-black/75 cursor-pointer transition ${
+                                item.isFavorite
+                                  ? "text-amber-400"
+                                  : "text-white/80 hover:text-white"
+                              }`}
+                              title={item.isFavorite ? "取消收藏作品" : "收藏该作品"}
+                            >
+                              <Star
+                                size={12}
+                                className={item.isFavorite ? "fill-amber-400" : ""}
+                              />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setLightboxItem(item);
+                              }}
+                              className="p-1 rounded-md bg-black/55 hover:bg-black/75 text-white cursor-pointer"
+                              title="放大检视与 Remix"
+                            >
+                              <Maximize2 size={12} />
+                            </button>
+                          </div>
                         </div>
+                      </div>
+
+                      <div className="p-2.5 space-y-1.5">
+                        <div className="flex items-center justify-between font-mono-num text-[10px] z-text-muted">
+                          <span>{item.size.replace("x", "×")}</span>
+                          <span>
+                            {item.latencyMs
+                              ? `${(item.latencyMs / 1000).toFixed(1)}s · `
+                              : ""}
+                            {item.createdAt}
+                          </span>
+                        </div>
+
+                        <div className="flex flex-wrap items-center gap-1 text-[10px]">
+                          <span className="px-1.5 py-0.25 rounded border z-border z-canvas z-text-muted">{galleryCategoryLabel(item.category)}</span>
+                          <span className="px-1.5 py-0.25 rounded border z-border z-canvas z-text-muted">{GALLERY_SOURCE_LABELS[item.source || "image_studio"] || item.source || "图像工坊"}</span>
+                          {item.projectTitle && <span className="truncate max-w-28 z-text-muted" title={item.projectTitle}>{item.projectTitle}</span>}
+                          {item.roleName && <span className="truncate max-w-24 z-text-muted" title={item.roleName}>{item.roleName}{item.shotIndex ? ` · #${item.shotIndex}` : ""}</span>}
+                        </div>
+                        {!!item.tags?.length && (
+                          <div className="flex flex-wrap gap-1">
+                            {item.tags.slice(0, 3).map((tag) => <span key={tag} className="px-1.5 py-0.25 rounded bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 text-[10px]">#{tag}</span>)}
+                          </div>
+                        )}
+
+                        <p className="line-clamp-2 text-[11px] z-text-sec leading-relaxed">
+                          {item.revisedPrompt || item.prompt}
+                        </p>
                       </div>
                     </div>
 
-                    <div className="p-3 space-y-2">
-                      <div className="flex items-center justify-between font-mono-num z-text-muted">
-                        <span>{item.size.replace("x", "×")}</span>
-                        <span>
-                          {item.latencyMs
-                            ? `${(item.latencyMs / 1000).toFixed(2)}s · `
-                            : ""}
-                          {item.createdAt}
-                        </span>
-                      </div>
-
-                      <div className="flex flex-wrap items-center gap-1.5 text-[10px]">
-                        <span className="px-1.5 py-0.5 rounded border z-border z-canvas z-text-muted">{galleryCategoryLabel(item.category)}</span>
-                        <span className="px-1.5 py-0.5 rounded border z-border z-canvas z-text-muted">{GALLERY_SOURCE_LABELS[item.source || "image_studio"] || item.source || "图像工坊"}</span>
-                        {item.projectTitle && <span className="truncate max-w-40 z-text-muted" title={item.projectTitle}>{item.projectTitle}</span>}
-                        {item.roleName && <span className="truncate max-w-32 z-text-muted" title={item.roleName}>{item.roleName}{item.shotIndex ? ` · 镜头 ${item.shotIndex}` : ""}</span>}
-                      </div>
-                      {!!item.tags?.length && (
-                        <div className="flex flex-wrap gap-1">
-                          {item.tags.slice(0, 5).map((tag) => <span key={tag} className="px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 text-[10px]">#{tag}</span>)}
-                        </div>
-                      )}
-
-                      <p className="line-clamp-2 z-text-sec leading-relaxed">
-                        {item.revisedPrompt || item.prompt}
-                      </p>
-
-                      <div className="flex items-center gap-1.5 pt-1">
-                        <a
-                          href={item.url}
-                          download={`${item.id}.png`}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="flex-1 inline-flex items-center justify-center gap-1 py-1.5 rounded-xl border z-border z-ghost-btn font-medium"
-                        >
-                          <Download size={12} />
-                          <span>下载原图</span>
-                        </a>
-                        <button
-                          type="button"
-                          onClick={() => void handleUseAsReference(item)}
-                          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl border border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/20 cursor-pointer transition"
-                          title="加载为左侧图生图参考底图（可叠加多张爬虫参考图）"
-                        >
-                          <Layers size={12} />
-                          <span>设为参考图</span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleRemix(item)}
-                          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl border z-border z-ghost-btn cursor-pointer"
-                          title="复用该条 Prompt 与模型参数"
-                        >
-                          <Repeat2 size={12} />
-                          <span>Remix</span>
-                        </button>
+                    <div className="px-2.5 pb-2.5 pt-1.5 border-t z-border flex flex-wrap items-center gap-1 text-[11px]">
+                      <a
+                        href={item.url}
+                        download={`${item.id}.png`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex items-center gap-1 px-2 py-1 rounded-lg border z-border z-ghost-btn font-medium"
+                        title="下载原图"
+                      >
+                        <Download size={11} />
+                        <span>下载</span>
+                      </a>
+                      <button
+                        type="button"
+                        onClick={() => void handleUseAsReference(item)}
+                        className="inline-flex items-center gap-1 px-2 py-1 rounded-lg border border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/20 cursor-pointer transition"
+                        title="加载为左侧图生图参考底图（可叠加多张爬虫参考图）"
+                      >
+                        <Layers size={11} />
+                        <span>参考</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleRemix(item)}
+                        className="inline-flex items-center gap-1 px-2 py-1 rounded-lg border z-border z-ghost-btn cursor-pointer"
+                        title="复用该条 Prompt 与模型参数"
+                      >
+                        <Repeat2 size={11} />
+                        <span>Remix</span>
+                      </button>
+                      <div className="ml-auto flex items-center gap-1">
                         <button
                           type="button"
                           onClick={() => void handleSendToChatRemix(item)}
-                          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl border border-indigo-500/30 bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-500/20 cursor-pointer transition"
+                          className="p-1 rounded-lg border border-indigo-500/30 bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-500/20 cursor-pointer transition"
                           title="将图片与 Prompt 加入 Chat 进行多轮对话 Remix"
                         >
                           <MessageSquarePlus size={12} />
-                          <span>Chat Remix</span>
                         </button>
                         <button
                           type="button"
                           onClick={() => void handleSendToDramaCanvas(item, "character")}
-                          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl border border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400 hover:bg-amber-500/20 cursor-pointer transition"
+                          className="p-1 rounded-lg border border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400 hover:bg-amber-500/20 cursor-pointer transition"
                           title="发送到短剧无限画布作为角色/分镜参考"
                         >
                           <Clapperboard size={12} />
-                          <span>短剧画布</span>
                         </button>
                         <button
                           type="button"
                           onClick={() => handleCopyPromptOrUrl(item)}
-                          className="inline-flex items-center gap-1 px-2 py-1.5 rounded-xl border z-border z-ghost-btn cursor-pointer"
+                          className="p-1 rounded-lg border z-border z-ghost-btn cursor-pointer"
                           title="复制链接或 Prompt"
                         >
                           {copiedCardId === item.id ? (
-                            <Check size={12} />
+                            <Check size={12} className="text-emerald-500" />
                           ) : (
                             <Copy size={12} />
                           )}
@@ -2320,7 +2252,7 @@ export const ImageStudio: React.FC = () => {
                         <button
                           type="button"
                           onClick={() => handleDeleteOne(item)}
-                          className="p-1.5 rounded-xl border z-border z-ghost-btn cursor-pointer"
+                          className="p-1 rounded-lg border z-border z-ghost-btn cursor-pointer"
                           style={{ color: "var(--pill-danger-text)" }}
                           title="从画廊与持久化存储删除"
                         >

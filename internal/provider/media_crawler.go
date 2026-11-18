@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/PuerkitoBio/goquery"
 )
@@ -43,6 +45,7 @@ type MediaCrawlOptions struct {
 	Client             *http.Client
 	WikimediaSearchURL string
 	WebSearchURL       string
+	FreesoundSearchURL string
 }
 
 // MediaCrawlReport 汇总检索结果与说明信息。
@@ -55,19 +58,22 @@ type MediaCrawlReport struct {
 }
 
 const (
-	defaultCrawlerWikimediaAPI = "https://commons.wikimedia.org/w/api.php"
-	defaultCrawlerWebSearch    = "https://cn.bing.com/search"
-	maxCrawlHTMLBytes          = 2 << 20  // 2 MB HTML cap
-	maxVoiceDownloadBytes      = 15 << 20 // 15 MB audio cap
-	maxImageDownloadBytes      = 15 << 20 // 15 MB image cap
-	maxVideoDownloadBytes      = 40 << 20 // 40 MB video cap
+	defaultCrawlerWikimediaAPI  = "https://commons.wikimedia.org/w/api.php"
+	defaultCrawlerWebSearch     = "https://cn.bing.com/search"
+	defaultCrawlerDDGSearch     = "https://html.duckduckgo.com/html/"
+	defaultCrawlerFreesoundHTML = "https://freesound.org/search/"
+	maxCrawlHTMLBytes           = 2 << 20  // 2 MB HTML cap
+	maxVoiceDownloadBytes       = 15 << 20 // 15 MB audio cap
+	maxImageDownloadBytes       = 15 << 20 // 15 MB image cap
+	maxVideoDownloadBytes       = 40 << 20 // 40 MB video cap
 )
 
 var (
-	audioExtRE = regexp.MustCompile(`(?i)\.(mp3|wav|ogg|oga|m4a|aac|flac|opus)(?:[?#]|$)`)
-	imageExtRE = regexp.MustCompile(`(?i)\.(jpe?g|png|webp|gif)(?:[?#]|$)`)
-	videoExtRE = regexp.MustCompile(`(?i)\.(mp4|webm|mov|m4v)(?:[?#]|$)`)
-	whitespaceRE = regexp.MustCompile(`\s+`)
+	audioExtRE       = regexp.MustCompile(`(?i)\.(mp3|wav|ogg|oga|m4a|aac|flac|opus)(?:[?#]|$)`)
+	imageExtRE       = regexp.MustCompile(`(?i)\.(jpe?g|png|webp|gif)(?:[?#]|$)`)
+	videoExtRE       = regexp.MustCompile(`(?i)\.(mp4|webm|mov|m4v)(?:[?#]|$)`)
+	inlineAudioURLRE = regexp.MustCompile(`(?i)(?:https?:)?//[^\s"'<>\\()]+?\.(?:mp3|wav|ogg|oga|m4a|aac|flac)(?:\?[^\s"'<>\\()]*)?`)
+	whitespaceRE     = regexp.MustCompile(`\s+`)
 )
 
 // NormalizeCrawlerKind 规整检索媒体类型（"voice" | "image" | "video" | "auto"）。
@@ -168,7 +174,11 @@ func newCrawlerRequest(ctx context.Context, target string) (*http.Request, error
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; AIWebFreeMediaCrawler/1.0)")
+	if strings.Contains(target, "wikimedia.org") {
+		req.Header.Set("User-Agent", "AIWebFreeMediaCrawler/1.0 (https://github.com/ai-web-free)")
+	} else {
+		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+	}
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/json,audio/*,image/*,video/*;q=0.9,*/*;q=0.5")
 	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
 	return req, nil
@@ -229,9 +239,50 @@ func SearchAndCrawlMedia(ctx context.Context, query, targetURL string, opts Medi
 		}
 	}
 
-	// 2. 若提供了关键词且仍需补充候选，执行公开媒体搜索
+	// 2. 若提供了关键词且仍需补充候选，并发执行多源公开媒体检索（Freesound 音色样音 + Wikimedia + 网页检索）
 	if report.Query != "" && len(report.Candidates) < limit {
-		wikiItems, wikiErr := searchWikimediaCommons(ctx, report.Query, kind, limit, opts)
+		var (
+			fsItems, wikiItems, webItems []CrawledMediaCandidate
+			fsErr, wikiErr, webErr       error
+			wg                           sync.WaitGroup
+		)
+
+		runVoiceFreesound := kind == "voice" && (opts.FreesoundSearchURL != "" || (opts.WebSearchURL == "" && opts.WikimediaSearchURL == ""))
+		if runVoiceFreesound {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				subCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+				defer cancel()
+				fsItems, fsErr = searchFreesoundPreviews(subCtx, report.Query, limit, opts)
+			}()
+		}
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			subCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+			defer cancel()
+			wikiItems, wikiErr = searchWikimediaCommons(subCtx, report.Query, kind, limit, opts)
+		}()
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			subCtx, cancel := context.WithTimeout(ctx, 9*time.Second)
+			defer cancel()
+			webItems, webErr = searchWebAndCrawlPages(subCtx, report.Query, kind, limit, opts)
+		}()
+
+		wg.Wait()
+
+		if fsErr != nil {
+			report.Warnings = append(report.Warnings, "Freesound 音色检索提示: "+fsErr.Error())
+		} else {
+			for _, item := range fsItems {
+				addCandidate(item)
+			}
+		}
 		if wikiErr != nil {
 			report.Warnings = append(report.Warnings, "Wikimedia 检索警告: "+wikiErr.Error())
 		} else {
@@ -239,15 +290,11 @@ func SearchAndCrawlMedia(ctx context.Context, query, targetURL string, opts Medi
 				addCandidate(item)
 			}
 		}
-
-		if len(report.Candidates) < 4 {
-			webItems, webErr := searchWebAndCrawlPages(ctx, report.Query, kind, limit-len(report.Candidates), opts)
-			if webErr != nil {
-				report.Warnings = append(report.Warnings, "网页搜索扩展提示: "+webErr.Error())
-			} else {
-				for _, item := range webItems {
-					addCandidate(item)
-				}
+		if webErr != nil {
+			report.Warnings = append(report.Warnings, "网页搜索扩展提示: "+webErr.Error())
+		} else {
+			for _, item := range webItems {
+				addCandidate(item)
 			}
 		}
 	}
@@ -450,6 +497,39 @@ func ExtractMediaFromHTML(baseURL *url.URL, htmlBody, kind string, limit int, al
 		add(k, href, text, ctxText, mime)
 	})
 
+	// data-* 音频/视频播放器属性提取（如 Freesound data-mp3 / data-title，各音频站点 data-audio / data-url）
+	if normalizedKind == "auto" || normalizedKind == "voice" || normalizedKind == "video" {
+		audioDataAttrs := []string{"data-mp3", "data-wav", "data-audio", "data-sound", "data-preview", "data-file", "data-url", "data-src", "data-ogg"}
+		doc.Find("[data-mp3], [data-wav], [data-audio], [data-sound], [data-preview], [data-file], [data-url], [data-src], [data-ogg]").Each(func(_ int, s *goquery.Selection) {
+			if len(out) >= limit {
+				return
+			}
+			titleHint := cleanText(firstNonEmptyStr(s.AttrOr("data-title", ""), s.AttrOr("title", ""), s.AttrOr("aria-label", ""), s.AttrOr("alt", "")))
+			ctxText := cleanText(s.Parent().Text())
+			for _, attr := range audioDataAttrs {
+				val := strings.TrimSpace(s.AttrOr(attr, ""))
+				if val == "" {
+					continue
+				}
+				k, mime := detectKindFromExtension(val)
+				if k == "" && (attr == "data-mp3" || attr == "data-wav" || attr == "data-audio" || attr == "data-sound" || attr == "data-ogg") {
+					k = "voice"
+					if attr == "data-ogg" {
+						mime = "audio/ogg"
+					} else if attr == "data-wav" {
+						mime = "audio/wav"
+					} else {
+						mime = "audio/mpeg"
+					}
+				}
+				if k != "" {
+					add(k, val, titleHint, ctxText, mime)
+					break
+				}
+			}
+		})
+	}
+
 	// <img> 参考图提取
 	if normalizedKind == "auto" || normalizedKind == "image" {
 		doc.Find("img").Each(func(_ int, s *goquery.Selection) {
@@ -480,6 +560,20 @@ func ExtractMediaFromHTML(baseURL *url.URL, htmlBody, kind string, limit int, al
 		}
 	})
 
+	// 内联脚本/JSON 音频直链提取（适配动态渲染播放列表页）
+	if (normalizedKind == "auto" || normalizedKind == "voice") && len(out) < limit {
+		unescaped := strings.NewReplacer(`\/`, `/`, `\u002F`, `/`, `\u002f`, `/`).Replace(htmlBody)
+		for _, rawURL := range inlineAudioURLRE.FindAllString(unescaped, limit*3) {
+			if len(out) >= limit {
+				break
+			}
+			k, mime := detectKindFromExtension(rawURL)
+			if k == "voice" {
+				add("voice", rawURL, "", "", mime)
+			}
+		}
+	}
+
 	return out
 }
 
@@ -501,6 +595,162 @@ func extractJSONLDMedia(obj map[string]interface{}, add func(kind, url, title, t
 	}
 }
 
+func containsCJK(s string) bool {
+	for _, r := range s {
+		if unicode.Is(unicode.Han, r) {
+			return true
+		}
+	}
+	return false
+}
+
+// translateVoiceQueryToEnglish 将中文音色描述词映射为英文语音检索关键词，提升公开音源库命中率。
+func translateVoiceQueryToEnglish(query string) string {
+	trimmed := strings.TrimSpace(query)
+	if trimmed == "" {
+		return "voice dialogue"
+	}
+	if !containsCJK(trimmed) {
+		return trimmed
+	}
+
+	rules := []struct {
+		zh string
+		en string
+	}{
+		{"霸总", "authoritative"},
+		{"总裁", "authoritative"},
+		{"低沉", "deep"},
+		{"磁性", "deep"},
+		{"浑厚", "deep"},
+		{"沉稳", "calm"},
+		{"男声", "male voice"},
+		{"男音", "male voice"},
+		{"男生", "male voice"},
+		{"男主", "male voice"},
+		{"大叔", "older male voice"},
+		{"少年", "young male voice"},
+		{"女声", "female voice"},
+		{"女音", "female voice"},
+		{"女生", "female voice"},
+		{"女主", "female voice"},
+		{"御姐", "mature female voice"},
+		{"少女", "young female voice"},
+		{"萝莉", "cute girl voice"},
+		{"甜宠", "sweet female voice"},
+		{"萌娃", "child voice"},
+		{"反派", "villain dark"},
+		{"冷酷", "cold dark"},
+		{"热血", "energetic"},
+		{"战神", "heroic"},
+		{"悬疑", "suspense"},
+		{"旁白", "narration"},
+		{"解说", "narration"},
+		{"古风", "traditional chinese"},
+		{"仙侠", "epic"},
+		{"方言", "dialect"},
+		{"粤语", "cantonese"},
+		{"笑声", "laugh"},
+		{"哭声", "crying"},
+		{"喘息", "breathing"},
+	}
+
+	var parts []string
+	seen := make(map[string]struct{})
+	addPart := func(p string) {
+		if _, ok := seen[p]; !ok {
+			seen[p] = struct{}{}
+			parts = append(parts, p)
+		}
+	}
+	for _, r := range rules {
+		if strings.Contains(trimmed, r.zh) {
+			addPart(r.en)
+		}
+	}
+	if len(parts) == 0 {
+		if strings.Contains(trimmed, "男") {
+			addPart("male voice")
+		} else if strings.Contains(trimmed, "女") {
+			addPart("female voice")
+		} else {
+			addPart("human voice speech")
+		}
+	} else {
+		joined := strings.Join(parts, " ")
+		if !strings.Contains(joined, "voice") && !strings.Contains(joined, "narration") && !strings.Contains(joined, "laugh") && !strings.Contains(joined, "crying") {
+			addPart("voice")
+		}
+	}
+	// 限制词数避免过严检索条件导致无结果
+	if len(parts) > 3 {
+		parts = parts[:3]
+	}
+	return strings.Join(parts, " ")
+}
+
+func searchFreesoundPreviews(ctx context.Context, query string, limit int, opts MediaCrawlOptions) ([]CrawledMediaCandidate, error) {
+	baseAPI := strings.TrimSpace(opts.FreesoundSearchURL)
+	if baseAPI == "" {
+		baseAPI = defaultCrawlerFreesoundHTML
+	}
+	u, err := ValidatePublicMediaURL(baseAPI, opts.AllowPrivateTest)
+	if err != nil {
+		return nil, err
+	}
+
+	searchQuery := translateVoiceQueryToEnglish(query)
+	if !strings.Contains(strings.ToLower(searchQuery), "voice") &&
+		!strings.Contains(strings.ToLower(searchQuery), "speech") &&
+		!strings.Contains(strings.ToLower(searchQuery), "narration") {
+		searchQuery += " voice"
+	}
+
+	q := u.Query()
+	q.Set("q", searchQuery)
+	u.RawQuery = q.Encode()
+
+	client := resolveCrawlerClient(opts)
+	req, err := newCrawlerRequest(ctx, u.String())
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("freesound status %d", resp.StatusCode)
+	}
+	htmlBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxCrawlHTMLBytes))
+	if err != nil {
+		return nil, err
+	}
+
+	items := ExtractMediaFromHTML(resp.Request.URL, string(htmlBytes), "voice", limit*2, opts.AllowPrivateTest)
+	out := make([]CrawledMediaCandidate, 0, limit)
+	for _, it := range items {
+		if strings.Contains(strings.ToLower(it.MediaURL), ".mp3") || strings.Contains(strings.ToLower(it.MimeType), "mpeg") {
+			it.Tags = mergeUniqueVoiceTags(it.Tags, "Freesound公开库")
+			out = append(out, it)
+		}
+		if len(out) >= limit {
+			break
+		}
+	}
+	if len(out) == 0 {
+		for _, it := range items {
+			it.Tags = mergeUniqueVoiceTags(it.Tags, "Freesound公开库")
+			out = append(out, it)
+			if len(out) >= limit {
+				break
+			}
+		}
+	}
+	return out, nil
+}
+
 func searchWikimediaCommons(ctx context.Context, query, kind string, limit int, opts MediaCrawlOptions) ([]CrawledMediaCandidate, error) {
 	baseAPI := strings.TrimSpace(opts.WikimediaSearchURL)
 	if baseAPI == "" {
@@ -512,6 +762,9 @@ func searchWikimediaCommons(ctx context.Context, query, kind string, limit int, 
 	}
 
 	searchQuery := strings.TrimSpace(query)
+	if opts.WikimediaSearchURL == "" && kind == "voice" && containsCJK(searchQuery) {
+		searchQuery = translateVoiceQueryToEnglish(searchQuery)
+	}
 	switch kind {
 	case "voice":
 		if !strings.Contains(strings.ToLower(searchQuery), "filetype:") {
@@ -609,30 +862,58 @@ func searchWikimediaCommons(ctx context.Context, query, kind string, limit int, 
 	return results, nil
 }
 
-func searchWebAndCrawlPages(ctx context.Context, query, kind string, limit int, opts MediaCrawlOptions) ([]CrawledMediaCandidate, error) {
-	if limit <= 0 {
-		return nil, nil
+func unwrapSearchResultURL(rawHref string) string {
+	href := strings.TrimSpace(rawHref)
+	if href == "" {
+		return ""
 	}
-	baseSearch := strings.TrimSpace(opts.WebSearchURL)
-	if baseSearch == "" {
-		baseSearch = defaultCrawlerWebSearch
+	u, err := url.Parse(href)
+	if err != nil {
+		return ""
 	}
-	u, err := ValidatePublicMediaURL(baseSearch, opts.AllowPrivateTest)
+	host := strings.ToLower(u.Hostname())
+
+	// 解码 Bing 跳转链接 https://www.bing.com/ck/a?!&&p=...&u=a1<base64url>
+	if strings.Contains(host, "bing.com") && strings.HasPrefix(u.Path, "/ck/a") {
+		if uParam := u.Query().Get("u"); strings.HasPrefix(uParam, "a1") && len(uParam) > 2 {
+			encoded := strings.TrimPrefix(uParam, "a1")
+			if decoded, decErr := base64.RawURLEncoding.DecodeString(encoded); decErr == nil {
+				target := strings.TrimSpace(string(decoded))
+				if strings.HasPrefix(target, "http://") || strings.HasPrefix(target, "https://") {
+					return target
+				}
+			}
+		}
+		return ""
+	}
+
+	// 解码 DuckDuckGo 跳转链接 //duckduckgo.com/l/?uddg=<url>
+	if strings.Contains(host, "duckduckgo.com") && strings.Contains(u.Path, "/l/") {
+		if uddg := u.Query().Get("uddg"); strings.HasPrefix(uddg, "http://") || strings.HasPrefix(uddg, "https://") {
+			return uddg
+		}
+		return ""
+	}
+
+	if !strings.HasPrefix(href, "http://") && !strings.HasPrefix(href, "https://") {
+		return ""
+	}
+	// 过滤搜索引擎自身域名与纯词条站（无音频文件）
+	for _, skip := range []string{"bing.com", "microsoft.com", "duckduckgo.com", "baike.baidu.com", "zdic.net"} {
+		if strings.Contains(host, skip) {
+			return ""
+		}
+	}
+	return href
+}
+
+func fetchSearchResultLinks(ctx context.Context, searchEndpoint, queryStr string, opts MediaCrawlOptions) ([]string, error) {
+	u, err := ValidatePublicMediaURL(searchEndpoint, opts.AllowPrivateTest)
 	if err != nil {
 		return nil, err
 	}
-
-	suffix := ""
-	switch kind {
-	case "voice":
-		suffix = " mp3 wav 试听 音色 配音"
-	case "image":
-		suffix = " jpg png 高清 参考图 剧照"
-	case "video":
-		suffix = " mp4 素材 视频"
-	}
 	q := u.Query()
-	q.Set("q", strings.TrimSpace(query)+suffix)
+	q.Set("q", queryStr)
 	u.RawQuery = q.Encode()
 
 	client := resolveCrawlerClient(opts)
@@ -657,25 +938,55 @@ func searchWebAndCrawlPages(ctx context.Context, query, kind string, limit int, 
 	if err != nil {
 		return nil, err
 	}
-	pageLinks := make([]string, 0, 4)
+	pageLinks := make([]string, 0, 5)
 	seenLinks := make(map[string]struct{})
 	doc.Find("a[href]").Each(func(_ int, s *goquery.Selection) {
-		if len(pageLinks) >= 4 {
+		if len(pageLinks) >= 5 {
 			return
 		}
-		href := strings.TrimSpace(s.AttrOr("href", ""))
-		if !strings.HasPrefix(href, "http://") && !strings.HasPrefix(href, "https://") {
+		resolved := unwrapSearchResultURL(s.AttrOr("href", ""))
+		if resolved == "" {
 			return
 		}
-		if strings.Contains(href, "bing.com") || strings.Contains(href, "microsoft.com") {
+		if _, dup := seenLinks[resolved]; dup {
 			return
 		}
-		if _, dup := seenLinks[href]; dup {
-			return
-		}
-		seenLinks[href] = struct{}{}
-		pageLinks = append(pageLinks, href)
+		seenLinks[resolved] = struct{}{}
+		pageLinks = append(pageLinks, resolved)
 	})
+	return pageLinks, nil
+}
+
+func searchWebAndCrawlPages(ctx context.Context, query, kind string, limit int, opts MediaCrawlOptions) ([]CrawledMediaCandidate, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	baseSearch := strings.TrimSpace(opts.WebSearchURL)
+	if baseSearch == "" {
+		baseSearch = defaultCrawlerWebSearch
+	}
+
+	suffix := ""
+	switch kind {
+	case "voice":
+		suffix = " mp3 试听 音色 配音"
+	case "image":
+		suffix = " jpg png 高清 参考图 剧照"
+	case "video":
+		suffix = " mp4 素材 视频"
+	}
+	searchQuery := strings.TrimSpace(query) + suffix
+
+	pageLinks, err := fetchSearchResultLinks(ctx, baseSearch, searchQuery, opts)
+	if (err != nil || len(pageLinks) == 0) && opts.WebSearchURL == "" {
+		if ddgLinks, ddgErr := fetchSearchResultLinks(ctx, defaultCrawlerDDGSearch, searchQuery, opts); ddgErr == nil && len(ddgLinks) > 0 {
+			pageLinks = ddgLinks
+			err = nil
+		}
+	}
+	if err != nil && len(pageLinks) == 0 {
+		return nil, err
+	}
 
 	var mu sync.Mutex
 	var out []CrawledMediaCandidate
@@ -879,7 +1190,9 @@ func inferVoiceAttrsFromText(text string) (role string, gender string, tags []st
 	lower := strings.ToLower(text)
 	gender = "female"
 	switch {
-	case strings.Contains(lower, "男") || strings.Contains(lower, "霸总") || strings.Contains(lower, "战神") || strings.Contains(lower, "大叔") || strings.Contains(lower, "male") || strings.Contains(lower, "boss") || strings.Contains(lower, "villain"):
+	case strings.Contains(lower, "女") || strings.Contains(lower, "female") || strings.Contains(lower, "girl") || strings.Contains(lower, "woman"):
+		gender = "female"
+	case strings.Contains(lower, "男") || strings.Contains(lower, "霸总") || strings.Contains(lower, "战神") || strings.Contains(lower, "大叔") || strings.Contains(lower, "male") || strings.Contains(lower, "boss") || strings.Contains(lower, "villain") || strings.Contains(lower, "deep voice"):
 		gender = "male"
 	}
 	switch {

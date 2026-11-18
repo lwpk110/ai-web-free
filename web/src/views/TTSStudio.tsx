@@ -81,7 +81,7 @@ export function TTSStudio(): React.JSX.Element {
   const auditionAudioRef = useRef<HTMLAudioElement | null>(null);
   const auditionControllerRef = useRef<AbortController | null>(null);
   const auditionUrlRef = useRef<string | null>(null);
-  const [visibleVoiceLimit, setVisibleVoiceLimit] = useState(24);
+  const [visibleVoiceLimit, setVisibleVoiceLimit] = useState(30);
 
   // 声音设计弹窗状态
   const [showDesignModal, setShowDesignModal] = useState<boolean>(false);
@@ -105,6 +105,7 @@ export function TTSStudio(): React.JSX.Element {
   // 主音频播放控制
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
+  const [sideTab, setSideTab] = useState<"library" | "history">("library");
 
   useEffect(() => {
     loadVoices();
@@ -437,6 +438,32 @@ export function TTSStudio(): React.JSX.Element {
     },
   ];
 
+  const selectedVoiceInfo = voices.find((v) => v.id === selectedVoice);
+  const providerBadgeOf = (provider: string): { label: string; dot: string; pill: string } => {
+    switch (provider) {
+      case "local_tts":
+        return { label: "自定义 TTS", dot: "bg-teal-500", pill: "z-pill-info" };
+      case "edge_tts":
+        return { label: "Edge", dot: "bg-emerald-500", pill: "z-pill-success" };
+      case "siliconflow":
+        return { label: "硅基流动", dot: "bg-violet-500", pill: "z-pill-info" };
+      case "dashscope":
+        return { label: "阿里百炼", dot: "bg-sky-500", pill: "z-pill-info" };
+      case "chatgpt":
+        return { label: "OpenAI", dot: "bg-amber-500", pill: "z-pill-warn" };
+      case "custom":
+        return { label: "克隆库", dot: "bg-indigo-500", pill: "z-pill-info" };
+      default:
+        return { label: provider, dot: "bg-muted-foreground", pill: "z-pill-info" };
+    }
+  };
+  const selectedBadge = selectedVoiceInfo ? providerBadgeOf(selectedVoiceInfo.provider) : null;
+  const statusItems: Array<{ label: string; ok: boolean; prov?: CloudKeyProviderId }> = [
+    { label: "Edge-TTS", ok: true },
+    { label: "硅基流动", ok: !!sfReady, prov: "siliconflow" },
+    { label: "阿里百炼", ok: !!dsReady, prov: "dashscope" },
+  ];
+
   return (
     <div className="flex-1 grid grid-cols-1 md:grid-cols-[380px_1fr] lg:grid-cols-[400px_1fr] min-h-0 h-full overflow-hidden">
       <audio
@@ -446,47 +473,37 @@ export function TTSStudio(): React.JSX.Element {
         className="hidden"
       />
 
-      {/* 左栏：音色选择与控制台 */}
-      <aside className="z-surface border-b md:border-b-0 md:border-r z-border flex flex-col min-h-0 max-h-[50vh] md:max-h-none md:h-full overflow-hidden">
+      {/* 左栏：语音创作参数台（对齐 ImageStudio / VideoStudio 统一骨架） */}
+      <aside className="z-surface border-b md:border-b-0 md:border-r z-border flex flex-col min-h-0 max-h-[56vh] md:max-h-none md:h-full overflow-hidden">
         {/* 左栏头部 */}
-        <div className="p-3 border-b z-border flex items-center justify-between shrink-0 bg-muted/10">
-          <div className="flex items-center gap-2">
-            <div className="p-1.5 bg-primary/10 rounded-lg text-primary">
+        <div className="p-3 border-b z-border flex items-center justify-between gap-2 shrink-0 bg-muted/10">
+          <div className="flex items-center gap-2 min-w-0">
+            <div className="p-1.5 bg-primary/10 rounded-lg text-primary shrink-0">
               <Mic className="w-4 h-4" />
             </div>
-            <div>
-              <h2 className="text-xs font-semibold z-text flex items-center gap-1.5">
-                <span>音色选择与控制台</span>
-                <span className="text-[10px] font-normal px-1.5 py-0.2 rounded bg-cyan-500/10 text-cyan-600 dark:text-cyan-400">
-                  {filteredVoices.length}
+            <div className="min-w-0">
+              <h2 className="text-xs font-semibold z-text flex items-center gap-1.5 truncate">
+                <span>语音创作参数台</span>
+                <span className="text-[10px] font-normal px-1.5 py-0.5 rounded bg-primary/10 text-primary shrink-0">
+                  TTS Studio
                 </span>
               </h2>
-              <p className="text-[10px] z-text-muted">免密 Edge / 硅基 / 阿里百炼</p>
+              <p className="text-[10px] z-text-muted truncate">免密 Edge · 硅基流动 · 阿里百炼</p>
             </div>
           </div>
-          <div className="flex items-center gap-1.5">
-            <button
-              type="button"
-              onClick={() => setShowDesignModal(true)}
-              className="px-2 py-1 text-[11px] font-medium rounded-md border border-purple-500/30 bg-purple-500/10 text-purple-600 dark:text-purple-400 hover:bg-purple-500/20 transition-colors"
-              title="文字设计音色"
+          <div className="flex items-center gap-1.5 shrink-0">
+            <a
+              href="#/chat"
+              className="flex items-center gap-1 px-2 py-1 text-[11px] font-medium rounded-md border border-primary/30 bg-primary/10 text-primary hover:bg-primary/20 transition-colors"
+              title="前往 Chat 使用 /voice 爬虫工具"
             >
-              <Wand2 className="w-3 h-3" />
-              设计
-            </button>
-            <button
-              type="button"
-              onClick={() => setShowCloneModal(true)}
-              className="px-2 py-1 text-[11px] font-medium rounded-md border border-blue-500/30 bg-blue-500/10 text-blue-600 dark:text-blue-400 hover:bg-blue-500/20 transition-colors"
-              title="音频复刻音色"
-            >
-              <AudioWaveform className="w-3 h-3" />
-              克隆
-            </button>
+              <Globe className="w-3 h-3" />
+              找音色
+            </a>
             <button
               type="button"
               onClick={() => openCloudKeyModal(sfReady ? "dashscope" : "siliconflow")}
-              className="px-2 py-1 text-[11px] font-medium rounded-md bg-amber-500/10 text-amber-700 dark:text-amber-400 border border-amber-500/25 hover:bg-amber-500/20 transition-colors"
+              className="flex items-center gap-1 px-2 py-1 text-[11px] font-medium rounded-md bg-amber-500/10 text-amber-700 dark:text-amber-400 border border-amber-500/25 hover:bg-amber-500/20 transition-colors cursor-pointer"
               title="配置云端 API Key"
             >
               <KeyRound className="w-3 h-3" />
@@ -495,384 +512,87 @@ export function TTSStudio(): React.JSX.Element {
           </div>
         </div>
 
-        {/* 音色库主体滚动区 */}
-        <div className="flex-1 overflow-y-auto p-3 space-y-3 min-h-0 text-xs">
-          <div className="p-card rounded-xl border z-border p-4 shadow-sm space-y-4">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-              <div className="flex flex-wrap items-center gap-2">
-                <Layers className="w-4 h-4 text-primary" />
-                <h2 className="text-sm font-semibold z-text">音色分类库 ({filteredVoices.length})</h2>
-                <div className="flex items-center rounded-md border z-border p-0.5 text-[11px]">
-                  {(
-                    [
-                      ["all", "全部"],
-                      ["available", "可用"],
-                      ["cached", "已缓存"],
-                    ] as const
-                  ).map(([val, label]) => (
-                    <button
-                      key={val}
-                      type="button"
-                      onClick={() => setAvailabilityFilter(val)}
-                      className={`px-2 py-0.5 rounded transition-colors ${
-                        availabilityFilter === val
-                          ? "bg-primary text-primary-foreground font-medium"
-                          : "z-text-muted hover:z-text"
-                      }`}
-                    >
-                      {label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* 搜索框 */}
-              <div className="relative w-full sm:w-56">
-                <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 z-text-muted" />
-                <input
-                  type="text"
-                  placeholder="搜索音色名称或标签..."
-                  value={searchTerm}
-                  onChange={(e) => setSearchTerm(e.target.value)}
-                  className="w-full text-xs pl-8 pr-3 py-1.5 rounded-md border z-border p-input focus:outline-none focus:ring-1 focus:ring-primary z-text"
-                />
-              </div>
-            </div>
-
-            {/* 分类切换 Tab */}
-            <div className="flex items-center gap-1.5 overflow-x-auto pb-1 scrollbar-none border-b z-border text-xs">
-              {categories.map((c) => (
-                <button
-                  key={c}
-                  onClick={() => setActiveCategory(c)}
-                  className={`px-3 py-1.5 rounded-md transition-colors whitespace-nowrap ${
-                    activeCategory === c
-                      ? "bg-primary text-primary-foreground font-medium"
-                      : "z-text-muted hover:bg-muted/50 z-text"
-                  }`}
-                >
-                  {c}
-                </button>
-              ))}
-            </div>
-
-            {voiceLoadError && (
-              <div role="alert" className="flex items-center justify-between gap-3 rounded-md border border-destructive/20 bg-destructive/5 px-3 py-2 text-xs text-destructive">
-                <span>音色列表加载失败：{voiceLoadError}</span>
-                <button type="button" onClick={loadVoices} disabled={loadingVoices} className="shrink-0 underline disabled:opacity-50">
-                  重试
-                </button>
-              </div>
-            )}
-            {loadingVoices && voices.length === 0 && (
-              <p className="py-6 text-center text-xs z-text-muted">正在加载音色...</p>
-            )}
-            {!loadingVoices && !voiceLoadError && filteredVoices.length === 0 && (
-              <p className="py-6 text-center text-xs z-text-muted">没有匹配的音色</p>
-            )}
-
-            {/* 音色卡片列表 */}
-            <div className="grid grid-cols-1 gap-2.5 overflow-y-auto pr-1">
-              {visibleVoices.map((v) => {
-                const isSelected = selectedVoice === v.id;
-                const isAuditioning = auditioningVoice === v.id;
-                const isAvailable = v.available !== false;
-                const providerBadge =
-                  v.provider === "local_tts"
-                    ? { label: "自定义 TTS", cls: "bg-teal-500/10 text-teal-600 dark:text-teal-400" }
-                    : v.provider === "edge_tts"
-                    ? { label: "Edge 官方", cls: "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400" }
-                    : v.provider === "siliconflow"
-                    ? { label: "硅基流动", cls: "bg-purple-500/10 text-purple-600 dark:text-purple-400" }
-                    : v.provider === "dashscope"
-                    ? { label: "阿里百炼", cls: "bg-blue-500/10 text-blue-600 dark:text-blue-400" }
-                    : v.provider === "chatgpt"
-                    ? { label: "OpenAI", cls: "bg-amber-500/10 text-amber-600 dark:text-amber-400" }
-                    : v.provider === "custom"
-                    ? { label: "系统克隆库", cls: "bg-indigo-500/10 text-indigo-600 dark:text-indigo-400" }
-                    : { label: v.provider, cls: "bg-muted text-muted-foreground" };
-
-                return (
-                  <div
-                    key={v.id}
-                    onClick={() => setSelectedVoice(v.id)}
-                    title={v.status_reason || v.id}
-                    className={`p-3 rounded-lg border text-left cursor-pointer transition-all relative flex flex-col justify-between gap-2 p-card ${
-                      isSelected
-                        ? "border-primary bg-primary/5 ring-1 ring-primary shadow-sm"
-                        : isAvailable
-                        ? "z-border hover:border-primary/40 hover:bg-muted/30"
-                        : "z-border border-dashed opacity-70 hover:opacity-90"
-                    }`}
-                    style={{ contentVisibility: "auto", containIntrinsicSize: "150px" }}
-                  >
-                    <div>
-                      <div className="flex items-start justify-between gap-2">
-                        <span className="font-semibold text-xs z-text flex items-center gap-1.5">
-                          <Radio
-                            className={`w-3.5 h-3.5 shrink-0 ${
-                              isSelected ? "text-primary fill-primary" : "z-text-muted"
-                            }`}
-                          />
-                          {v.name}
-                        </span>
-                        <div className="flex items-center gap-1 shrink-0">
-                          {v.cached_local && (
-                            <span className="px-1.5 py-0.5 rounded text-[10px] bg-cyan-500/10 text-cyan-600 dark:text-cyan-400">
-                              已缓存
-                            </span>
-                          )}
-                          <span className={`px-1.5 py-0.5 rounded text-[10px] font-normal ${providerBadge.cls}`}>
-                            {providerBadge.label}
-                          </span>
-                        </div>
-                      </div>
-
-                      {!isAvailable && v.status_reason && (
-                        <p className="text-[10px] text-amber-600 dark:text-amber-400 mt-1 line-clamp-1">
-                          未就绪：{v.status_reason}
-                        </p>
-                      )}
-
-                      {v.sample_text && (
-                        <p className="text-[11px] z-text-muted mt-1 line-clamp-2 leading-relaxed">
-                          “{v.sample_text}”
-                        </p>
-                      )}
-                    </div>
-
-                    <div className="flex items-center justify-between pt-1 border-t z-border mt-1">
-                      <div className="flex items-center gap-1 flex-wrap">
-                        {v.tags &&
-                          v.tags.slice(0, 2).map((t, tidx) => (
-                            <span key={tidx} className="px-1 py-0.2 rounded bg-muted text-[10px] z-text-muted">
-                              {t}
-                            </span>
-                          ))}
-                      </div>
-
-                      {/* 一键试听与自定义云端复刻 */}
-                      <div className="flex items-center gap-1 shrink-0">
-                        {v.provider === "custom" && !isAvailable && (
-                          <button
-                            type="button"
-                            onClick={(e) => void handleCloneCachedCustomVoice(v, e)}
-                            disabled={cloningCustomId === v.id}
-                            className="px-1.5 py-0.5 rounded text-[10px] bg-purple-500/10 text-purple-600 dark:text-purple-400 hover:bg-purple-500/20 disabled:opacity-50"
-                            title="上传本地缓存参考音至云端 CosyVoice 完成复刻"
-                          >
-                            {cloningCustomId === v.id ? "复刻中..." : "云端复刻"}
-                          </button>
-                        )}
-                        {v.provider === "custom" && (
-                          <button
-                            type="button"
-                            onClick={(e) => void handleDeleteCachedCustomVoice(v, e)}
-                            className="p-1 rounded text-rose-500 hover:bg-rose-500/10"
-                            title="从系统克隆库移除"
-                          >
-                            <Trash2 className="w-3 h-3" />
-                          </button>
-                        )}
-                        <button
-                          type="button"
-                          onClick={(e) => handleAudition(v, e)}
-                          disabled={!isAvailable && !v.cached_local}
-                        className={`flex items-center gap-1 px-2 py-0.5 rounded text-[11px] transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
-                          isAuditioning
-                            ? "bg-amber-500 text-white font-medium"
-                            : "bg-primary/10 text-primary hover:bg-primary/20"
-                        }`}
-                        title={
-                          v.cached_local
-                            ? "直接播放本地缓存试听样音"
-                            : isAvailable
-                            ? "试听并缓存音色预设样本"
-                            : v.status_reason || "当前引擎未就绪"
-                        }
-                      >
-                        {isAuditioning ? (
-                          <>
-                            <Pause className="w-3 h-3 animate-spin" />
-                            试听中
-                          </>
-                        ) : (
-                          <>
-                            <Play className="w-3 h-3" />
-                            试听
-                          </>
-                        )}
-                      </button>
-                    </div>
-                  </div>
-                  </div>
-                );
-              })}
-            </div>
-            {visibleVoices.length < filteredVoices.length && (
-              <button type="button" onClick={() => setVisibleVoiceLimit((limit) => limit + 24)} className="w-full py-2 text-xs z-text-muted hover:z-text border z-border rounded-md">
-                加载更多音色（{filteredVoices.length - visibleVoices.length}）
-              </button>
-            )}
-          </div>
-        </div>
-
-        {/* 左栏底部选中音色快捷条 */}
-        <div className="p-2.5 border-t z-border bg-muted/20 shrink-0 flex items-center justify-between text-xs">
-          <div className="flex items-center gap-1.5 min-w-0">
-            <Volume2 className="w-3.5 h-3.5 text-primary shrink-0" />
-            <span className="z-text-muted text-[11px]">当前选中:</span>
-            <span className="font-semibold text-primary truncate text-[11px]">
-              {voices.find((v) => v.id === selectedVoice)?.name || selectedVoice}
-            </span>
-          </div>
-          {auditioningVoice === selectedVoice ? (
-            <button
-              type="button"
-              onClick={stopAudition}
-              className="px-2 py-0.5 text-[11px] rounded bg-primary/20 text-primary hover:bg-primary/30 transition-colors"
-            >
-              停止
-            </button>
-          ) : (
-            <button
-              type="button"
-              onClick={() => {
-                const target = voices.find((v) => v.id === selectedVoice);
-                if (target) handleAudition(target);
-              }}
-              className="px-2 py-0.5 text-[11px] rounded border z-border hover:bg-muted text-primary transition-colors"
-            >
-              试听
-            </button>
-          )}
-        </div>
-      </aside>
-
-      {/* 右栏：主视区（状态顶栏、常用预设、文本朗读编辑、试听播放器、配音历史） */}
-      <div className="flex-1 flex flex-col min-h-0 h-full overflow-hidden z-canvas">
-        {/* 右栏顶栏 */}
-        <div className="px-4 py-2.5 border-b z-border bg-surface flex flex-wrap items-center justify-between gap-2 shrink-0">
-          <div className="flex flex-wrap items-center gap-2 text-xs">
-            <div className="flex items-center gap-2">
-              <Mic className="w-4 h-4 text-primary" />
-              <span className="font-semibold z-text">语音创作工坊 (TTS Studio)</span>
-            </div>
-            <span className="px-2 py-0.5 text-[10px] font-medium rounded-full bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20">
-              微软 Edge-TTS 免密
-            </span>
-            <span className={`px-2 py-0.5 text-[10px] font-medium rounded-full border ${sfReady ? "bg-purple-500/10 text-purple-600 dark:text-purple-400 border-purple-500/20" : "bg-muted text-muted-foreground z-border"}`}>
-              {sfReady ? "硅基流动 CosyVoice2" : "硅基流动"}
-            </span>
-            <span className={`px-2 py-0.5 text-[10px] font-medium rounded-full border ${dsReady ? "bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/20" : "bg-muted text-muted-foreground z-border"}`}>
-              {dsReady ? "阿里百炼 CosyVoice" : "阿里百炼"}
-            </span>
-            <span className="px-2 py-0.5 text-[10px] font-medium rounded-full bg-cyan-500/10 text-cyan-600 dark:text-cyan-400 border border-cyan-500/20">
-              已缓存样音 {cachedLocalTotal}
-            </span>
-          </div>
-
-          <div className="flex items-center gap-2">
-            <a
-              href="#/chat"
-              className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-md border z-border hover:bg-muted/50 transition-colors z-text"
-              title="前往 Chat 使用 /voice 爬虫工具"
-            >
-              <Globe className="w-3.5 h-3.5 text-primary" />
-              Chat 找音色
-            </a>
-            <button
-              type="button"
-              onClick={handlePullLocal}
-              disabled={pullingLocal}
-              className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-md border border-cyan-500/30 bg-cyan-500/10 text-cyan-700 dark:text-cyan-300 hover:bg-cyan-500/20 transition-colors disabled:opacity-50"
-            >
-              <DownloadCloud className={`w-3.5 h-3.5 ${pullingLocal ? "animate-bounce" : ""}`} />
-              {pullingLocal ? "拉取中..." : "缓存样音"}
-            </button>
-            <button
-              onClick={() => {
-                void loadVoices();
-                void loadHistory();
-              }}
-              disabled={loadingVoices}
-              className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-md border z-border hover:bg-muted/50 transition-colors z-text-muted disabled:opacity-50"
-            >
-              <RefreshCw className={`w-3.5 h-3.5 ${loadingVoices ? "animate-spin" : ""}`} />
-              刷新
-            </button>
-          </div>
-        </div>
-
-        {/* 右栏主体滚动区 */}
-        <div className="flex-1 overflow-y-auto p-4 space-y-4 min-h-0">
-          {pullStatusMsg && (
-        <div className="p-3 text-xs rounded-lg bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border border-emerald-500/25 flex items-center justify-between gap-3">
-          <span>{pullStatusMsg}</span>
-          <button onClick={() => setPullStatusMsg(null)} className="shrink-0 hover:underline">
-            关闭
-          </button>
-        </div>
-      )}
-
-      {synthMeta?.fallback && (
-        <div className="p-3 text-xs rounded-lg bg-amber-500/10 text-amber-700 dark:text-amber-300 border border-amber-500/25 flex items-center gap-2">
-          <AlertTriangle className="w-4 h-4 shrink-0" />
-          <span>
-            注意：目标音色（<code className="font-mono">{selectedVoice}</code>）未直接可用（{synthMeta.fallbackReason || "已启用降级"}），本次已显式路由至{" "}
-            <strong>{synthMeta.provider}</strong> / <code className="font-mono">{synthMeta.voice}</code>。
-          </span>
-        </div>
-      )}
-
-      {errorMsg && (
-        <div className="p-3 text-sm rounded-lg bg-destructive/10 text-destructive border border-destructive/20 flex flex-wrap items-center justify-between gap-2">
-          <span>{errorMsg}</span>
-          <div className="flex items-center gap-3">
-            <button
-              type="button"
-              onClick={() => speakWithBrowserFallback(inputText)}
-              className="text-xs px-2 py-0.5 rounded border border-destructive/30 hover:bg-destructive/10"
-            >
-              浏览器系统朗读试听
-            </button>
-            <button onClick={() => setErrorMsg(null)} className="text-xs hover:underline">
-              关闭
-            </button>
-          </div>
-        </div>
-      )}
-
-          {/* 常用预设快捷填入 */}
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="text-xs z-text-muted font-medium flex items-center gap-1">
-          <Sparkles className="w-3.5 h-3.5 text-amber-500" />
-          爆款文案预设：
-        </span>
-        {presetLines.map((p, idx) => (
-          <button
-            key={idx}
-            onClick={() => {
-              setInputText(p.text);
-              setSelectedVoice(p.voice);
-            }}
-            className="text-xs px-2.5 py-1 rounded-full p-card border z-border hover:bg-muted/70 transition-colors z-text"
-          >
-            {p.label}
-          </button>
-        ))}
-      </div>
-
-          <div className="p-card rounded-xl border z-border p-4 shadow-sm space-y-3">
-            <div className="flex flex-wrap items-center justify-between gap-2 text-xs z-text-muted">
-              <span className="font-semibold z-text flex items-center gap-1.5">
-                <Sliders className="w-4 h-4 text-primary" />
-                配音文本输入
+        {/* 左栏参数滚动区 */}
+        <div className="flex-1 overflow-y-auto p-4 space-y-4 min-h-0 text-xs">
+          {/* 当前选中音色卡片 */}
+          <div className="p-card rounded-xl p-3 space-y-2.5">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[11px] font-medium z-text-sec flex items-center gap-1.5">
+                <Radio className="w-3.5 h-3.5 text-primary" />
+                当前配音音色
               </span>
-              <div className="flex items-center gap-2">
-                <span>{inputText.length} 字符</span>
+              <div className="flex items-center gap-1.5">
+                {selectedBadge && (
+                  <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full border text-[10px] font-medium ${selectedBadge.pill}`}>
+                    <span className={`w-1.5 h-1.5 rounded-full ${selectedBadge.dot}`} />
+                    {selectedBadge.label}
+                  </span>
+                )}
+                {selectedVoiceInfo?.cached_local && (
+                  <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full border z-pill-success text-[10px] font-medium">
+                    <Check className="w-2.5 h-2.5" />
+                    已缓存
+                  </span>
+                )}
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between gap-2.5 rounded-lg border z-border bg-muted/30 px-2.5 py-2">
+              <div className="min-w-0 flex-1">
+                <p className="text-xs font-semibold z-text truncate">
+                  {selectedVoiceInfo?.name || selectedVoice}
+                </p>
+                <p className="text-[10px] font-mono z-text-muted truncate mt-0.5">
+                  {selectedVoiceInfo
+                    ? `${selectedVoiceInfo.id}${selectedVoiceInfo.locale ? ` · ${selectedVoiceInfo.locale}` : ""}`
+                    : "未在当前目录中，可在右侧音色库点选"}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  if (auditioningVoice === selectedVoice) stopAudition();
+                  else if (selectedVoiceInfo) void handleAudition(selectedVoiceInfo);
+                }}
+                disabled={!selectedVoiceInfo}
+                className={`inline-flex items-center gap-1 h-7 px-2.5 rounded-lg border text-[11px] font-medium transition-colors shrink-0 cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed ${
+                  auditioningVoice === selectedVoice
+                    ? "z-primary-btn border-transparent"
+                    : "z-border z-surface z-ghost-btn z-text"
+                }`}
+              >
+                {auditioningVoice === selectedVoice ? (
+                  <>
+                    <Pause className="w-3 h-3" />
+                    停止
+                  </>
+                ) : (
+                  <>
+                    <Play className="w-3 h-3" />
+                    试听
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+
+          {/* 快捷台词模板 + 配音文案 */}
+          <div className="space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <label htmlFor="tts-script-input" className="font-medium z-text flex items-center gap-1.5">
+                <Sparkles className="w-3.5 h-3.5 text-primary" />
+                <span>配音台词文案</span>
+              </label>
+              <div className="flex items-center gap-1.5 text-[11px] z-text-muted">
+                <span className="font-mono-num tabular-nums">{inputText.length} 字</span>
                 {inputText && (
-                  <button type="button" onClick={() => setInputText("")} title="清空文案" className="p-1 rounded hover:bg-muted z-text-muted">
+                  <button
+                    type="button"
+                    onClick={() => setInputText("")}
+                    title="清空文案"
+                    aria-label="清空文案"
+                    className="p-1 rounded-md hover:bg-muted z-text-muted hover:z-text transition-colors cursor-pointer"
+                  >
                     <X className="w-3.5 h-3.5" />
                   </button>
                 )}
@@ -887,207 +607,663 @@ export function TTSStudio(): React.JSX.Element {
               </div>
             </div>
 
-            <textarea
-              value={inputText}
-              onChange={(e) => setInputText(e.target.value)}
-              placeholder="请输入需要朗读的文案内容，系统将自动基于标点符号并发切片无损拼接..."
-              rows={7}
-              className="w-full text-xs rounded-lg border z-border p-input p-3 focus:outline-none focus:ring-1 focus:ring-primary resize-none font-sans leading-relaxed z-text"
-            />
-            <div className="space-y-2 pt-2 border-t z-border">
-              <div className="flex items-center justify-between text-xs">
-                <span className="z-text-muted">语速调节 ({speed}x)</span>
-                <span className="font-mono text-xs text-primary">{speed}x</span>
-              </div>
-              <input
-                type="range"
-                min="0.5"
-                max="2.0"
-                step="0.1"
-                value={speed}
-                onChange={(e) => setSpeed(parseFloat(e.target.value))}
-                className="w-full accent-primary h-1.5 bg-muted rounded-lg cursor-pointer"
-              />
-              <label className="flex items-center gap-2 pt-1 text-[11px] z-text-muted cursor-pointer select-none">
-                <input
-                  type="checkbox"
-                  checked={allowFallback}
-                  onChange={(e) => setAllowFallback(e.target.checked)}
-                  className="rounded border z-border accent-primary"
-                />
-                <span>主引擎失败时允许跨引擎音色映射兜底（默认关闭，确保音色不静默替换）</span>
-              </label>
+            <div className="flex items-center gap-1.5 overflow-x-auto scrollbar-none pb-0.5">
+              {presetLines.map((p, idx) => (
+                <button
+                  key={idx}
+                  type="button"
+                  onClick={() => {
+                    setInputText(p.text);
+                    setSelectedVoice(p.voice);
+                  }}
+                  className="shrink-0 text-[11px] px-2.5 py-1 rounded-full border z-border z-surface z-text-muted hover:z-text hover:bg-muted/60 transition-colors cursor-pointer"
+                >
+                  {p.label}
+                </button>
+              ))}
             </div>
 
-            <div className="flex gap-2">
-            <button
-              onClick={handleSynthesize}
-              disabled={synthesizing || !inputText.trim()}
-              className="flex-1 py-2.5 px-4 rounded-lg bg-primary text-primary-foreground font-medium text-sm hover:bg-primary/90 transition-all flex items-center justify-center gap-2 shadow disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {synthesizing ? (
-                <><RefreshCw className="w-4 h-4 animate-spin" />正在合成...</>
-              ) : (
-                <><Volume2 className="w-4 h-4" />生成配音</>
-              )}
-            </button>
-            {synthesizing && (
-              <button type="button" onClick={cancelSynthesis} className="px-3 rounded-lg border z-border text-xs z-text-muted hover:bg-muted/50">
-                取消
-              </button>
+            <textarea
+              id="tts-script-input"
+              value={inputText}
+              onChange={(e) => setInputText(e.target.value)}
+              placeholder="输入需要朗读的台词或旁白，系统将按标点智能切片并发合成、无损拼接..."
+              rows={7}
+              aria-label="配音文案"
+              className="w-full text-xs rounded-xl border z-border p-input p-3 focus:outline-none focus:ring-1 focus:ring-primary resize-none leading-relaxed z-text"
+            />
+          </div>
+
+          {/* 语速与调度参数 */}
+          <div className="p-card rounded-xl p-3 space-y-3">
+            <div className="flex items-center justify-between">
+              <label htmlFor="tts-speed" className="font-medium z-text flex items-center gap-1.5">
+                <Sliders className="w-3.5 h-3.5 text-primary" />
+                <span>语速与节奏</span>
+              </label>
+              <span className="font-mono-num text-[11px] font-semibold px-2 py-0.5 rounded-md border p-badge-indigo tabular-nums">
+                {speed.toFixed(1)}x
+              </span>
+            </div>
+
+            <div className="p-surface p-1 rounded-lg grid grid-cols-5 gap-1">
+              {[0.8, 1.0, 1.2, 1.5, 1.8].map((s) => {
+                const active = Math.abs(speed - s) < 0.01;
+                return (
+                  <button
+                    key={s}
+                    type="button"
+                    onClick={() => setSpeed(s)}
+                    className={`py-1 rounded-md text-[11px] font-mono-num tabular-nums transition-all cursor-pointer ${
+                      active ? "p-seg-active font-semibold" : "z-text-muted z-ghost-btn"
+                    }`}
+                  >
+                    {s.toFixed(1)}x
+                  </button>
+                );
+              })}
+            </div>
+
+            <input
+              id="tts-speed"
+              type="range"
+              min="0.5"
+              max="2.0"
+              step="0.1"
+              value={speed}
+              onChange={(e) => setSpeed(parseFloat(e.target.value))}
+              className="w-full accent-indigo-500 cursor-pointer"
+            />
+
+            <label className="flex items-start gap-2 pt-2 border-t z-border text-[11px] z-text-muted cursor-pointer select-none leading-relaxed">
+              <input
+                type="checkbox"
+                checked={allowFallback}
+                onChange={(e) => setAllowFallback(e.target.checked)}
+                className="mt-0.5 rounded accent-indigo-500 cursor-pointer"
+              />
+              <span>主引擎失败时允许跨引擎音色映射兜底（默认关闭，防止音色被静默替换）</span>
+            </label>
+          </div>
+        </div>
+
+        {/* 左栏底部固定生成按钮（与 ImageStudio / VideoStudio 一致） */}
+        <div className="p-3 border-t z-border z-surface shrink-0 flex items-center gap-2">
+          <button
+            type="button"
+            onClick={handleSynthesize}
+            disabled={synthesizing || !inputText.trim()}
+            className="flex-1 py-2.5 rounded-xl z-primary-btn text-xs font-semibold inline-flex items-center justify-center gap-1.5 cursor-pointer"
+          >
+            {synthesizing ? (
+              <>
+                <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                <span>正在合成配音...</span>
+              </>
+            ) : (
+              <>
+                <Volume2 className="w-3.5 h-3.5" />
+                <span>开始生成配音</span>
+              </>
             )}
+          </button>
+          {synthesizing && (
+            <button
+              type="button"
+              onClick={cancelSynthesis}
+              className="py-2.5 px-3 rounded-xl border z-border z-surface z-ghost-btn text-xs font-medium cursor-pointer"
+            >
+              取消
+            </button>
+          )}
+        </div>
+      </aside>
+
+      {/* 右栏：点阵画布工作区（音色分类库 / 配音作品库 + 成片播放器） */}
+      <div className="studio-grid-bg overflow-y-auto p-5 flex flex-col gap-4 min-h-0 text-xs">
+        {/* 顶栏：双 Tab 切换 + 引擎状态徽章 + 工具按钮 */}
+        <div className="flex flex-wrap items-center justify-between gap-2.5">
+          <div className="flex flex-wrap items-center gap-2">
+            <div role="tablist" className="p-surface p-1 rounded-xl inline-flex items-center gap-1">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={sideTab === "library"}
+                onClick={() => setSideTab("library")}
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg cursor-pointer transition-all ${
+                  sideTab === "library" ? "p-seg-active font-semibold" : "z-text-muted z-ghost-btn"
+                }`}
+              >
+                <Layers size={13} />
+                <span>音色分类库</span>
+                <span className="font-mono-num opacity-80">({filteredVoices.length})</span>
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={sideTab === "history"}
+                onClick={() => setSideTab("history")}
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg cursor-pointer transition-all ${
+                  sideTab === "history" ? "p-seg-active font-semibold" : "z-text-muted z-ghost-btn"
+                }`}
+              >
+                <History size={13} />
+                <span>配音作品库</span>
+                <span className="font-mono-num opacity-80">({historyList.length})</span>
+              </button>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-1.5">
+              {statusItems.map((s) =>
+                s.prov && !s.ok ? (
+                  <button
+                    key={s.label}
+                    type="button"
+                    onClick={() => openCloudKeyModal(s.prov!)}
+                    title={`点击配置 ${s.label} API Key`}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border z-pill-warn font-medium cursor-pointer hover:opacity-90 transition-opacity"
+                  >
+                    <span className="status-dot-amber" />
+                    <span>{s.label} 未配置</span>
+                  </button>
+                ) : (
+                  <span
+                    key={s.label}
+                    className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border font-medium ${
+                      s.ok ? "z-pill-success" : "z-pill-warn"
+                    }`}
+                  >
+                    <span className={s.ok ? "status-dot-green" : "status-dot-amber"} />
+                    <span>{s.label}</span>
+                  </span>
+                ),
+              )}
+              <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full border z-pill-info font-mono-num">
+                <HardDrive className="w-3 h-3" />
+                <span>已缓存 {cachedLocalTotal}</span>
+              </span>
             </div>
           </div>
 
-          {/* 音频试听播放卡片 */}
-          {audioUrl && (
-            <div className="p-card rounded-xl border border-primary/30 p-4 shadow-sm space-y-3 bg-primary/5">
-              <div className="flex items-center justify-between gap-2">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="text-xs font-medium text-primary flex items-center gap-1.5">
-                    <AudioWaveform className="w-4 h-4" />
-                    当前合成音频就绪
+          <div className="flex flex-wrap items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => setShowDesignModal(true)}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl border z-border z-surface z-ghost-btn font-medium cursor-pointer"
+              title="自然语言文字设计音色"
+            >
+              <Wand2 className="w-3.5 h-3.5 text-purple-500" />
+              <span>声音设计</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowCloneModal(true)}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl border z-border z-surface z-ghost-btn font-medium cursor-pointer"
+              title="上传参考音频复刻声音"
+            >
+              <AudioWaveform className="w-3.5 h-3.5 text-sky-500" />
+              <span>声音克隆</span>
+            </button>
+            <button
+              type="button"
+              onClick={handlePullLocal}
+              disabled={pullingLocal}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl border z-border z-surface z-ghost-btn font-medium cursor-pointer disabled:opacity-60"
+            >
+              <DownloadCloud className={`w-3.5 h-3.5 ${pullingLocal ? "animate-bounce" : ""}`} />
+              <span>{pullingLocal ? "拉取中..." : "缓存样音"}</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                void loadVoices();
+                void loadHistory();
+              }}
+              disabled={loadingVoices}
+              aria-label="刷新"
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl border z-border z-surface z-ghost-btn font-medium cursor-pointer disabled:opacity-60"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${loadingVoices ? "animate-spin" : ""}`} />
+              <span>刷新</span>
+            </button>
+          </div>
+        </div>
+
+        {/* 状态通知 / 降级 / 错误横幅 */}
+        {pullStatusMsg && (
+          <div role="status" className="p-3 rounded-xl border z-pill-success flex items-center justify-between gap-3">
+            <span>{pullStatusMsg}</span>
+            <button type="button" onClick={() => setPullStatusMsg(null)} className="shrink-0 underline cursor-pointer">
+              关闭
+            </button>
+          </div>
+        )}
+        {synthMeta?.fallback && (
+          <div role="status" className="p-3 rounded-xl border z-pill-warn flex items-start gap-2">
+            <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+            <span>
+              目标音色（<code className="font-mono">{selectedVoice}</code>）未直接可用（{synthMeta.fallbackReason || "已启用降级"}），本次已显式路由至{" "}
+              <strong>{synthMeta.provider}</strong> / <code className="font-mono">{synthMeta.voice}</code>。
+            </span>
+          </div>
+        )}
+        {errorMsg && (
+          <div role="alert" className="p-3 rounded-xl border z-pill-danger flex flex-wrap items-center justify-between gap-2">
+            <span>{errorMsg}</span>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => speakWithBrowserFallback(inputText)}
+                className="px-2.5 py-1 rounded-lg border border-current/30 hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer"
+              >
+                浏览器系统朗读试听
+              </button>
+              <button type="button" onClick={() => setErrorMsg(null)} className="underline cursor-pointer">
+                关闭
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* 最新合成成果播放器卡片 */}
+        {audioUrl && (
+          <div className="p-card rounded-xl border border-primary/30 bg-primary/5 p-3.5 space-y-2.5 max-w-3xl">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-primary">
+                  <AudioWaveform className={`w-4 h-4 ${isPlaying ? "animate-pulse" : ""}`} />
+                  {isPlaying ? "正在播放成品配音" : "配音合成完成"}
+                </span>
+                {synthMeta?.provider && (
+                  <span className="px-2 py-0.5 rounded-full text-[10px] font-mono border z-pill-info">
+                    {synthMeta.provider} · {synthMeta.voice} · {speed.toFixed(1)}x
                   </span>
-                  {synthMeta?.provider && (
-                    <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-primary/10 text-primary">
-                      {synthMeta.provider} · {synthMeta.voice}
-                    </span>
+                )}
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={async () => {
+                    let stableAudioUrl = audioUrl;
+                    if (stableAudioUrl.startsWith("blob:")) {
+                      try {
+                        const blob = await fetch(stableAudioUrl).then((r) => r.blob());
+                        stableAudioUrl = await new Promise<string>((resolve) => {
+                          const reader = new FileReader();
+                          reader.onloadend = () => resolve(typeof reader.result === "string" ? reader.result : audioUrl);
+                          reader.readAsDataURL(blob);
+                        });
+                      } catch {
+                        /* retain */
+                      }
+                    }
+                    dispatchDramaCanvas({
+                      type: "audio",
+                      title: inputText.slice(0, 18) || "配音工坊音频",
+                      text: inputText,
+                      audioUrl: stableAudioUrl,
+                      voiceId: selectedVoice,
+                      sourceView: "tts",
+                    });
+                  }}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border z-border z-surface z-ghost-btn text-[11px] font-medium cursor-pointer"
+                >
+                  <Clapperboard className="w-3.5 h-3.5 text-primary" />
+                  发送到短剧画布
+                </button>
+                <a
+                  href={audioUrl}
+                  download={`tts_${selectedVoice}_${Date.now()}.mp3`}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg z-primary-btn text-[11px] font-medium"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  下载 MP3
+                </a>
+              </div>
+            </div>
+            <audio
+              ref={audioRef}
+              src={audioUrl}
+              controls
+              className="w-full h-10"
+              onPlay={() => setIsPlaying(true)}
+              onPause={() => setIsPlaying(false)}
+              onEnded={() => setIsPlaying(false)}
+            />
+          </div>
+        )}
+
+        {sideTab === "library" ? (
+          <>
+            {/* 搜索与分类过滤工具栏 */}
+            <div className="p-card rounded-xl p-3 space-y-2.5">
+              <div className="flex flex-wrap items-center gap-2.5">
+                <div className="relative flex-1 min-w-[200px]">
+                  <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 z-text-muted" />
+                  <input
+                    type="search"
+                    placeholder="搜索音色名称、ID、引擎或风格标签..."
+                    aria-label="搜索音色"
+                    value={searchTerm}
+                    onChange={(e) => setSearchTerm(e.target.value)}
+                    className="w-full h-8 text-xs pl-8 pr-8 rounded-lg border z-border p-input focus:outline-none focus:ring-1 focus:ring-primary z-text"
+                  />
+                  {searchTerm && (
+                    <button
+                      type="button"
+                      onClick={() => setSearchTerm("")}
+                      aria-label="清空搜索"
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 z-text-muted hover:z-text cursor-pointer"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
                   )}
                 </div>
-                <div className="flex items-center gap-3">
-                  <button
-                    type="button"
-                    onClick={async () => {
-                      let stableAudioUrl = audioUrl;
-                      if (stableAudioUrl.startsWith("blob:")) {
-                        try {
-                          const blob = await fetch(stableAudioUrl).then((r) => r.blob());
-                          stableAudioUrl = await new Promise<string>((resolve) => {
-                            const reader = new FileReader();
-                            reader.onloadend = () => resolve(typeof reader.result === "string" ? reader.result : audioUrl);
-                            reader.readAsDataURL(blob);
-                          });
-                        } catch {
-                          /* retain */
-                        }
-                      }
-                      dispatchDramaCanvas({
-                        type: "audio",
-                        title: inputText.slice(0, 18) || "配音工坊音频",
-                        text: inputText,
-                        audioUrl: stableAudioUrl,
-                        voiceId: selectedVoice,
-                        sourceView: "tts",
-                      });
-                    }}
-                    className="flex items-center gap-1 text-xs text-amber-600 dark:text-amber-400 hover:underline font-medium"
-                  >
-                    <Clapperboard className="w-3.5 h-3.5" />
-                    发送到短剧画布
-                  </button>
-                  <a
-                    href={audioUrl}
-                    download={`tts_${selectedVoice}_${Date.now()}.mp3`}
-                    className="flex items-center gap-1 text-xs text-primary hover:underline font-medium"
-                  >
-                    <Download className="w-3.5 h-3.5" />
-                    下载 MP3
-                  </a>
+
+                <div className="p-surface p-0.5 rounded-lg inline-flex items-center gap-0.5 text-[11px] shrink-0">
+                  {([
+                    ["all", "全部"],
+                    ["available", "仅可用"],
+                    ["cached", "已缓存"],
+                  ] as const).map(([val, label]) => (
+                    <button
+                      key={val}
+                      type="button"
+                      onClick={() => setAvailabilityFilter(val)}
+                      className={`px-2.5 py-1 rounded-md transition-all cursor-pointer ${
+                        availabilityFilter === val
+                          ? "p-seg-active font-medium"
+                          : "z-text-muted z-ghost-btn"
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
                 </div>
               </div>
-              <audio
-                ref={audioRef}
-                src={audioUrl}
-                controls
-                className="w-full h-10 accent-primary"
-                onPlay={() => setIsPlaying(true)}
-                onPause={() => setIsPlaying(false)}
-                onEnded={() => setIsPlaying(false)}
-              />
-            </div>
-          )}
 
-          {/* 配音历史作品墙 */}
-          <div className="p-card rounded-xl border z-border p-4 shadow-sm space-y-3">
-            <div className="flex items-center justify-between text-xs z-text-muted">
-              <span className="font-semibold z-text flex items-center gap-1.5">
-                <History className="w-4 h-4 text-primary" />
-                配音生成历史 ({historyList.length})
-              </span>
-              <span className="text-[11px]">纯 Go 数据库持久化</span>
+              <div className="flex flex-wrap items-center gap-1.5">
+                {categories.map((c) => (
+                  <button
+                    key={c}
+                    type="button"
+                    onClick={() => setActiveCategory(c)}
+                    className={`px-2.5 py-1 text-[11px] rounded-full border whitespace-nowrap transition-all cursor-pointer ${
+                      activeCategory === c
+                        ? "p-chip-active font-medium"
+                        : "z-border z-text-muted z-ghost-btn"
+                    }`}
+                  >
+                    {c}
+                  </button>
+                ))}
+              </div>
             </div>
 
-            {historyList.length === 0 ? (
-              <p className="text-xs z-text-muted py-4 text-center">暂无配音历史，合成后将自动入库</p>
+            {voiceLoadError && (
+              <div role="alert" className="p-3 rounded-xl border z-pill-danger flex items-center justify-between gap-3">
+                <span>音色列表加载失败：{voiceLoadError}</span>
+                <button
+                  type="button"
+                  onClick={loadVoices}
+                  disabled={loadingVoices}
+                  className="shrink-0 underline disabled:opacity-50 cursor-pointer"
+                >
+                  重试
+                </button>
+              </div>
+            )}
+
+            {loadingVoices && voices.length === 0 ? (
+              <div className="p-card rounded-xl py-16 text-center z-text-muted space-y-2">
+                <RefreshCw className="w-5 h-5 mx-auto animate-spin text-primary" />
+                <p>正在加载音色目录...</p>
+              </div>
+            ) : !voiceLoadError && filteredVoices.length === 0 ? (
+              <div className="p-card rounded-xl py-16 text-center z-text-muted space-y-2">
+                <Layers className="w-6 h-6 mx-auto opacity-40" />
+                <p>当前筛选条件下没有匹配的音色</p>
+              </div>
             ) : (
-              <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
-                {historyList.slice(0, 10).map((h) => (
+              <>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4 gap-2">
+                  {visibleVoices.map((v) => {
+                    const isSelected = selectedVoice === v.id;
+                    const isAuditioning = auditioningVoice === v.id;
+                    const isAvailable = v.available !== false;
+                    const badge = providerBadgeOf(v.provider);
+                    return (
+                      <div
+                        key={v.id}
+                        role="radio"
+                        aria-checked={isSelected}
+                        tabIndex={0}
+                        onClick={() => setSelectedVoice(v.id)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            setSelectedVoice(v.id);
+                          }
+                        }}
+                        title={v.status_reason || v.id}
+                        className={`group p-card p-card-interactive rounded-xl p-2.5 flex flex-col justify-between gap-2 cursor-pointer transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 ${
+                          isSelected
+                            ? "p-card-selected"
+                            : !isAvailable
+                            ? "opacity-75 border-dashed"
+                            : ""
+                        }`}
+                        style={{ contentVisibility: "auto", containIntrinsicSize: "96px" }}
+                      >
+                        <div className="space-y-1 min-w-0">
+                          <div className="flex items-center justify-between gap-1.5">
+                            <div className="flex items-center gap-1.5 min-w-0">
+                              <span
+                                className={
+                                  isSelected
+                                    ? "status-dot-indigo"
+                                    : "w-2 h-2 rounded-full border z-border shrink-0 opacity-60"
+                                }
+                              />
+                              <span className="text-xs font-semibold z-text truncate">{v.name}</span>
+                            </div>
+                            <div className="flex items-center gap-1 shrink-0">
+                              {isSelected && (
+                                <span className="px-1.5 py-0.25 rounded-full border p-badge-indigo text-[10px] font-medium">
+                                  已选中
+                                </span>
+                              )}
+                              {v.cached_local && (
+                                <span
+                                  className="inline-flex items-center px-1 py-0.5 rounded-full border z-pill-success text-[10px]"
+                                  title="本地已缓存试听样音"
+                                >
+                                  <Check className="w-2.5 h-2.5" />
+                                </span>
+                              )}
+                              <span className={`inline-flex items-center gap-1 px-1.5 py-0.25 rounded-full border text-[10px] ${badge.pill}`}>
+                                <span className={`w-1.5 h-1.5 rounded-full ${badge.dot}`} />
+                                {badge.label}
+                              </span>
+                            </div>
+                          </div>
+
+                          {!isAvailable && v.status_reason ? (
+                            <p className="text-[11px] text-amber-600 dark:text-amber-400 truncate">
+                              未就绪：{v.status_reason}
+                            </p>
+                          ) : v.sample_text ? (
+                            <p className="text-[11px] z-text-muted truncate" title={v.sample_text}>
+                              {v.sample_text}
+                            </p>
+                          ) : v.tags?.length ? (
+                            <p className="text-[11px] z-text-muted truncate">
+                              {v.tags.slice(0, 4).join(" · ")}
+                            </p>
+                          ) : (
+                            <p className="text-[11px] z-text-muted truncate">{v.category || "通用音色"}</p>
+                          )}
+                        </div>
+
+                        <div className="pt-1.5 border-t z-border flex items-center justify-between gap-1.5">
+                          <span className="text-[10px] font-mono z-text-muted truncate min-w-0" title={v.id}>
+                            {v.id}
+                          </span>
+                          <div className="flex items-center gap-1 shrink-0">
+                            {v.provider === "custom" && !isAvailable && (
+                              <button
+                                type="button"
+                                onClick={(e) => void handleCloneCachedCustomVoice(v, e)}
+                                disabled={cloningCustomId === v.id}
+                                className="px-1.5 py-0.5 rounded-md text-[10px] border z-border hover:bg-muted disabled:opacity-50 cursor-pointer"
+                                title="上传本地缓存参考音至云端 CosyVoice 完成复刻"
+                              >
+                                {cloningCustomId === v.id ? "复刻中..." : "云端复刻"}
+                              </button>
+                            )}
+                            {v.provider === "custom" && (
+                              <button
+                                type="button"
+                                onClick={(e) => void handleDeleteCachedCustomVoice(v, e)}
+                                className="p-1 rounded-md text-destructive hover:bg-destructive/10 cursor-pointer"
+                                title="从系统克隆库移除"
+                                aria-label="移除克隆音色"
+                              >
+                                <Trash2 className="w-3 h-3" />
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              onClick={(e) => handleAudition(v, e)}
+                              disabled={!isAvailable && !v.cached_local}
+                              aria-label={isAuditioning ? "停止试听" : `试听 ${v.name}`}
+                              className={`inline-flex items-center gap-1 h-6 px-2 rounded-md text-[11px] font-medium transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed ${
+                                isAuditioning
+                                  ? "p-seg-active"
+                                  : "border z-border z-surface z-ghost-btn text-primary"
+                              }`}
+                              title={v.cached_local ? "播放本地缓存试听样音" : isAvailable ? "试听并缓存音色样本" : v.status_reason || "当前引擎未就绪"}
+                            >
+                              {isAuditioning ? <Pause className="w-3 h-3" /> : <Play className="w-3 h-3" />}
+                              <span>{isAuditioning ? "停止" : "试听"}</span>
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {visibleVoices.length < filteredVoices.length && (
+                  <button
+                    type="button"
+                    onClick={() => setVisibleVoiceLimit((limit) => limit + 30)}
+                    className="w-full py-2.5 text-xs font-medium z-text-muted hover:z-text border z-border z-surface z-ghost-btn rounded-xl cursor-pointer transition-colors"
+                  >
+                    加载更多音色（剩余 {filteredVoices.length - visibleVoices.length} 个）
+                  </button>
+                )}
+              </>
+            )}
+          </>
+        ) : (
+          <div className="space-y-3">
+            {historyList.length === 0 ? (
+              <div className="p-card rounded-xl py-16 text-center z-text-muted space-y-2">
+                <History className="w-7 h-7 mx-auto opacity-40" />
+                <p>暂无配音作品记录，在左侧生成配音后将自动入库</p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-2.5">
+                {historyList.slice(0, 30).map((h) => (
                   <div
                     key={h.id}
-                    className="p-2.5 rounded-lg border z-border p-card flex items-center justify-between gap-2 text-xs"
+                    className="p-card p-card-interactive rounded-xl p-2.5 flex flex-col justify-between gap-2"
                   >
-                    <div className="min-w-0 flex-1 space-y-0.5">
-                      <div className="flex items-center gap-1.5">
-                        <span className="font-medium text-primary text-[11px] truncate">
+                    <div className="space-y-1.5 min-w-0">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-semibold z-text text-xs truncate">
                           {h.voice_name || h.voice_id}
                         </span>
-                        <span className="text-[10px] z-text-muted">
+                        <span className="px-2 py-0.5 rounded-full border z-pill-info text-[10px] font-mono-num shrink-0">
                           {h.provider} · {h.speed}x
                         </span>
                       </div>
-                      <p className="z-text line-clamp-1 text-[11px] opacity-80" title={h.input_text}>
+                      <p className="z-text-muted line-clamp-2 text-[11px] leading-relaxed" title={h.input_text}>
                         {h.input_text}
                       </p>
                     </div>
-
-                    <div className="flex items-center gap-1 shrink-0">
-                      <button
-                        onClick={() => {
-                          setInputText(h.input_text);
-                          setSelectedVoice(h.voice_id);
-                          setCopiedId(h.id);
-                          setTimeout(() => setCopiedId(null), 1500);
-                        }}
-                        className="p-1 rounded hover:bg-muted text-muted-foreground"
-                        title="复用文本与音色"
-                      >
-                        {copiedId === h.id ? <Check size={14} className="text-emerald-500" /> : <Copy size={14} />}
-                      </button>
-                      {h.audio_url && (
-                        <a
-                          href={h.audio_url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="p-1 rounded hover:bg-muted text-primary"
-                          title="播放 / 外链"
+                    <div className="pt-2 border-t z-border flex items-center justify-between gap-2 text-[11px]">
+                      <span className="font-mono-num text-[10px] z-text-muted truncate">
+                        {h.created_at ? new Date(h.created_at).toLocaleString() : h.voice_id}
+                      </span>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setInputText(h.input_text);
+                            setSelectedVoice(h.voice_id);
+                            setCopiedId(h.id);
+                            setTimeout(() => setCopiedId(null), 1500);
+                          }}
+                          className="inline-flex items-center gap-1 px-2 py-1 rounded-lg border z-border z-ghost-btn z-text-muted hover:z-text cursor-pointer"
+                          title="复用文本与音色"
                         >
-                          <ExternalLink size={14} />
-                        </a>
-                      )}
+                          {copiedId === h.id ? (
+                            <>
+                              <Check size={12} className="text-emerald-500" />
+                              <span>已填入</span>
+                            </>
+                          ) : (
+                            <>
+                              <Copy size={12} />
+                              <span>复用</span>
+                            </>
+                          )}
+                        </button>
+                        {h.audio_url && (
+                          <a
+                            href={h.audio_url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex items-center gap-1 px-2 py-1 rounded-lg border z-border z-ghost-btn text-primary"
+                            title="播放 / 下载音频"
+                          >
+                            <ExternalLink size={12} />
+                            <span>播放</span>
+                          </a>
+                        )}
+                      </div>
                     </div>
                   </div>
                 ))}
               </div>
             )}
           </div>
-        </div>
+        )}
       </div>
 
+      {/* 声音设计弹窗 */}
       {showDesignModal && (
         <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="p-card rounded-xl border z-border max-w-lg w-full p-5 space-y-4 shadow-xl">
-            <div className="flex items-center justify-between pb-2 border-b z-border">
+          <div className="p-card rounded-2xl border z-border max-w-lg w-full p-5 space-y-4 shadow-xl">
+            <div className="flex items-center justify-between pb-2.5 border-b z-border">
               <h3 className="text-sm font-semibold flex items-center gap-2 z-text">
                 <Wand2 className="w-4 h-4 text-purple-500" />
                 自然语言文字捏声音 (Voice Design)
               </h3>
-              <button onClick={() => setShowDesignModal(false)} className="text-xs z-text-muted hover:z-text">
-                关闭
+              <button
+                type="button"
+                onClick={() => setShowDesignModal(false)}
+                className="p-1 rounded-lg hover:bg-muted z-text-muted hover:z-text cursor-pointer"
+                aria-label="关闭"
+              >
+                <X className="w-4 h-4" />
               </button>
             </div>
 
             <p className="text-xs z-text-muted leading-relaxed">
-              基于 CosyVoice 音色大模型，纯通过文字描述凭空创造全新的独有人声音色。
+              基于 CosyVoice 音色大模型，通过自然语言描述凭空生成全新的独有人声音色。
             </p>
 
             <div className="space-y-1.5">
@@ -1106,17 +1282,24 @@ export function TTSStudio(): React.JSX.Element {
                 value={designPrompt}
                 onChange={(e) => setDesignPrompt(e.target.value)}
                 rows={4}
-                className="w-full text-xs rounded-lg border z-border p-input p-2.5 z-text"
+                className="w-full text-xs rounded-xl border z-border p-input p-3 z-text leading-relaxed"
               />
             </div>
 
+            {designResult && (
+              <div className="p-3 rounded-xl border z-pill-success text-xs space-y-1">
+                <p className="font-medium">已生成并自动选中定制音色：{designResult.voice_id}</p>
+              </div>
+            )}
+
             <button
+              type="button"
               onClick={handleVoiceDesignSubmit}
               disabled={designing || !designPrompt.trim()}
-              className="w-full py-2 rounded-lg bg-purple-600 text-white text-xs font-medium hover:bg-purple-700 transition-colors flex items-center justify-center gap-1.5 disabled:opacity-50"
+              className="w-full py-2.5 rounded-xl z-primary-btn text-xs font-semibold flex items-center justify-center gap-1.5 cursor-pointer"
             >
               {designing ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Wand2 className="w-3.5 h-3.5" />}
-              开始生成并绑定到当前音色
+              {designing ? "正在设计生成..." : "开始生成并绑定到当前音色"}
             </button>
           </div>
         </div>
@@ -1125,14 +1308,19 @@ export function TTSStudio(): React.JSX.Element {
       {/* 声音克隆弹窗 */}
       {showCloneModal && (
         <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="p-card rounded-xl border z-border max-w-lg w-full p-5 space-y-4 shadow-xl">
-            <div className="flex items-center justify-between pb-2 border-b z-border">
+          <div className="p-card rounded-2xl border z-border max-w-lg w-full p-5 space-y-4 shadow-xl">
+            <div className="flex items-center justify-between pb-2.5 border-b z-border">
               <h3 className="text-sm font-semibold flex items-center gap-2 z-text">
-                <AudioWaveform className="w-4 h-4 text-blue-500" />
+                <AudioWaveform className="w-4 h-4 text-sky-500" />
                 音频声音复刻 (Voice Clone)
               </h3>
-              <button onClick={() => setShowCloneModal(false)} className="text-xs z-text-muted hover:z-text">
-                关闭
+              <button
+                type="button"
+                onClick={() => setShowCloneModal(false)}
+                className="p-1 rounded-lg hover:bg-muted z-text-muted hover:z-text cursor-pointer"
+                aria-label="关闭"
+              >
+                <X className="w-4 h-4" />
               </button>
             </div>
 
@@ -1147,17 +1335,24 @@ export function TTSStudio(): React.JSX.Element {
                 value={cloneAudioUrl}
                 onChange={(e) => setCloneAudioUrl(e.target.value)}
                 placeholder="https://.../my_voice_sample.mp3"
-                className="w-full text-xs rounded-lg border z-border p-input p-2 z-text"
+                className="w-full text-xs rounded-xl border z-border p-input p-2.5 z-text"
               />
             </div>
 
+            {cloneVoiceId && (
+              <div className="p-3 rounded-xl border z-pill-success text-xs">
+                已完成声音克隆并自动选中：{cloneVoiceId}
+              </div>
+            )}
+
             <button
+              type="button"
               onClick={handleVoiceCloneSubmit}
               disabled={cloning || !cloneAudioUrl.trim()}
-              className="w-full py-2 rounded-lg bg-blue-600 text-white text-xs font-medium hover:bg-blue-700 transition-colors flex items-center justify-center gap-1.5 disabled:opacity-50"
+              className="w-full py-2.5 rounded-xl z-primary-btn text-xs font-semibold flex items-center justify-center gap-1.5 cursor-pointer"
             >
               {cloning ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <AudioWaveform className="w-3.5 h-3.5" />}
-              开始音频复刻
+              {cloning ? "正在复刻声音..." : "开始音频复刻"}
             </button>
           </div>
         </div>

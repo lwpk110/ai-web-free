@@ -214,3 +214,35 @@ func TestShortDramaEnrichmentCustomStoreAndSiliconFlowCloneUpload(t *testing.T) 
 		t.Fatalf("DeleteCustomVoice failed: deleted=%v err=%v", deleted, err)
 	}
 }
+
+func TestMediaCrawlerDataAttrsTranslationAndSearchLinks(t *testing.T) {
+	en := translateVoiceQueryToEnglish("霸总低沉男声")
+	if !strings.Contains(en, "deep") || !strings.Contains(en, "male voice") {
+		t.Fatalf("expected translated query to include deep and male voice, got %q", en)
+	}
+
+	bingTarget := "https://example.org/voices/boss"
+	// "aHR0cHM6Ly9leGFtcGxlLm9yZy92b2ljZXMvYm9zcw" is RawURLEncoding of bingTarget
+	bingHref := "https://www.bing.com/ck/a?!&&p=123&u=a1aHR0cHM6Ly9leGFtcGxlLm9yZy92b2ljZXMvYm9zcw"
+	if got := unwrapSearchResultURL(bingHref); got != bingTarget {
+		t.Fatalf("expected unwrapped bing url %q, got %q", bingTarget, got)
+	}
+
+	ddgHref := "https://duckduckgo.com/l/?uddg=" + url.QueryEscape(bingTarget)
+	if got := unwrapSearchResultURL(ddgHref); got != bingTarget {
+		t.Fatalf("expected unwrapped ddg url %q, got %q", bingTarget, got)
+	}
+
+	baseU, _ := url.Parse("https://freesound.org/search/?q=deep+male+voice")
+	html := `<html><body>
+<div class="bw-player" data-mp3="https://cdn.freesound.org/previews/380/380339-lq.mp3" data-ogg="https://cdn.freesound.org/previews/380/380339-lq.ogg" data-title="Male Deep Voice - Lines of Dialogue"></div>
+<script>window.__DATA = {"preview":"https:\/\/cdn.example.com\/voice\/boss_line.wav"};</script>
+</body></html>`
+	cands := ExtractMediaFromHTML(baseU, html, "voice", 6, false)
+	if len(cands) < 2 {
+		t.Fatalf("expected data-mp3 + inline script audio extracted, got %d (%+v)", len(cands), cands)
+	}
+	if !strings.HasSuffix(cands[0].MediaURL, ".mp3") || cands[0].Title != "Male Deep Voice - Lines of Dialogue" || cands[0].Gender != "male" {
+		t.Fatalf("unexpected first freesound-style candidate: %+v", cands[0])
+	}
+}

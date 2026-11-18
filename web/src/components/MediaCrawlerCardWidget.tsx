@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   AudioLines,
   CheckCircle2,
@@ -9,6 +9,8 @@ import {
   Image as ImageIcon,
   KeyRound,
   Loader2,
+  Pause,
+  Play,
   Search,
   Sparkles,
 } from "lucide-react";
@@ -17,7 +19,9 @@ import {
   CrawlerMediaKind,
   UnifiedMediaCrawlResponse,
   UnifiedMediaImportResponse,
+  VoiceDescriptor,
   crawlMedia,
+  fetchVoicePreview,
   importCrawledMedia,
 } from "../api/client";
 import { CloudKeyConfigModal } from "./CloudKeyConfigModal";
@@ -61,6 +65,55 @@ export function MediaCrawlerCardWidget({
   const [importingUrl, setImportingUrl] = useState<string | null>(null);
   const [importedMap, setImportedMap] = useState<Record<string, UnifiedMediaImportResponse>>({});
   const [keyModalOpen, setKeyModalOpen] = useState(false);
+  const [auditioningId, setAuditioningId] = useState<string | null>(null);
+  const auditionAudioRef = useRef<HTMLAudioElement | null>(null);
+  const auditionCtrlRef = useRef<AbortController | null>(null);
+  const auditionUrlRef = useRef<string | null>(null);
+
+  const stopAudition = () => {
+    auditionCtrlRef.current?.abort();
+    auditionCtrlRef.current = null;
+    if (auditionAudioRef.current) {
+      auditionAudioRef.current.pause();
+      auditionAudioRef.current.removeAttribute("src");
+    }
+    if (auditionUrlRef.current) {
+      URL.revokeObjectURL(auditionUrlRef.current);
+      auditionUrlRef.current = null;
+    }
+    setAuditioningId(null);
+  };
+
+  useEffect(() => () => stopAudition(), []);
+
+  const handleAuditionVoice = async (v: VoiceDescriptor) => {
+    if (auditioningId === v.id) {
+      stopAudition();
+      return;
+    }
+    stopAudition();
+    const ctrl = new AbortController();
+    auditionCtrlRef.current = ctrl;
+    setAuditioningId(v.id);
+    setError(null);
+    try {
+      const res = await fetchVoicePreview(v.id, v.preview_url, ctrl.signal);
+      if (ctrl.signal.aborted) return;
+      const objUrl = URL.createObjectURL(res.blob);
+      auditionUrlRef.current = objUrl;
+      if (auditionAudioRef.current) {
+        auditionAudioRef.current.src = objUrl;
+        await auditionAudioRef.current.play();
+      }
+    } catch (e) {
+      if (!(e instanceof DOMException && e.name === "AbortError")) {
+        setError(e instanceof Error ? `试听失败: ${e.message}` : "试听失败");
+      }
+      if (auditionCtrlRef.current === ctrl) {
+        setAuditioningId(null);
+      }
+    }
+  };
 
   const runCrawl = async (qStr = query, uStr = targetUrl, kVal = kind) => {
     if (!qStr.trim() && !uStr.trim()) {
@@ -138,6 +191,12 @@ export function MediaCrawlerCardWidget({
 
   return (
     <div className="p-card rounded-2xl border z-border p-4 space-y-3.5 text-xs shadow-sm">
+      <audio
+        ref={auditionAudioRef}
+        onEnded={() => setAuditioningId(null)}
+        onError={() => setAuditioningId(null)}
+        className="hidden"
+      />
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2">
           <Globe className="w-4 h-4 text-primary" />
@@ -217,20 +276,38 @@ export function MediaCrawlerCardWidget({
           </div>
           {existingVoices.length > 0 && (
             <div className="flex flex-wrap gap-1.5">
-              {existingVoices.slice(0, 6).map((v) => (
-                <a
-                  key={v.id}
-                  href="#/tts"
-                  className="inline-flex items-center gap-1 px-2 py-1 rounded-md border z-border bg-background hover:border-primary/40 text-[11px]"
-                  title={v.sample_text}
-                >
-                  <AudioLines className="w-3 h-3 text-purple-500" />
-                  <span>{v.name}</span>
-                  {v.cached_local && (
-                    <span className="text-[10px] text-emerald-600 dark:text-emerald-400">已缓存</span>
-                  )}
-                </a>
-              ))}
+              {existingVoices.slice(0, 6).map((v) => {
+                const isAud = auditioningId === v.id;
+                const canAud = v.available !== false || v.cached_local;
+                return (
+                  <div
+                    key={v.id}
+                    className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg border z-border z-surface text-[11px]"
+                    title={v.sample_text || v.id}
+                  >
+                    <AudioLines className="w-3 h-3 text-purple-500 shrink-0" />
+                    <a href="#/tts" className="hover:underline z-text font-medium truncate max-w-[160px]">
+                      {v.name}
+                    </a>
+                    {v.cached_local && (
+                      <span className="text-[10px] text-emerald-600 dark:text-emerald-400 shrink-0">已缓存</span>
+                    )}
+                    {canAud && (
+                      <button
+                        type="button"
+                        onClick={() => void handleAuditionVoice(v)}
+                        className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] cursor-pointer transition-colors ${
+                          isAud ? "p-seg-active font-medium" : "bg-muted hover:bg-indigo-500/10 text-primary"
+                        }`}
+                        title={isAud ? "停止试听" : "直接试听系统音色"}
+                      >
+                        {isAud ? <Pause className="w-2.5 h-2.5" /> : <Play className="w-2.5 h-2.5" />}
+                        <span>{isAud ? "停" : "试听"}</span>
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           )}
           {existingImages.length > 0 && (

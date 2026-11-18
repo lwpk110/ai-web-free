@@ -153,12 +153,32 @@ func (s *VoiceCatalogStore) LoadCatalog(ctx context.Context) ([]VoiceDescriptor,
 func (s *VoiceCatalogStore) AnnotateDescriptors(ctx context.Context, voices []VoiceDescriptor) ([]VoiceDescriptor, int) {
 	out := make([]VoiceDescriptor, len(voices))
 	copy(out, voices)
+
+	var cachedSet map[string]struct{}
+	if s.Enabled() {
+		if lister, ok := s.media.(storage.PrefixLister); ok {
+			if items, err := lister.ListPrefix(ctx, "voice_samples/"); err == nil {
+				cachedSet = make(map[string]struct{}, len(items))
+				for _, item := range items {
+					norm := strings.TrimPrefix(strings.ReplaceAll(strings.TrimSpace(item), "\\", "/"), "storage/")
+					cachedSet[norm] = struct{}{}
+				}
+			}
+		}
+	}
+
 	cachedCount := 0
 	for i := range out {
 		if out[i].PreviewURL == "" {
 			out[i].PreviewURL = SamplePreviewURL(out[i].ID)
 		}
-		if s.HasSample(ctx, out[i].ID) {
+		var has bool
+		if cachedSet != nil {
+			_, has = cachedSet[s.SampleRelPath(out[i].ID)]
+		} else {
+			has = s.HasSample(ctx, out[i].ID)
+		}
+		if has {
 			out[i].CachedLocal = true
 			cachedCount++
 		}
