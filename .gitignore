@@ -47,6 +47,7 @@ web/node_modules/
 !scripts/test_grill_me_adr.py
 !internal/promptplaza/seeds.json
 !package.json
+!skills-lock.json
 
 # Allow tracking project-level Antigravity hooks, skills, and ADR archives
 !/.agents/
