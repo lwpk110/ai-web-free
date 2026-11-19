@@ -23,7 +23,7 @@ type GalleryWork struct {
 	StorageType   string    `gorm:"size:32;default:'local'" json:"storage_type"` // local, s3, blob, remote
 	FilePath      string    `gorm:"size:255" json:"file_path,omitempty"`
 	URL           string    `gorm:"type:text;not null" json:"url"`
-	BlobData      []byte    `gorm:"type:blob" json:"-"`                          // 仅在无磁盘模式下兜底
+	BlobData      []byte    `json:"-"`                          // 仅在无磁盘模式下兜底
 	FileSize      int64     `json:"file_size"`
 	MimeType      string    `gorm:"size:64;default:'image/png'" json:"mime_type"`
 	LatencyMs     int       `json:"latency_ms"`
@@ -247,7 +247,7 @@ type AudioGenerationRecord struct {
 	Speed     float64   `gorm:"default:1.0" json:"speed"`
 	Format    string    `gorm:"size:16;default:'mp3'" json:"format"`
 	AudioURL  string    `gorm:"type:text" json:"audio_url"`
-	BlobData  []byte    `gorm:"type:blob" json:"-"`
+	BlobData  []byte    `json:"-"`
 	Duration  float64   `json:"duration"`
 	CreatedAt time.Time `gorm:"index" json:"created_at"`
 }

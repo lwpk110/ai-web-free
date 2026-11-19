@@ -46,6 +46,7 @@ web/node_modules/
 !scripts/test_kami_login.py
 !scripts/test_grill_me_adr.py
 !internal/promptplaza/seeds.json
+!package.json
 
 # Allow tracking project-level Antigravity hooks, skills, and ADR archives
 !/.agents/
@@ -58,3 +59,5 @@ web/node_modules/
 !/docs/adr/**
 __pycache__/
 *.pyc
+.neon
+node_modules/
