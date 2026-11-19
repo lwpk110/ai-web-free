@@ -10,6 +10,9 @@ import (
 	"strings"
 	"time"
 
+	"ai-web-free/internal/accounts"
+	"ai-web-free/internal/db"
+
 	_ "github.com/glebarez/go-sqlite"
 )
 
@@ -70,6 +73,7 @@ func AutoRestoreDBIfMissing(dbPath string, client *QiniuClient) {
 	}
 
 	log.Printf("[Storage] 成功从七牛云恢复 SQLite 数据库快照至 %s (大小: %.2f MB)", dbPath, float64(len(data))/(1024*1024))
+	syncCloudCredentialsIntoDB(ctx, client, dbPath)
 }
 
 // CheckpointSQLite 触发 SQLite 执行 WAL checkpoint 将日志刷入主数据库文件
@@ -254,6 +258,7 @@ func PullRestore(client *QiniuClient, dbPath, envPath string, pullAllMedia bool)
 			fmt.Printf("❌ 写入 SQLite 数据库失败: %v\n", err)
 		} else {
 			fmt.Printf("✅ 成功恢复 SQLite 数据库到 %s (大小: %.2f MB)！\n", dbPath, float64(len(dbBytes))/(1024*1024))
+			syncCloudCredentialsIntoDB(ctx, client, dbPath)
 		}
 	}
 
@@ -287,4 +292,162 @@ func PullRestore(client *QiniuClient, dbPath, envPath string, pullAllMedia bool)
 
 	fmt.Printf("\n🎉 恢复完成！服务可直接正常启动。\n")
 	return nil
+}
+
+// syncCloudCredentialsIntoDB 从云端凭据备份（_backups/*.txt）直接无缝解析并对齐至 SQLite 数据库，避免污染根目录且保证换机完整恢复
+func syncCloudCredentialsIntoDB(ctx context.Context, client *QiniuClient, dbPath string) {
+	if client == nil {
+		return
+	}
+	database, err := db.InitDB(dbPath)
+	if err != nil {
+		return
+	}
+	profiles := accounts.DefaultProfiles
+	accs, _ := accounts.LoadAccountsFromDB(database, profiles)
+
+	findExisting := func(email, chatGPTID, token string) *accounts.Account {
+		emailClean := strings.ToLower(strings.TrimSpace(email))
+		idClean := strings.TrimSpace(chatGPTID)
+		tokenClean := strings.TrimSpace(token)
+		for _, a := range accs {
+			if emailClean != "" && strings.ToLower(strings.TrimSpace(a.Email)) == emailClean {
+				return a
+			}
+			if idClean != "" && strings.TrimSpace(a.ChatGPTAccountID) == idClean {
+				return a
+			}
+			if tokenClean != "" && (a.Token == tokenClean || a.RefreshToken == tokenClean || a.SessionToken == tokenClean) {
+				return a
+			}
+		}
+		return nil
+	}
+
+	// 1. 同步 access_tokens
+	if accessData, err := client.Download(ctx, "_backups/access_tokens.txt"); err == nil {
+		lines := strings.Split(string(accessData), "\n")
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			parts := strings.SplitN(line, ":", 2)
+			token := parts[0]
+			teamID := ""
+			if len(parts) > 1 {
+				teamID = parts[1]
+			}
+			chatGPTID := accounts.ExtractChatGPTAccountID(token)
+			email := accounts.ExtractEmail(token)
+			if matched := findExisting(email, chatGPTID, token); matched != nil {
+				if matched.Token == "" {
+					matched.Token = token
+				}
+				if matched.TeamUserID == "" {
+					matched.TeamUserID = teamID
+				}
+				if matched.ChatGPTAccountID == "" {
+					matched.ChatGPTAccountID = chatGPTID
+				}
+				if matched.Email == "" {
+					matched.Email = email
+				}
+				continue
+			}
+			acct := accounts.CreateAccount(token, accounts.TypeFree, profiles)
+			acct.TeamUserID = teamID
+			acct.ChatGPTAccountID = chatGPTID
+			if email != "" {
+				acct.Email = email
+			}
+			acct.Status = accounts.StatusActive
+			accs = append(accs, acct)
+		}
+	}
+
+	// 2. 同步 kami_accounts
+	if kamiData, err := client.Download(ctx, "_backups/kami_accounts.txt"); err == nil {
+		kamiList := accounts.ParseKamiText(string(kamiData))
+		for _, k := range kamiList {
+			if matched := findExisting(k.Email, "", ""); matched != nil {
+				matched.Password = k.Password
+				matched.TOTPSecret = k.TOTPSecret
+				continue
+			}
+			acct := accounts.CreateAccount("", accounts.TypeFree, profiles)
+			acct.Email = k.Email
+			acct.Password = k.Password
+			acct.TOTPSecret = k.TOTPSecret
+			acct.Status = accounts.StatusPending
+			acct.LastError = "待浏览器登录提取 Token"
+			accs = append(accs, acct)
+		}
+	}
+
+	// 3. 同步 account_proxies
+	if proxyData, err := client.Download(ctx, "_backups/account_proxies.txt"); err == nil {
+		lines := strings.Split(string(proxyData), "\n")
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			parts := strings.SplitN(line, "----", 2)
+			if len(parts) == 2 {
+				key := strings.ToLower(strings.TrimSpace(parts[0]))
+				pURL := strings.TrimSpace(parts[1])
+				for _, a := range accs {
+					if strings.ToLower(strings.TrimSpace(a.Email)) == key || strings.ToLower(strings.TrimSpace(a.ChatGPTAccountID)) == key {
+						a.Proxy = pURL
+					}
+				}
+			}
+		}
+	}
+
+	// 4. 同步 banned_accounts
+	if bannedData, err := client.Download(ctx, "_backups/banned_accounts.txt"); err == nil {
+		lines := strings.Split(string(bannedData), "\n")
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			parts := strings.SplitN(line, "----", 2)
+			key := strings.ToLower(strings.TrimSpace(parts[0]))
+			reason := "账号已被官方封禁"
+			if len(parts) == 2 && strings.TrimSpace(parts[1]) != "" {
+				reason = strings.TrimSpace(parts[1])
+			}
+			_ = db.SaveRestrictionToDB(database, key, "banned", reason)
+			for _, a := range accs {
+				if strings.ToLower(strings.TrimSpace(a.Email)) == key || strings.ToLower(strings.TrimSpace(a.ChatGPTAccountID)) == key {
+					a.Status = accounts.StatusBanned
+					a.LastError = reason
+				}
+			}
+		}
+	}
+
+	// 5. 同步 proxies
+	if proxiesData, err := client.Download(ctx, "_backups/proxies.txt"); err == nil {
+		lines := strings.Split(string(proxiesData), "\n")
+		var validProxies []string
+		for _, l := range lines {
+			l = strings.TrimSpace(l)
+			if l != "" && !strings.HasPrefix(l, "#") {
+				validProxies = append(validProxies, l)
+			}
+		}
+		if len(validProxies) > 0 {
+			_ = db.SaveProxiesToDB(database, validProxies)
+		}
+	}
+
+	if len(accs) > 0 {
+		if err := accounts.BatchSaveAccountsToDB(database, accs); err == nil {
+			fmt.Printf("📦 已对齐云端号池凭据：%d 个账号已同步至 SQLite 数据库！\n", len(accs))
+		}
+	}
 }
