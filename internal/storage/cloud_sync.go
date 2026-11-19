@@ -217,8 +217,8 @@ func PullRestore(client *QiniuClient, dbPath, envPath string, pullAllMedia bool)
 
 	ctx := context.Background()
 
-	// 1. 恢复 .env 与号池凭据
-	fmt.Printf("🔑 [1/3] 正在检查云端 .env 与号池凭据...\n")
+	// 1. 恢复 .env
+	fmt.Printf("🔑 [1/3] 正在检查云端 .env 配置...\n")
 	envBytes, err := client.Download(ctx, "_backups/env.snapshot")
 	if err != nil {
 		fmt.Printf("⚠️ 未在云端找到 _backups/env.snapshot 或下载失败: %v\n", err)
@@ -232,21 +232,6 @@ func PullRestore(client *QiniuClient, dbPath, envPath string, pullAllMedia bool)
 			fmt.Printf("❌ 写入 %s 失败: %v\n", envPath, err)
 		} else {
 			fmt.Printf("✅ 成功恢复 %s！\n", envPath)
-		}
-	}
-	for _, tf := range tokenCredentialFiles {
-		cloudKey := "_backups/" + tf
-		if client.Exists(ctx, cloudKey) {
-			tBytes, err := client.Download(ctx, cloudKey)
-			if err == nil && len(tBytes) > 0 {
-				if _, err := os.Stat(tf); err == nil {
-					backupOld := tf + ".bak." + time.Now().Format("20060102150405")
-					_ = os.Rename(tf, backupOld)
-				}
-				if err := os.WriteFile(tf, tBytes, 0644); err == nil {
-					fmt.Printf("✅ 成功从云端恢复号池凭据: %s (大小: %d 字节)\n", tf, len(tBytes))
-				}
-			}
 		}
 	}
 
