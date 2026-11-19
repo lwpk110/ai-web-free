@@ -100,6 +100,9 @@ func TestGrokRefreshModelsFetchesLiveCatalog(t *testing.T) {
 	if featured := provider.Descriptor().FeaturedModels; len(featured) != 1 || featured[0] != "grok-live-4" {
 		t.Fatalf("unexpected descriptor models: %v", featured)
 	}
+	if imageModels := provider.Descriptor().ImageModels; len(imageModels) != 1 || imageModels[0] != "grok-2-image" {
+		t.Fatalf("unexpected image models: %v", imageModels)
+	}
 }
 
 func TestGrokProviderRebalanceAndBackfill(t *testing.T) {
@@ -219,8 +222,8 @@ func TestGrokKamiImportAutoLoginUpdatesSSO(t *testing.T) {
 	p.grokLoginCooldown = 0
 	p.grokLoginMu.Unlock()
 	p.grokLoginFn = func(_ context.Context, card GrokCardAccount, options GrokLoginOptions) (string, error) {
-		if !options.Headless {
-			t.Errorf("expected headless login")
+		if options.Headless {
+			t.Errorf("expected headed login by default")
 		}
 		if card.Email == "" || card.Password == "" || card.TOTPSecret == "" {
 			t.Fatalf("incomplete card: %+v", card)
@@ -371,8 +374,8 @@ func TestGrokImportAutoDetectsMixedCredentialFormats(t *testing.T) {
 	p.grokLoginMu.Unlock()
 	logins := make(chan string, 2)
 	p.grokLoginFn = func(_ context.Context, card GrokCardAccount, options GrokLoginOptions) (string, error) {
-		if !options.Headless {
-			t.Errorf("expected headless login")
+		if options.Headless {
+			t.Errorf("expected headed login by default")
 		}
 		logins <- card.Email
 		return "sso=" + card.Email + "; sso-rw=rw", nil
@@ -457,7 +460,7 @@ func TestGrokImportUsesLLMFallbackForUnrecognizedLine(t *testing.T) {
 func TestGrokImportLegacyJWTAsPendingCredential(t *testing.T) {
 	p := NewGrokProvider(nil, "https://grok.com", "", accounts.PoolPolicy{})
 	p.grokLoginFn = func(context.Context, GrokCardAccount, GrokLoginOptions) (string, error) {
-		t.Fatal("expired legacy JWT must not start an automatic login")
+		t.Fatal("legacy JWT should be mapped to active SSO cookie and not start an automatic login")
 		return "", nil
 	}
 
@@ -474,11 +477,11 @@ func TestGrokImportLegacyJWTAsPendingCredential(t *testing.T) {
 	if result.Added != 1 || result.Failed != 0 || result.LoginTask != nil {
 		t.Fatalf("unexpected import result: %+v", result)
 	}
-	if stats := p.Stats(); stats.Total != 1 || stats.Pending != 1 || stats.Active != 0 {
-		t.Fatalf("legacy JWT was not imported as pending: %+v", stats)
+	if stats := p.Stats(); stats.Total != 1 || stats.Active != 1 {
+		t.Fatalf("legacy JWT was not imported as active: %+v", stats)
 	}
 	list := p.ListAccounts("", "", "")
-	if len(list) != 1 || list[0].TokenPreview != "旧 Token 未启用" || list[0].HasKamiCredentials {
+	if len(list) != 1 || !strings.HasPrefix(list[0].TokenPreview, "sso=eyJ") || !list[0].HasKamiCredentials {
 		t.Fatalf("unexpected legacy JWT snapshot: %+v", list)
 	}
 }
@@ -493,13 +496,13 @@ func TestGrokLegacyJWTPersistsAcrossReload(t *testing.T) {
 	p.persistToDisk()
 
 	reloaded := NewGrokProvider(nil, "https://grok.com", path, accounts.PoolPolicy{})
-	if stats := reloaded.Stats(); stats.Total != 1 || stats.Pending != 1 {
+	if stats := reloaded.Stats(); stats.Total != 1 || stats.Active != 1 {
 		t.Fatalf("unexpected reload stats: %+v", stats)
 	}
 	reloaded.mu.RLock()
 	account := reloaded.findGrokAccountLocked("grok-persist")
 	reloaded.mu.RUnlock()
-	if account == nil || !strings.HasPrefix(account.LegacyToken, "eyJ") || account.TOTPSecret != "" || account.Cookie != "" {
+	if account == nil || !strings.HasPrefix(account.LegacyToken, "eyJ") || account.Cookie == "" {
 		t.Fatalf("legacy JWT was not preserved on reload: %+v", account)
 	}
 }

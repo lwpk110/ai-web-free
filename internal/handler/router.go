@@ -257,6 +257,7 @@ func RegisterRouterWithDeps(deps RouterDeps) *gin.Engine {
 		adminGroup.GET("/providers/:provider/stats", adminHandler.ProviderStats)
 		adminGroup.GET("/providers/:provider/accounts", adminHandler.ListAccounts)
 		adminGroup.POST("/providers/:provider/accounts/bulk-proxy", adminHandler.BulkUpdateAccountProxy)
+		adminGroup.POST("/providers/:provider/accounts/bulk-action", adminHandler.BulkAccountAction)
 		adminGroup.GET("/providers/:provider/export", adminHandler.ExportAccounts)
 		adminGroup.POST("/providers/:provider/accounts/import", adminHandler.ImportAccounts)
 		adminGroup.POST("/providers/:provider/accounts/kami-login", adminHandler.LoginKamiAccounts)
@@ -358,6 +359,14 @@ func RegisterRouterWithDeps(deps RouterDeps) *gin.Engine {
 		adminGroup.GET("/videos/models", videoHandler.ListModels)
 		adminGroup.POST("/videos/generations", videoHandler.Generations)
 		adminGroup.GET("/videos/tasks/:id", videoHandler.GetTask)
+
+		// AI 羊毛与福利线报（4小时定时更新与热度排序）
+		dealsHandler := NewDealsHandler(nil)
+		dealsHandler.SetChatExecutor(NewPoolChatExecutor(rt, accountPool, cfg, registry))
+		adminGroup.GET("/deals", dealsHandler.ListDeals)
+		adminGroup.POST("/deals/refresh", dealsHandler.RefreshDeals)
+		adminGroup.GET("/deals/status", dealsHandler.GetDealsStatus)
+		adminGroup.POST("/deals/chat", dealsHandler.Chat)
 	}
 
 	// 静态生图/音频资源强缓存分发

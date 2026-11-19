@@ -23,7 +23,7 @@ const grokSignInURL = "https://accounts.x.ai/sign-in?redirect=grok-com&email=tru
 var (
 	grokTOTPPattern   = regexp.MustCompile(`^[A-Z2-7]+=*$`)
 	grokCookiePattern = regexp.MustCompile(`(?:^|;\s*)(?:sso|sso-rw)\s*=`)
-	grokJWTPattern    = regexp.MustCompile(`^eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$`)
+	grokJWTPattern    = regexp.MustCompile(`^eyJ[A-Za-z0-9+/=_-]+\.[A-Za-z0-9+/=_-]+\.[A-Za-z0-9+/=_-]+$`)
 )
 
 // GrokCardAccount describes one email/password/TOTP card line.
@@ -42,6 +42,7 @@ type GrokLoginOptions struct {
 	BrowserPath string
 	Headless    bool
 	Timeout     time.Duration
+	OnPhase     KamiPhaseReporter
 }
 
 type GrokLoginResult struct {
@@ -67,6 +68,9 @@ func ParseGrokCardLine(line string, lineNo int) (GrokCardAccount, error) {
 		account.OldCookie = third
 	case isGrokLegacyToken(third):
 		account.LegacyToken = third
+		if account.OldCookie == "" {
+			account.OldCookie = fmt.Sprintf("sso=%s; sso-rw=%s", third, third)
+		}
 	default:
 		account.TOTPSecret = third
 	}
@@ -133,13 +137,13 @@ func DetectGrokCredentialLine(line string) (string, GrokCardAccount, error) {
 	if card, err := ParseGrokCardLine(trimmed, 1); err == nil {
 		return "kami", card, nil
 	}
-	if grokCookiePattern.MatchString(trimmed) {
+	if grokCookiePattern.MatchString(trimmed) || isGrokLegacyToken(trimmed) {
 		return "cookie", GrokCardAccount{}, nil
 	}
 	if parts := strings.SplitN(trimmed, "----", 2); len(parts) == 2 {
 		email := strings.TrimSpace(parts[0])
 		cookie := strings.TrimSpace(parts[1])
-		if email != "" && strings.Contains(email, "@") && grokCookiePattern.MatchString(cookie) {
+		if email != "" && strings.Contains(email, "@") && (grokCookiePattern.MatchString(cookie) || isGrokLegacyToken(cookie)) {
 			return "cookie", GrokCardAccount{}, nil
 		}
 	}
@@ -156,7 +160,11 @@ func ParseGrokCardFile(path string) ([]GrokCardAccount, error) {
 	var accounts []GrokCardAccount
 	for index, rawLine := range strings.Split(text, "\n") {
 		line := strings.TrimSpace(rawLine)
-		if line == "" || strings.HasPrefix(line, "#") {
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "//") || strings.HasPrefix(line, "=") || strings.HasPrefix(line, "-") {
+			continue
+		}
+		// Skip non-credential instruction lines that do not look like cards or cookies
+		if !strings.Contains(line, "@") && !grokCookiePattern.MatchString(line) {
 			continue
 		}
 		account, parseErr := ParseGrokCardLine(line, index+1)
@@ -211,12 +219,17 @@ func RunGrokCardLogin(ctx context.Context, cards []GrokCardAccount, options Grok
 }
 
 func loginGrokCard(ctx context.Context, card GrokCardAccount, options GrokLoginOptions) (string, error) {
+	if options.Headless {
+		return "", errors.New("Grok 网页端登录受 Cloudflare Turnstile 防火墙拦截，无头模式已禁用。请使用配套提取工具获取 SSO Cookie 后直接导入，或关闭无头模式手动登录")
+	}
+
 	proxyURL := card.Proxy
 	if proxyURL == "" {
 		proxyURL = options.ProxyURL
 	}
 
-	allocatorOptions := append(chromedp.DefaultExecAllocatorOptions[:],
+	var allocatorOptions []chromedp.ExecAllocatorOption
+	allocatorOptions = append(allocatorOptions,
 		chromedp.ExecPath(options.BrowserPath),
 		chromedp.NoFirstRun,
 		chromedp.NoDefaultBrowserCheck,
@@ -232,7 +245,7 @@ func loginGrokCard(ctx context.Context, card GrokCardAccount, options GrokLoginO
 	if options.Headless {
 		allocatorOptions = append(allocatorOptions, chromedp.Flag("headless", "new"))
 	} else {
-		allocatorOptions = append(allocatorOptions, chromedp.Flag("headless", false))
+		allocatorOptions = append(allocatorOptions, chromedp.Flag("start-maximized", true))
 	}
 
 	allocatorContext, allocatorCancel := chromedp.NewExecAllocator(ctx, allocatorOptions...)
@@ -254,19 +267,20 @@ func loginGrokCard(ctx context.Context, card GrokCardAccount, options GrokLoginO
 			`Object.defineProperty(navigator, "languages", {get: () => ["zh-CN", "zh", "en-US", "en"]});}`,
 	})
 
+	reportPhase := func(phase string) {
+		if options.OnPhase != nil {
+			options.OnPhase(card.Email, phase, KamiPhaseLabel(phase))
+		}
+	}
+
+	reportPhase("open_login")
 	if err := chromedp.Do(loginContext, chromedp.Navigate(grokSignInURL)); err != nil {
 		return "", fmt.Errorf("open sign-in page: %w", err)
 	}
 	time.Sleep(500 * time.Millisecond)
-	_, _ = chromedp.Run(loginContext, chromedp.Evaluate[bool](`(() => {
-		const selectors = ["#onetrust-policy-close", "#onetrust-close-btn-container button", 'button[aria-label="Close"]', 'button[aria-label="关闭"]'];
-		for (const selector of selectors) {
-			const element = document.querySelector(selector);
-			if (element && element.offsetParent !== null) { element.click(); return true; }
-		}
-		return false;
-	})()`))
+	dismissGrokCookieBanner(loginContext)
 
+	reportPhase("enter_email")
 	emailSelector := `input[name="email"], input#email, input[type="email"]`
 	if err := waitGrokVisible(loginContext, emailSelector, 30*time.Second); err != nil {
 		return "", fmt.Errorf("email input not found: %w", err)
@@ -277,28 +291,70 @@ func loginGrokCard(ctx context.Context, card GrokCardAccount, options GrokLoginO
 	); err != nil {
 		return "", fmt.Errorf("fill email: %w", err)
 	}
+	time.Sleep(300 * time.Millisecond)
 	if err := clickGrokSubmit(loginContext); err != nil {
 		return "", fmt.Errorf("submit email: %w", err)
 	}
 
+	reportPhase("enter_password")
 	passwordSelector := `input[name="password"], input[type="password"]`
 	if err := waitGrokVisible(loginContext, passwordSelector, 30*time.Second); err != nil {
 		return "", fmt.Errorf("password input not found: %w", err)
 	}
+	dismissGrokCookieBanner(loginContext)
 	if err := chromedp.Do(loginContext,
 		chromedp.Focus(chromedp.CSS(passwordSelector)),
 		chromedp.SendKeys(chromedp.CSS(passwordSelector), card.Password),
 	); err != nil {
 		return "", fmt.Errorf("fill password: %w", err)
 	}
+
+	// 探测 Cloudflare Turnstile 人机验证
+	turnstilePresent, token := checkGrokTurnstileState(loginContext)
+	if turnstilePresent && token == "" {
+		reportPhase("waiting_challenge")
+		waitMax := 10 * time.Second
+		if !options.Headless {
+			waitMax = 90 * time.Second
+		}
+		waitDeadline := time.Now().Add(waitMax)
+		resolved := false
+		for time.Now().Before(waitDeadline) {
+			select {
+			case <-loginContext.Done():
+				return "", loginContext.Err()
+			case <-time.After(500 * time.Millisecond):
+			}
+			_, curToken := checkGrokTurnstileState(loginContext)
+			if curToken != "" {
+				resolved = true
+				break
+			}
+		}
+		if !resolved {
+			if options.Headless {
+				return "", errors.New("检测到 Cloudflare 人机安全验证 (Turnstile)，在无头模式下被拦截，请关闭无头模式并手动完成验证")
+			}
+			return "", errors.New("等待 Cloudflare 人机安全验证超时，请在浏览器中完成验证后重试")
+		}
+		reportPhase("enter_password")
+	}
+
+	dismissGrokCookieBanner(loginContext)
 	if err := clickGrokSubmit(loginContext); err != nil {
 		return "", fmt.Errorf("submit password: %w", err)
 	}
 
+	time.Sleep(1 * time.Second)
+	if postErr := checkGrokPostSubmitError(loginContext); postErr != nil {
+		return "", postErr
+	}
+
 	otpSelector := `input[inputmode="numeric"], input[name="code"], input[name="otp"], input[autocomplete="one-time-code"], input[placeholder*="code" i], input[placeholder*="验证码" i]`
-	if err := waitGrokVisible(loginContext, otpSelector, 15*time.Second); err == nil {
+	if err := waitGrokVisible(loginContext, otpSelector, 10*time.Second); err == nil {
+		reportPhase("enter_totp")
 		if card.TOTPSecret == "" {
-			return "", errors.New("OTP requested but card has no TOTP secret")
+			return "", errors.New("该账号需要 2FA 验证码，但卡密中未配置 TOTP Secret")
 		}
 		code, _, totpErr := accounts.GenerateTOTP(card.TOTPSecret, time.Now())
 		if totpErr != nil {
@@ -315,6 +371,7 @@ func loginGrokCard(ctx context.Context, card GrokCardAccount, options GrokLoginO
 		}
 	}
 
+	reportPhase("wait_session_token")
 	deadline := time.Now().Add(options.Timeout)
 	for time.Now().Before(deadline) {
 		cookie := extractGrokSSOCookie(loginContext)
@@ -366,6 +423,59 @@ func clickGrokSubmit(ctx context.Context) error {
 	}
 	if !clicked {
 		return errors.New("submit button not found")
+	}
+	return nil
+}
+
+func dismissGrokCookieBanner(ctx context.Context) {
+	_, _ = chromedp.Run(ctx, chromedp.Evaluate[bool](`(() => {
+		const selectors = [
+			"#onetrust-accept-btn-handler",
+			".onetrust-close-btn-handler",
+			"#onetrust-policy-close",
+			"#onetrust-close-btn-container button",
+			'button[aria-label="Close"]',
+			'button[aria-label="关闭"]'
+		];
+		for (const selector of selectors) {
+			const element = document.querySelector(selector);
+			if (element && element.offsetParent !== null) { element.click(); return true; }
+		}
+		return false;
+	})()`))
+}
+
+func checkGrokTurnstileState(ctx context.Context) (present bool, token string) {
+	res, err := chromedp.Run(ctx, chromedp.Evaluate[map[string]string](`(() => {
+		const input = document.querySelector('input[name="cf-turnstile-response"]');
+		const hasIframe = Boolean(document.querySelector('iframe[src*="challenges.cloudflare.com"]'));
+		const token = input ? (input.value || '').trim() : '';
+		return {
+			"present": (input || hasIframe) ? "true" : "false",
+			"token": token
+		};
+	})()`))
+	if err != nil {
+		return false, ""
+	}
+	return res["present"] == "true", res["token"]
+}
+
+func checkGrokPostSubmitError(ctx context.Context) error {
+	errKey, _ := chromedp.Run(ctx, chromedp.Evaluate[string](`(() => {
+		const text = (document.body.innerText || '');
+		if (text.includes('Complete the verification challenge')) return 'turnstile_incomplete';
+		if (/invalid (email or )?password|incorrect password|密码错误/i.test(text)) return 'invalid_credentials';
+		if (/account( has been)? (deactivated|suspended)|permanently banned|已被(删除|停用|封禁)/i.test(text)) return 'account_banned';
+		return '';
+	})()`))
+	switch errKey {
+	case "turnstile_incomplete":
+		return errors.New("Cloudflare 人机安全验证未通过，请重试")
+	case "invalid_credentials":
+		return errors.New("邮箱或密码错误")
+	case "account_banned":
+		return errors.New("account_deactivated: 该账号已被删除或封禁")
 	}
 	return nil
 }

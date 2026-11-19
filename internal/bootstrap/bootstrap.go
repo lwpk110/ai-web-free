@@ -20,6 +20,7 @@ import (
 	"ai-web-free/internal/chatgpt"
 	"ai-web-free/internal/config"
 	"ai-web-free/internal/db"
+	"ai-web-free/internal/deals"
 	"ai-web-free/internal/handler"
 	"ai-web-free/internal/health"
 	"ai-web-free/internal/opslog"
@@ -482,6 +483,20 @@ func Init() (*App, error) {
 				grokProvider.SetGrokCredentialPatternDB(database)
 			}
 		}
+
+		// 启动 AI 羊毛与福利资讯 4 小时周期性定时抓取调度服务
+		dealsService := deals.NewService(database, 4*time.Hour)
+		deals.SetService(dealsService)
+		dealsService.Start()
+		healthTracker.RegisterService(
+			"deals_crawler_scheduler",
+			"AI 羊毛与福利资讯调度器",
+			"scheduler",
+			(4 * time.Hour).String(),
+			"每 4 小时自动抓取并重排最热 AI 羊毛与免费额度线报",
+			true,
+			true,
+		)
 	}
 	var storageEngine storage.StorageEngine
 	var storageErr error

@@ -30,6 +30,11 @@ func TestSyncLocalFilesToDBAndExport(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InitDB failed: %v", err)
 	}
+	defer func() {
+		if sqlDB, err := database.DB(); err == nil && sqlDB != nil {
+			_ = sqlDB.Close()
+		}
+	}()
 	testAccs := []*accounts.Account{
 		{
 			ID:         "acc-export-1",

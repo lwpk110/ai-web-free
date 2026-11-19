@@ -556,6 +556,7 @@ type AccountSnapshot struct {
 	HasRefreshToken    bool     `json:"has_refresh_token"`
 	HasSessionToken    bool     `json:"has_session_token"`
 	HasKamiCredentials bool     `json:"has_kami_credentials"`
+	HasTOTPSecret      bool     `json:"has_totp_secret"`
 	IsTemporary        bool     `json:"is_temporary"`
 	ImageLimited       bool     `json:"image_limited"`
 	Proxy              string   `json:"proxy"`
@@ -623,7 +624,8 @@ func toSnapshot(a *Account) AccountSnapshot {
 		TokenPreview:       maskToken(a.Token),
 		HasRefreshToken:    a.RefreshToken != "",
 		HasSessionToken:    a.SessionToken != "",
-		HasKamiCredentials: a.Password != "" && a.TOTPSecret != "",
+		HasKamiCredentials: a.Password != "",
+		HasTOTPSecret:      a.TOTPSecret != "",
 		IsTemporary:        a.IsTemporary,
 		ImageLimited:       a.IsImageInCooldown(now),
 		Proxy:              a.Proxy,

@@ -23,6 +23,11 @@ func SyncLocalFilesToDB(cfg *config.Config) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("打开数据库失败: %w", err)
 	}
+	defer func() {
+		if sqlDB, err := database.DB(); err == nil && sqlDB != nil {
+			_ = sqlDB.Close()
+		}
+	}()
 
 	profiles := accounts.DefaultProfiles
 	accs, err := accounts.LoadAccountsFromDB(database, profiles)
@@ -185,10 +190,28 @@ func SyncLocalFilesToDB(cfg *config.Config) (int, error) {
 						gRec.Password = strings.TrimSpace(parts[1])
 					}
 					if len(parts) > 2 {
-						gRec.TOTPSecret = strings.TrimSpace(parts[2])
+						third := strings.TrimSpace(parts[2])
+						if strings.HasPrefix(third, "sso=") || strings.Contains(third, "sso") {
+							gRec.Token = third
+						} else if strings.HasPrefix(third, "eyJ") {
+							gRec.SessionToken = third
+							gRec.Token = fmt.Sprintf("sso=%s; sso-rw=%s", third, third)
+						} else {
+							gRec.TOTPSecret = third
+						}
 					}
 					if len(parts) > 3 {
-						gRec.SessionToken = strings.TrimSpace(parts[3])
+						fourth := strings.TrimSpace(parts[3])
+						if strings.HasPrefix(fourth, "sso=") || strings.Contains(fourth, "sso") {
+							gRec.Token = fourth
+						} else if strings.HasPrefix(fourth, "eyJ") {
+							gRec.SessionToken = fourth
+							if gRec.Token == "" {
+								gRec.Token = fmt.Sprintf("sso=%s; sso-rw=%s", fourth, fourth)
+							}
+						} else {
+							gRec.SessionToken = fourth
+						}
 					}
 					if len(parts) > 4 {
 						gRec.Token = strings.TrimSpace(parts[4])
@@ -226,6 +249,11 @@ func ExportDBToLocalFiles(cfg *config.Config) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("打开数据库失败: %w", err)
 	}
+	defer func() {
+		if sqlDB, err := database.DB(); err == nil && sqlDB != nil {
+			_ = sqlDB.Close()
+		}
+	}()
 
 	profiles := accounts.DefaultProfiles
 	accs, err := accounts.LoadAccountsFromDB(database, profiles)

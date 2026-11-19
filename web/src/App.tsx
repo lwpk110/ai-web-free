@@ -3,6 +3,7 @@ import {
   Check,
   Copy,
   Film,
+  Flame,
   Globe,
   Image as ImageIcon,
   LayoutGrid,
@@ -51,6 +52,7 @@ import { PoolConsole } from "./views/PoolConsole";
 import { ShortDramaStudio } from "./views/ShortDramaStudio";
 import { TTSStudio } from "./views/TTSStudio";
 import { VideoStudio } from "./views/VideoStudio";
+import { DealsView } from "./views/DealsView";
 
 const THEME_STORAGE_KEY = "ai_web_free_theme_mode";
 
@@ -69,6 +71,7 @@ function resolveRouteFromHash(): RouteKey {
   if (h.startsWith("pools")) return "pools";
   if (h.startsWith("gateway")) return "gateway";
   if (h.startsWith("network")) return "network";
+  if (h.startsWith("deals")) return "deals";
   if (h.startsWith("ops-logs")) return "ops-logs";
   if (h.startsWith("logs")) return "logs";
   if (h.startsWith("chat")) return "chat";
@@ -89,6 +92,8 @@ function renderNavIcon(id: RouteKey) {
       return <KeyRound size={15} className="shrink-0" />;
     case "network":
       return <Globe size={15} className="shrink-0" />;
+    case "deals":
+      return <Flame size={15} className="shrink-0 text-orange-500" />;
     case "logs":
       return <ListChecks size={15} className="shrink-0" />;
     case "ops-logs":
@@ -666,7 +671,7 @@ export const App: React.FC = () => {
                   <ShortDramaStudio />
                 )
               ) : (
-              <div className="max-w-7xl mx-auto">
+              <div className={route === "deals" ? "mx-auto w-full min-w-0 max-w-[1600px]" : "max-w-7xl mx-auto"}>
                 {route === "overview" && (
                   <OverviewView
                     onNavigate={navigate}
@@ -682,6 +687,7 @@ export const App: React.FC = () => {
                 {route === "network" && (
                   <NetworkView autoProbeTrigger={probeTrigger} />
                 )}
+                {route === "deals" && <DealsView />}
                 {route === "logs" && <LogsView />}
                 {route === "ops-logs" && <OpsLogsView />}
               </div>

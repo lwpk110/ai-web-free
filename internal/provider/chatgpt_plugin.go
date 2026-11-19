@@ -479,7 +479,7 @@ func (p *ChatGPTProvider) StartOrRunProbeAll(async bool) (ProbeTask, error) {
 }
 
 func (p *ChatGPTProvider) ExecuteAccountAction(id, action string) (map[string]interface{}, error) {
-	return p.ExecuteAccountActionWithOpts(id, action, true)
+	return p.ExecuteAccountActionWithOpts(id, action, false)
 }
 
 // ExecuteAccountActionWithOpts 对单个账号执行运维操作，支持透传 headless 等扩展参数。

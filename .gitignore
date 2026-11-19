@@ -13,9 +13,12 @@ tools/authenticator/.proxies.txt.swp
 .env*
 *.har
 .idea/
+.vscode/
+.tmp/
 /logs/
 /target/
 /bin/
+/backups/
 /data/
 *.db
 *.db-shm
@@ -38,6 +41,11 @@ docs/
 .superpowers/
 *.html
 _third_party/
+scripts/test_*.go
+test_*.go
+*.test
+.DS_Store
+Thumbs.db
 
 # Allow tracking OpenUI React frontend under web/ (except node_modules)
 !web/**

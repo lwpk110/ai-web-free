@@ -18,12 +18,18 @@ import {
   ExternalLink,
   Sparkles,
   Pencil,
+  Trash2,
+  Play,
+  Pause,
+  ShieldAlert,
+  SlidersHorizontal,
 } from "lucide-react";
 import {
   cancelKamiLogin,
   dismissAdminTask,
   executeAccountAction,
   bulkUpdateAccountProxy,
+  bulkAccountAction,
   fetchAccounts,
   fetchOverview,
   fetchProxies,
@@ -128,7 +134,7 @@ export const PoolConsole: React.FC<{
   const trackedLoginIdRef = useRef<string | null>(null);
   const trackedProbeIdRef = useRef<string | null>(null);
   const [updatingProxy, setUpdatingProxy] = useState(false);
-  const [headlessLogin, setHeadlessLogin] = useState(true);
+  const [headlessLogin, setHeadlessLogin] = useState(false);
   const [proxyNodes, setProxyNodes] = useState<ProxyNodeStatus[]>([]);
   const [bulkProxyUrl, setBulkProxyUrl] = useState("");
   const [selectedAccountIds, setSelectedAccountIds] = useState<Set<string>>(
@@ -144,6 +150,9 @@ export const PoolConsole: React.FC<{
 
   const [showImport, setShowImport] = useState(false);
   const [showBulkEdit, setShowBulkEdit] = useState(false);
+  const [bulkOperatingAction, setBulkOperatingAction] = useState<string | null>(null);
+  const [showBulkDeleteConfirm, setShowBulkDeleteConfirm] = useState(false);
+  const [bulkEditTab, setBulkEditTab] = useState<"state" | "proxy" | "danger">("state");
   const [showOAuthGuide, setShowOAuthGuide] = useState(false);
   const [oauthTargetEmail, setOauthTargetEmail] = useState("");
   const [oauthCookieInput, setOauthCookieInput] = useState("");
@@ -678,6 +687,18 @@ export const PoolConsole: React.FC<{
       }),
     [accounts, selectedAccountIds]
   );
+  const selectedAccountsList = useMemo(
+    () => accounts.filter((acc) => selectedAccountIds.has(acc.id)),
+    [accounts, selectedAccountIds]
+  );
+  const disabledSelectedCount = useMemo(
+    () => selectedAccountsList.filter((acc) => acc.status === "disabled").length,
+    [selectedAccountsList]
+  );
+  const activeSelectedCount = useMemo(
+    () => selectedAccountsList.filter((acc) => acc.status === "active").length,
+    [selectedAccountsList]
+  );
   const loginTaskActive = Boolean(
     loginTask && (loginTask.status === "queued" || loginTask.status === "running")
   );
@@ -808,6 +829,80 @@ export const PoolConsole: React.FC<{
       });
     } finally {
       setUpdatingProxy(false);
+    }
+  };
+
+  const handleBulkAction = async (action: AccountActionType) => {
+    const ids = [...selectedAccountIds];
+    if (!ids.length) return;
+    setBulkOperatingAction(action);
+    const actionLabels: Record<string, string> = {
+      delete: "批量移除",
+      disable: "批量停用",
+      enable: "批量启用",
+      probe: "批量测试",
+      standby: "批量转待命",
+      activate: "批量激活",
+      refresh: "批量刷新",
+    };
+    const actionLabel = actionLabels[action] || action;
+    try {
+      let successCount = 0;
+      let failedCount = 0;
+      const failures: string[] = [];
+
+      try {
+        const res = await bulkAccountAction(activeProvider, ids, action);
+        successCount = res.result.success;
+        failedCount = res.result.failed;
+        res.result.results
+          .filter((item) => !item.ok)
+          .forEach((item) => failures.push(`${item.id}: ${item.error || "失败"}`));
+      } catch (bulkErr: any) {
+        // 若后端尚未重启或为旧版本 (404 Not Found)，平滑回退到并发客户端逐个执行
+        if (
+          bulkErr?.status === 404 ||
+          String(bulkErr?.message).includes("404") ||
+          String(bulkErr?.message).includes("not found")
+        ) {
+          const results = await Promise.allSettled(
+            ids.map((id) => executeAccountAction(activeProvider, id, action))
+          );
+          results.forEach((r, idx) => {
+            if (r.status === "fulfilled") {
+              successCount++;
+            } else {
+              failedCount++;
+              failures.push(`${ids[idx]}: ${r.reason?.message || "失败"}`);
+            }
+          });
+        } else {
+          throw bulkErr;
+        }
+      }
+
+      const isDelete = action === "delete";
+      setNotice({
+        type: failedCount > 0 ? (successCount > 0 ? "info" : "error") : "success",
+        text: `${actionLabel}完成：成功 ${successCount}/${ids.length} 个账号${
+          failures.length
+            ? `（失败项：${failures.slice(0, 3).join("；")}${failures.length > 3 ? " 等" : ""}）`
+            : ""
+        }`,
+      });
+      if (isDelete) {
+        setShowBulkDeleteConfirm(false);
+      }
+      setShowBulkEdit(false);
+      setSelectedAccountIds(new Set());
+      await loadData(true);
+    } catch (e: any) {
+      setNotice({
+        type: "error",
+        text: `${actionLabel}失败: ${e?.message || "未知错误"}`,
+      });
+    } finally {
+      setBulkOperatingAction(null);
     }
   };
 
@@ -1705,14 +1800,33 @@ export const PoolConsole: React.FC<{
           </div>
 
           {selectedCount > 0 && (
-            <div className="flex flex-wrap items-center justify-between gap-2.5 p-card rounded-xl px-3 py-2.5 text-xs">
-              <span className="z-text-muted">已选择 {selectedCount} 个账号</span>
+            <div className="flex flex-wrap items-center justify-between gap-2.5 p-card rounded-xl px-3.5 py-2.5 text-xs shadow-sm border border-blue-500/20 bg-blue-500/5 transition-all">
+              <div className="flex items-center gap-2">
+                <span className="inline-flex items-center gap-1.5 font-medium z-text">
+                  <span className="w-2 h-2 rounded-full bg-blue-500 animate-pulse" />
+                  已选择 <strong className="font-mono-num text-sm text-blue-600 dark:text-blue-400">{selectedCount}</strong> 个账号
+                </span>
+                {(activeSelectedCount > 0 || disabledSelectedCount > 0) && (
+                  <span className="z-text-muted text-[11px] hidden sm:inline">
+                    ({activeSelectedCount} 在线 · {disabledSelectedCount} 停用)
+                  </span>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setSelectedAccountIds(new Set())}
+                  disabled={Boolean(bulkOperatingAction) || loggingInKami || updatingProxy}
+                  className="text-[11px] z-text-muted hover:z-text underline cursor-pointer ml-1"
+                >
+                  清除已选
+                </button>
+              </div>
+
               <div className="flex flex-wrap items-center gap-2">
                 {selectedQueuedAccounts.length > 0 && (
                   <button
                     type="button"
                     onClick={handleCancelSelectedQueued}
-                    disabled={cancellingSelected || loggingInKami || updatingProxy}
+                    disabled={cancellingSelected || loggingInKami || updatingProxy || Boolean(bulkOperatingAction)}
                     className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl border z-border z-surface z-ghost-btn font-medium cursor-pointer disabled:opacity-50"
                     style={{ color: "var(--pill-danger-text)" }}
                   >
@@ -1723,34 +1837,93 @@ export const PoolConsole: React.FC<{
                     </span>
                   </button>
                 )}
+
+                {/* 批量测活 */}
                 <button
                   type="button"
-                  onClick={() => setShowBulkEdit(true)}
-                  disabled={updatingProxy || loggingInKami || Boolean(isPlannedProvider)}
-                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl border z-border z-surface z-ghost-btn cursor-pointer disabled:opacity-50"
+                  onClick={() => handleBulkAction("probe")}
+                  disabled={Boolean(bulkOperatingAction) || updatingProxy || loggingInKami || Boolean(isPlannedProvider)}
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl border z-border z-surface z-ghost-btn font-medium cursor-pointer disabled:opacity-50 text-blue-600 dark:text-blue-400 hover:bg-blue-500/10"
+                  title="批量健康检测与可用模型测活"
                 >
-                  批量编辑
+                  <Activity size={12} className={bulkOperatingAction === "probe" ? "animate-spin" : ""} />
+                  <span>{bulkOperatingAction === "probe" ? "测活中..." : "批量测试"}</span>
                 </button>
+
+                {/* 批量启用 */}
                 <button
                   type="button"
-                  onClick={handleLoginSelectedKami}
-                  disabled={
-                    loggingInKami ||
-                    updatingProxy ||
-                    proxyUnavailable ||
-                    Boolean(isPlannedProvider) ||
-                    selectedCount === 0
-                  }
-                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl z-primary-btn font-medium cursor-pointer disabled:opacity-50"
+                  onClick={() => handleBulkAction("enable")}
+                  disabled={Boolean(bulkOperatingAction) || updatingProxy || loggingInKami || Boolean(isPlannedProvider)}
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl border z-border z-surface z-ghost-btn font-medium cursor-pointer disabled:opacity-50 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/10"
+                  title="将选中的账号批量恢复为在线活跃状态"
                 >
-                  <LogIn size={13} />
-                  <span>
-                    {loggingInKami
-                      ? "提交中..."
-                      : loginTaskActive
-                        ? "追加到重登队列"
-                        : "批量重新登录"}
-                  </span>
+                  <Play size={12} className={bulkOperatingAction === "enable" ? "animate-spin" : ""} />
+                  <span>{bulkOperatingAction === "enable" ? "启用中..." : "批量启用"}</span>
+                </button>
+
+                {/* 批量停用 */}
+                <button
+                  type="button"
+                  onClick={() => handleBulkAction("disable")}
+                  disabled={Boolean(bulkOperatingAction) || updatingProxy || loggingInKami || Boolean(isPlannedProvider)}
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl border z-border z-surface z-ghost-btn font-medium cursor-pointer disabled:opacity-50 text-amber-600 dark:text-amber-400 hover:bg-amber-500/10"
+                  title="将选中的账号批量停用，暂停调度"
+                >
+                  <Pause size={12} className={bulkOperatingAction === "disable" ? "animate-spin" : ""} />
+                  <span>{bulkOperatingAction === "disable" ? "停用中..." : "批量停用"}</span>
+                </button>
+
+                {/* 更多批量编辑中心 */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setBulkEditTab("state");
+                    setShowBulkEdit(true);
+                  }}
+                  disabled={Boolean(bulkOperatingAction) || updatingProxy || loggingInKami || Boolean(isPlannedProvider)}
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl border z-border z-surface z-ghost-btn font-medium cursor-pointer disabled:opacity-50"
+                >
+                  <SlidersHorizontal size={12} />
+                  <span>批量编辑...</span>
+                </button>
+
+                {/* 卡密批量登录（若支持） */}
+                {selectedAccountsList.some((acc) => acc.has_kami_credentials) && (
+                  <button
+                    type="button"
+                    onClick={handleLoginSelectedKami}
+                    disabled={
+                      loggingInKami ||
+                      updatingProxy ||
+                      Boolean(bulkOperatingAction) ||
+                      proxyUnavailable ||
+                      Boolean(isPlannedProvider) ||
+                      selectedCount === 0
+                    }
+                    className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl z-primary-btn font-medium cursor-pointer disabled:opacity-50"
+                  >
+                    <LogIn size={13} />
+                    <span>
+                      {loggingInKami
+                        ? "提交中..."
+                        : loginTaskActive
+                          ? "追加到重登队列"
+                          : "批量重登"}
+                    </span>
+                  </button>
+                )}
+
+                {/* 批量永久移除（危险操作） */}
+                <button
+                  type="button"
+                  onClick={() => setShowBulkDeleteConfirm(true)}
+                  disabled={Boolean(bulkOperatingAction) || updatingProxy || loggingInKami || Boolean(isPlannedProvider)}
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl border border-red-500/30 bg-red-500/10 text-red-600 dark:text-red-400 hover:bg-red-500/20 font-medium cursor-pointer disabled:opacity-50 transition-colors"
+                  title="彻底从号池中移除选中的账号"
+                >
+                  <Trash2 size={12} className={bulkOperatingAction === "delete" ? "animate-spin" : ""} />
+                  <span>批量移除</span>
                 </button>
               </div>
             </div>
@@ -2059,15 +2232,17 @@ export const PoolConsole: React.FC<{
                             )}
                             {activeProvider !== "meta_muse" && acc.has_kami_credentials && (
                               <>
-                                <button
-                                  type="button"
-                                  disabled={actionLoadingKey === `${acc.id}:totp`}
-                                  onClick={() => handleAction(acc, "totp")}
-                                  className="z-text-sec hover:underline font-mono-num cursor-pointer disabled:opacity-50"
-                                  title="获取实时 6 位 2FA 动态码"
-                                >
-                                  2FA
-                                </button>
+                                {acc.has_totp_secret && (
+                                  <button
+                                    type="button"
+                                    disabled={actionLoadingKey === `${acc.id}:totp`}
+                                    onClick={() => handleAction(acc, "totp")}
+                                    className="z-text-sec hover:underline font-mono-num cursor-pointer disabled:opacity-50"
+                                    title="获取实时 6 位 2FA 动态码"
+                                  >
+                                    2FA
+                                  </button>
+                                )}
                                 {isQueueCancellable ? (
                                   <button
                                     type="button"
@@ -2378,7 +2553,7 @@ export const PoolConsole: React.FC<{
       {showBulkEdit && (
         <div
           className="fixed inset-0 z-50 bg-black/55 backdrop-blur-xs flex items-center justify-center p-4"
-          onClick={() => !updatingProxy && setShowBulkEdit(false)}
+          onClick={() => !updatingProxy && !bulkOperatingAction && setShowBulkEdit(false)}
         >
           <div
             className="p-surface z-text rounded-xl max-w-lg w-full max-h-[90vh] overflow-y-auto p-5 shadow-2xl space-y-4 text-xs"
@@ -2386,13 +2561,16 @@ export const PoolConsole: React.FC<{
           >
             <div className="flex items-center justify-between pb-3 border-b z-border">
               <div>
-                <h3 className="text-sm font-semibold">批量编辑账号</h3>
-                <p className="z-text-muted mt-0.5">已选择 {selectedCount} 个账号</p>
+                <h3 className="text-sm font-semibold flex items-center gap-1.5">
+                  <SlidersHorizontal size={15} />
+                  <span>批量编辑与管理账号</span>
+                </h3>
+                <p className="z-text-muted mt-0.5">已选择 {selectedCount} 个账号进行批量操作</p>
               </div>
               <button
                 type="button"
-                onClick={() => !updatingProxy && setShowBulkEdit(false)}
-                disabled={updatingProxy}
+                onClick={() => !updatingProxy && !bulkOperatingAction && setShowBulkEdit(false)}
+                disabled={updatingProxy || Boolean(bulkOperatingAction)}
                 className="p-1 rounded-lg border z-border z-ghost-btn cursor-pointer"
                 aria-label="关闭批量编辑"
               >
@@ -2400,60 +2578,276 @@ export const PoolConsole: React.FC<{
               </button>
             </div>
 
-            <div className="space-y-1.5">
-              <label className="font-medium z-text-sec block" htmlFor="bulk-proxy">
-                出口代理
-              </label>
-              <select
-                id="bulk-proxy"
-                value={bulkProxyUrl}
-                onChange={(e) => setBulkProxyUrl(e.target.value)}
-                disabled={updatingProxy}
-                className="w-full px-3 py-2 rounded-lg p-input"
-              >
-                {proxyNodes.length === 0 ? (
-                  <option value="">直连出口（未配置代理）</option>
-                ) : (
-                  <option value="" disabled>选择健康代理</option>
-                )}
-                {proxyNodes.map((node, index) => (
-                  <option key={node.url} value={node.url} disabled={node.status !== "active"}>
-                    {proxyOptionLabel(node, index)}
-                  </option>
-                ))}
-              </select>
-              <p className="z-text-muted">
-                新代理立即应用到所选账号；服务重启后会按代理池重新初始化绑定。
-              </p>
-            </div>
-
-            {proxyNodes.length > 0 && !proxyNodes.some((node) => node.status === "active") && (
-              <p className="text-amber-700">
-                当前没有健康代理节点，请先到代理与模型目录页测活或更新代理池。
-              </p>
-            )}
-
-            <div className="flex justify-end gap-2 pt-2 border-t z-border">
+            {/* Tab 导航 */}
+            <div className="flex border-b z-border gap-4 text-xs font-medium">
               <button
                 type="button"
-                disabled={updatingProxy}
+                onClick={() => setBulkEditTab("state")}
+                className={`pb-2 -mb-px border-b-2 cursor-pointer transition-colors ${
+                  bulkEditTab === "state"
+                    ? "border-primary text-primary"
+                    : "border-transparent z-text-muted hover:z-text"
+                }`}
+              >
+                状态与健康
+              </button>
+              <button
+                type="button"
+                onClick={() => setBulkEditTab("proxy")}
+                className={`pb-2 -mb-px border-b-2 cursor-pointer transition-colors ${
+                  bulkEditTab === "proxy"
+                    ? "border-primary text-primary"
+                    : "border-transparent z-text-muted hover:z-text"
+                }`}
+              >
+                出口代理绑定
+              </button>
+              <button
+                type="button"
+                onClick={() => setBulkEditTab("danger")}
+                className={`pb-2 -mb-px border-b-2 cursor-pointer transition-colors ${
+                  bulkEditTab === "danger"
+                    ? "border-red-500 text-red-500"
+                    : "border-transparent z-text-muted hover:text-red-500"
+                }`}
+              >
+                清理与移除
+              </button>
+            </div>
+
+            {/* Tab 1: 状态与健康 */}
+            {bulkEditTab === "state" && (
+              <div className="space-y-3 py-1">
+                <div className="grid grid-cols-1 gap-2.5">
+                  <div className="flex items-center justify-between p-3 rounded-xl border z-border bg-card">
+                    <div>
+                      <div className="font-medium flex items-center gap-1.5 text-emerald-600 dark:text-emerald-400">
+                        <Play size={13} />
+                        <span>批量启用所选账号</span>
+                      </div>
+                      <p className="z-text-muted text-[11px] mt-0.5">
+                        清除冷却与限流标记，恢复选中的 {selectedCount} 个账号为活跃在线状态，参与路由轮询。
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={Boolean(bulkOperatingAction) || updatingProxy}
+                      onClick={() => handleBulkAction("enable")}
+                      className="px-3 py-1.5 rounded-lg border border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/20 font-medium cursor-pointer shrink-0 disabled:opacity-50"
+                    >
+                      {bulkOperatingAction === "enable" ? "启用中..." : "立即启用"}
+                    </button>
+                  </div>
+
+                  <div className="flex items-center justify-between p-3 rounded-xl border z-border bg-card">
+                    <div>
+                      <div className="font-medium flex items-center gap-1.5 text-amber-600 dark:text-amber-400">
+                        <Pause size={13} />
+                        <span>批量停用所选账号</span>
+                      </div>
+                      <p className="z-text-muted text-[11px] mt-0.5">
+                        将所选账号标记为已停用，网关将不再向其分发任何聊天、生图或音频请求。
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={Boolean(bulkOperatingAction) || updatingProxy}
+                      onClick={() => handleBulkAction("disable")}
+                      className="px-3 py-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400 hover:bg-amber-500/20 font-medium cursor-pointer shrink-0 disabled:opacity-50"
+                    >
+                      {bulkOperatingAction === "disable" ? "停用中..." : "立即停用"}
+                    </button>
+                  </div>
+
+                  <div className="flex items-center justify-between p-3 rounded-xl border z-border bg-card">
+                    <div>
+                      <div className="font-medium flex items-center gap-1.5 text-blue-600 dark:text-blue-400">
+                        <Activity size={13} />
+                        <span>批量探测与测活</span>
+                      </div>
+                      <p className="z-text-muted text-[11px] mt-0.5">
+                        向所选账号并发发起上游健康检测，探测连通性并同步可用模型列表。
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={Boolean(bulkOperatingAction) || updatingProxy}
+                      onClick={() => handleBulkAction("probe")}
+                      className="px-3 py-1.5 rounded-lg border border-blue-500/30 bg-blue-500/10 text-blue-600 dark:text-blue-400 hover:bg-blue-500/20 font-medium cursor-pointer shrink-0 disabled:opacity-50"
+                    >
+                      {bulkOperatingAction === "probe" ? "测活中..." : "开始测活"}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Tab 2: 网络与代理 */}
+            {bulkEditTab === "proxy" && (
+              <div className="space-y-3 py-1">
+                <div className="space-y-1.5">
+                  <label className="font-medium z-text-sec block" htmlFor="bulk-proxy">
+                    选择出口代理节点
+                  </label>
+                  <select
+                    id="bulk-proxy"
+                    value={bulkProxyUrl}
+                    onChange={(e) => setBulkProxyUrl(e.target.value)}
+                    disabled={updatingProxy || Boolean(bulkOperatingAction)}
+                    className="w-full px-3 py-2 rounded-lg p-input"
+                  >
+                    {proxyNodes.length === 0 ? (
+                      <option value="">直连出口（未配置代理）</option>
+                    ) : (
+                      <option value="" disabled>选择健康代理</option>
+                    )}
+                    {proxyNodes.map((node, index) => (
+                      <option key={node.url} value={node.url} disabled={node.status !== "active"}>
+                        {proxyOptionLabel(node, index)}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="z-text-muted text-[11px]">
+                    新代理将立即应用到所选 {selectedCount} 个账号并重建底层客户端；服务重启后会按代理池重新初始化绑定。
+                  </p>
+                </div>
+
+                {proxyNodes.length > 0 && !proxyNodes.some((node) => node.status === "active") && (
+                  <p className="text-amber-700 dark:text-amber-400 text-xs">
+                    当前没有健康代理节点，请先到代理管理页测活或更新代理池。
+                  </p>
+                )}
+
+                <div className="flex justify-end pt-2">
+                  <button
+                    type="button"
+                    disabled={
+                      updatingProxy ||
+                      Boolean(bulkOperatingAction) ||
+                      selectedCount === 0 ||
+                      Boolean(isPlannedProvider) ||
+                      (proxyNodes.length > 0 && !bulkProxyUrl)
+                    }
+                    onClick={handleBulkProxyUpdate}
+                    className="px-4 py-1.5 rounded-lg z-primary-btn font-medium cursor-pointer disabled:opacity-50"
+                  >
+                    {updatingProxy ? "正在更新代理..." : "应用代理到所选账号"}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Tab 3: 清理与移除 */}
+            {bulkEditTab === "danger" && (
+              <div className="space-y-3 py-1">
+                <div className="p-3.5 rounded-xl border border-red-500/30 bg-red-500/5 space-y-2.5">
+                  <div className="font-semibold text-red-600 dark:text-red-400 flex items-center gap-1.5">
+                    <ShieldAlert size={14} />
+                    <span>危险操作：彻底移除账号</span>
+                  </div>
+                  <p className="z-text-muted text-[11px] leading-relaxed">
+                    从号池与持久化数据库中永久删除所选的 {selectedCount} 个账号凭据、会话历史与配置。移除后无法撤销，若需重新使用必须重新导入。
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowBulkEdit(false);
+                      setShowBulkDeleteConfirm(true);
+                    }}
+                    className="px-3.5 py-1.5 rounded-lg bg-red-600 hover:bg-red-700 text-white font-medium cursor-pointer"
+                  >
+                    前往确认批量移除 ({selectedCount} 个)
+                  </button>
+                </div>
+              </div>
+            )}
+
+            <div className="flex justify-end gap-2 pt-3 border-t z-border">
+              <button
+                type="button"
+                disabled={updatingProxy || Boolean(bulkOperatingAction)}
                 onClick={() => setShowBulkEdit(false)}
                 className="px-3.5 py-1.5 rounded-lg border z-border z-ghost-btn font-medium cursor-pointer"
+              >
+                关闭
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 批量移除二次确认弹窗 */}
+      {showBulkDeleteConfirm && (
+        <div
+          className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4"
+          onClick={() => !bulkOperatingAction && setShowBulkDeleteConfirm(false)}
+        >
+          <div
+            className="p-surface z-text rounded-2xl max-w-md w-full p-5 shadow-2xl space-y-4 text-xs border border-red-500/30"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-full bg-red-500/10 text-red-600 dark:text-red-400 flex items-center justify-center shrink-0 border border-red-500/20">
+                <Trash2 size={20} />
+              </div>
+              <div>
+                <h3 className="text-sm font-semibold text-red-600 dark:text-red-400">
+                  确认批量永久移除账号
+                </h3>
+                <p className="z-text-muted text-[11px] mt-0.5">
+                  已选择 <span className="font-semibold text-red-500">{selectedCount}</span> 个账号，此操作不可撤销
+                </p>
+              </div>
+            </div>
+
+            <div className="p-3 rounded-xl bg-red-500/5 border border-red-500/15 text-red-700 dark:text-red-300 text-[11px] leading-relaxed">
+              您即将从当前号池中永久移除以下选中的账号及其关联凭据，系统将从内存与数据库中彻底清理。
+            </div>
+
+            {/* 选中账号预览清单 */}
+            <div className="space-y-1.5">
+              <div className="font-medium z-text-muted text-[11px]">受影响账号预览：</div>
+              <div className="max-h-36 overflow-y-auto rounded-xl border z-border bg-input/40 p-2 divide-y divide-border/40 font-mono text-[11px]">
+                {selectedAccountsList.slice(0, 10).map((acc) => (
+                  <div key={acc.id} className="py-1 px-1 flex items-center justify-between">
+                    <span className="truncate max-w-[240px] text-foreground">{acc.email || acc.id}</span>
+                    <span className="text-[10px] text-muted-foreground ml-2 uppercase">{acc.status}</span>
+                  </div>
+                ))}
+                {selectedAccountsList.length > 10 && (
+                  <div className="py-1 px-1 text-center text-muted-foreground italic text-[10px]">
+                    ...以及其余 {selectedAccountsList.length - 10} 个账号
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2.5 pt-3 border-t z-border">
+              <button
+                type="button"
+                disabled={Boolean(bulkOperatingAction)}
+                onClick={() => setShowBulkDeleteConfirm(false)}
+                className="px-3.5 py-1.5 rounded-xl border z-border z-ghost-btn font-medium cursor-pointer"
               >
                 取消
               </button>
               <button
                 type="button"
-                disabled={
-                  updatingProxy ||
-                  selectedCount === 0 ||
-                  Boolean(isPlannedProvider) ||
-                  (proxyNodes.length > 0 && !bulkProxyUrl)
-                }
-                onClick={handleBulkProxyUpdate}
-                className="px-4 py-1.5 rounded-lg z-primary-btn font-medium cursor-pointer disabled:opacity-50"
+                disabled={Boolean(bulkOperatingAction) || selectedCount === 0}
+                onClick={() => handleBulkAction("delete")}
+                className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-xl bg-red-600 hover:bg-red-700 text-white font-medium cursor-pointer disabled:opacity-50 transition-colors shadow-sm"
               >
-                {updatingProxy ? "正在更新..." : "应用到所选账号"}
+                {bulkOperatingAction === "delete" ? (
+                  <>
+                    <Loader2 size={13} className="animate-spin" />
+                    <span>正在移除...</span>
+                  </>
+                ) : (
+                  <>
+                    <Trash2 size={13} />
+                    <span>确认移除 ({selectedCount})</span>
+                  </>
+                )}
               </button>
             </div>
           </div>

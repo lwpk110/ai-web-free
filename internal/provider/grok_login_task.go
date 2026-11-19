@@ -42,8 +42,8 @@ func (p *GrokProvider) grokLoginTarget(id string) (GrokCardAccount, string, *Kam
 	}
 	result := KamiLoginTaskResult{AccountID: account.ID, Email: account.Email}
 	switch {
-	case account.Email == "" || account.Password == "" || account.TOTPSecret == "":
-		result.Error = "账号未配置完整邮箱/密码/2FA 卡密凭据"
+	case account.Email == "" || account.Password == "":
+		result.Error = "账号未配置完整邮箱与密码凭据"
 	case account.Status == accounts.StatusDisabled:
 		result.Error = "账号已停用"
 	case account.ActiveAction == "login" && account.ActionPhase != "queued":
@@ -200,7 +200,7 @@ func (p *GrokProvider) StartKamiPendingLogin(force, headless bool) (KamiLoginTas
 	p.mu.RLock()
 	ids := make([]string, 0, len(p.accounts))
 	for _, account := range p.accounts {
-		if account.Email == "" || account.Password == "" || account.TOTPSecret == "" || account.Status == accounts.StatusDisabled {
+		if account.Email == "" || account.Password == "" || account.Status == accounts.StatusDisabled {
 			continue
 		}
 		if !force && account.Status != accounts.StatusPending && account.Status != accounts.StatusExpired {

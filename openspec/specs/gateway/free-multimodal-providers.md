@@ -294,7 +294,7 @@ type ProviderDescriptor struct {
 
 ### 7.3 卡密 SSO 刷新与管理端任务
 
-- `ai-web-free grok-login` 支持从 `邮箱|密码|2FA密钥` 卡密批量登录 `accounts.x.ai`，并在回跳 Grok 后提取 `sso` / `sso-rw` Cookie；第三列也接受旧 JWT（`eyJ...`）或旧 SSO Cookie。旧 JWT 仅用于导入与持久化待命凭据，不会被当作可用 SSO，也不会因过期密码自动触发重登。
+- `ai-web-free grok-login` 支持从 `邮箱|密码|2FA密钥` 卡密批量登录 `accounts.x.ai`，并在回跳 Grok 后提取 `sso` / `sso-rw` Cookie；第三列也接受 JWT（`eyJ...`）或旧 SSO Cookie。当第三列为 JWT（`eyJ...`）时，系统自动将其映射为活跃 SSO 会话 Cookie（`sso=...; sso-rw=...`），账号导入即上线可用并支持即刻测活，同时保留原始账密用于后续有头重登。
 - 工具基于既有纯 Go `chromedp` 依赖执行，支持 `--proxy`、`--browser-path`、`--limit`、`--account`、`--timeout`、`--headless` 与 `--merge`；输出为 `email----sso=...; sso-rw=...`，可直接作为 `GROK_ACCOUNTS_FILE` 凭据行导入。
 - CLI 与管理端批量登录默认无头运行；遇到必须人工完成的挑战时，管理员可显式选择有头模式。输出文件使用同目录临时文件原子替换，并设置为仅当前用户可读写（Windows 上权限语义由文件系统决定）。
 - 管理端 Grok 供应商支持 `auto`、`kami` 与 `cookie` 三种导入格式；`auto` 为默认值并逐行识别同一批混合凭据（`|` 卡密、`----` 卡密、旧版 `email----SSO`、纯 SSO Cookie）。确定性解析失败的行可在显式开启 `GROK_CREDENTIAL_LLM_ENABLED` 后批量交给 SiliconFlow 低成本模型归一化；LLM 输出必须重新通过 Grok 格式校验与“所有敏感值必须来自原始行”的防幻觉校验，未通过行仍按失败处理，且原始行与 LLM 响应不得写入日志。LLM 成功后会将原行与标准行双双脱敏为占位符模板，并保存到数据库 `credential_format_pattern_records`；后续相同格式直接离线渲染与校验，不再调用外部模型，模板连续误判 3 次后自动停用。卡密导入后创建异步串行 SSO 提取任务，成功后写回 Cookie、激活账号并持久化；已有 SSO Cookie 直接导入。任务状态、排队位置、取消排队与结果横幅复用 ChatGPT 卡密任务模型。

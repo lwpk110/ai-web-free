@@ -387,6 +387,115 @@ func (h *AdminHandler) BulkUpdateAccountProxy(c *gin.Context) {
 	})
 }
 
+// BulkAccountAction 对选中的账号集合批量执行运维操作（如 delete / disable / enable / probe / standby 等）
+func (h *AdminHandler) BulkAccountAction(c *gin.Context) {
+	providerID := strings.ToLower(strings.TrimSpace(c.Param("provider")))
+	p, ok := h.registry.Get(providerID)
+	if !ok {
+		c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"message": "未找到供应商插件: " + providerID}})
+		return
+	}
+
+	var body struct {
+		AccountIDs []string `json:"account_ids"`
+		Action     string   `json:"action"`
+		Headless   *bool    `json:"headless"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "请求 JSON 格式无效: " + err.Error()}})
+		return
+	}
+
+	action := strings.ToLower(strings.TrimSpace(body.Action))
+	if action == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "缺少 action 参数"}})
+		return
+	}
+
+	ids := make([]string, 0, len(body.AccountIDs))
+	seen := make(map[string]struct{}, len(body.AccountIDs))
+	for _, rawID := range body.AccountIDs {
+		id := strings.TrimSpace(rawID)
+		if id == "" {
+			continue
+		}
+		if _, duplicate := seen[id]; duplicate {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+
+	if len(ids) == 0 || len(ids) > 1000 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "请选择 1 到 1000 个账号"}})
+		return
+	}
+
+	headless := false
+	if body.Headless != nil {
+		headless = *body.Headless
+	}
+
+	type actionWithOpts interface {
+		ExecuteAccountActionWithOpts(id, action string, headless bool) (map[string]interface{}, error)
+	}
+
+	type bulkItemResult struct {
+		ID      string `json:"id"`
+		OK      bool   `json:"ok"`
+		Error   string `json:"error,omitempty"`
+		Message string `json:"message,omitempty"`
+	}
+
+	results := make([]bulkItemResult, 0, len(ids))
+	successCount := 0
+
+	for _, id := range ids {
+		var res map[string]interface{}
+		var err error
+		if runner, ok := p.(actionWithOpts); ok {
+			res, err = runner.ExecuteAccountActionWithOpts(id, action, headless)
+		} else {
+			res, err = p.ExecuteAccountAction(id, action)
+		}
+
+		item := bulkItemResult{ID: id}
+		if err != nil {
+			item.OK = false
+			item.Error = err.Error()
+		} else {
+			item.OK = true
+			successCount++
+			if msg, ok := res["message"].(string); ok && msg != "" {
+				item.Message = msg
+			}
+		}
+		results = append(results, item)
+	}
+
+	if auditLog := h.auditLog(); auditLog != nil {
+		auditLog.RecordEvent(
+			"/admin/api/v1/providers/"+providerID+"/accounts/bulk-action",
+			"",
+			"",
+			fmt.Sprintf("bulk_%s", action),
+			fmt.Sprintf("total=%d success=%d failed=%d", len(ids), successCount, len(ids)-successCount),
+		)
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"provider": providerID,
+		"action":   action,
+		"result": gin.H{
+			"total":   len(ids),
+			"success": successCount,
+			"failed":  len(ids) - successCount,
+			"results": results,
+		},
+		"stats": p.Stats(),
+	})
+}
+
 // ImportAccounts 批量导入账号凭据
 func (h *AdminHandler) ImportAccounts(c *gin.Context) {
 	providerID := c.Param("provider")
@@ -430,7 +539,7 @@ func (h *AdminHandler) AccountAction(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "缺少 action 参数"}})
 		return
 	}
-	headless := true
+	headless := false
 	if body.Headless != nil {
 		headless = *body.Headless
 	}
@@ -493,7 +602,7 @@ func (h *AdminHandler) LoginKamiAccounts(c *gin.Context) {
 			return
 		}
 	}
-	headless := true
+	headless := false
 	if body.Headless != nil {
 		headless = *body.Headless
 	}

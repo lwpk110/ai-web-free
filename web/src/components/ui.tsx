@@ -27,6 +27,7 @@ export type RouteKey =
   | "pools"
   | "network"
   | "gateway"
+  | "deals"
   | "logs"
   | "ops-logs"
   | "chat"
@@ -71,6 +72,13 @@ export const NAV_ITEMS: NavItemConfig[] = [
     label: "代理与模型目录",
     hash: "#/network",
     description: "粘性代理矩阵、测活校准与 /v1 多语言模型目录",
+  },
+  {
+    id: "deals",
+    group: "ops",
+    label: "🔥 羊毛福利线报",
+    hash: "#/deals",
+    description: "每 4 小时全网聚合 Linux.do / NodeSeek / V2EX AI 免费额度与最热羊毛",
   },
   {
     id: "logs",

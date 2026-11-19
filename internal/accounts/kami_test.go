@@ -68,3 +68,21 @@ u5@example.com----Pass567!
 		t.Fatalf("unexpected row 5 email: %+v", got[5])
 	}
 }
+
+func TestParseKamiText_UsernamePasswordRTMode(t *testing.T) {
+	raw := `
+# Username + Password + Refresh Token (no rt_ prefix)
+u7@example.com----Pass789!----a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6
+u8@example.com|Pass890!|my-custom-oauth-refresh-token-xyz-123456
+`
+	got := ParseKamiText(raw)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 accounts, got %d", len(got))
+	}
+	if got[0].Email != "u7@example.com" || got[0].Password != "Pass789!" || got[0].RefreshToken != "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6" {
+		t.Fatalf("unexpected row 0: %+v", got[0])
+	}
+	if got[1].Email != "u8@example.com" || got[1].Password != "Pass890!" || got[1].RefreshToken != "my-custom-oauth-refresh-token-xyz-123456" {
+		t.Fatalf("unexpected row 1: %+v", got[1])
+	}
+}

@@ -64,7 +64,8 @@ func TestParseGrokCardLineWithLegacyJWT(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if card.LegacyToken != token || card.TOTPSecret != "" || card.OldCookie != "" {
+	expectedCookie := "sso=" + token + "; sso-rw=" + token
+	if card.LegacyToken != token || card.TOTPSecret != "" || card.OldCookie != expectedCookie {
 		t.Fatalf("unexpected legacy JWT card: %+v", card)
 	}
 }
@@ -91,6 +92,34 @@ func TestParseGrokCardFile(t *testing.T) {
 	}
 	if len(cards) != 2 || cards[0].LineNo != 3 || cards[1].Email != "b@example.com" {
 		t.Fatalf("unexpected cards: %+v", cards)
+	}
+}
+
+func TestParseGrokCardFileWithHeadersAndLegacyJWT(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cards_with_header.txt")
+	content := `=== 使用说明 ===
+批量提取工具： https://example.com 密码:xyz
+
+=== 卡密内容 ===
+user1@example.com|pass1|eyJhbGciOiJIUzI1NiJ9.eyJzZXNzaW9uX2lkIjoiMTIzIn0.X2E9cw5QUAA6QspOIz7qOPEB3b12i0stW91+bA==
+user2@example.com----pass2----JBSWY3DPEHPK3PXP
+`
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	cards, err := ParseGrokCardFile(path)
+	if err != nil {
+		t.Fatalf("expected file to parse cleanly with headers: %v", err)
+	}
+	if len(cards) != 2 {
+		t.Fatalf("expected 2 cards, got %d", len(cards))
+	}
+	if cards[0].Email != "user1@example.com" || cards[0].LegacyToken == "" || cards[0].TOTPSecret != "" {
+		t.Fatalf("unexpected card 0: %+v", cards[0])
+	}
+	if cards[1].Email != "user2@example.com" || cards[1].TOTPSecret != "JBSWY3DPEHPK3PXP" {
+		t.Fatalf("unexpected card 1: %+v", cards[1])
 	}
 }
 

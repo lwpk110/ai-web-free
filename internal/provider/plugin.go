@@ -34,6 +34,7 @@ type ProviderDescriptor struct {
 	CredentialFormats     []string     `json:"credential_formats"`
 	Capabilities          []string     `json:"capabilities"`
 	FeaturedModels        []string     `json:"featured_models"`
+	ImageModels           []string     `json:"image_models,omitempty"`
 	Tags                  []ChannelTag `json:"tags,omitempty"`
 	CostType              string       `json:"cost_type,omitempty"` // "permanent_free" | "daily_credits" | "trial_quota"
 	AuthType              string       `json:"auth_type,omitempty"` // "no_auth" | "cookie" | "api_key"

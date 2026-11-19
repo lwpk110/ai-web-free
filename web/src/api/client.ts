@@ -69,6 +69,7 @@ export interface ProviderDescriptor {
   credential_formats: string[];
   capabilities: string[];
   featured_models?: string[];
+  image_models?: string[];
   tags?: ChannelTag[];
   cost_type?: string;
   auth_type?: string;
@@ -396,6 +397,7 @@ export interface AccountView {
   has_refresh_token?: boolean;
   has_session_token?: boolean;
   has_kami_credentials?: boolean;
+  has_totp_secret?: boolean;
   is_temporary?: boolean;
   image_limited?: boolean;
   cooldown_until?: string;
@@ -445,6 +447,13 @@ export async function fetchOverview(): Promise<OverviewResponse> {
   const res = await adminFetch("/admin/api/v1/overview");
   if (!res.ok) throw new Error(`Overview failed: HTTP ${res.status}`);
   return res.json();
+}
+
+export async function fetchProviderDescriptors(): Promise<ProviderDescriptor[]> {
+  const res = await adminFetch("/admin/api/v1/providers");
+  if (!res.ok) throw new Error(`Providers failed: HTTP ${res.status}`);
+  const data = await res.json();
+  return Array.isArray(data?.providers) ? data.providers : [];
 }
 
 export async function fetchServerStatus(): Promise<ServerStatusReport> {
@@ -504,6 +513,52 @@ export async function bulkUpdateAccountProxy(
     throw new Error(data?.error?.message || `Bulk proxy update failed: HTTP ${res.status}`);
   }
   return data;
+}
+
+export async function bulkAccountAction(
+  provider: string,
+  accountIds: string[],
+  action: AccountActionType,
+  options?: { headless?: boolean }
+): Promise<{
+  provider: string;
+  action: string;
+  result: {
+    total: number;
+    success: number;
+    failed: number;
+    results: { id: string; ok: boolean; error?: string; message?: string }[];
+  };
+  stats?: PoolStats;
+}> {
+  const res = await adminFetch(
+    `/admin/api/v1/providers/${encodeURIComponent(provider)}/accounts/bulk-action`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        account_ids: accountIds,
+        action,
+        headless: options?.headless,
+      }),
+    }
+  );
+  if (!res.ok) {
+    let errMessage = `HTTP ${res.status}`;
+    try {
+      const data = await res.json();
+      errMessage = data?.error?.message || errMessage;
+    } catch {
+      const text = await res.text().catch(() => "");
+      if (text) {
+        errMessage = text.length > 120 ? text.slice(0, 120) + "..." : text;
+      }
+    }
+    const err = new Error(errMessage) as any;
+    err.status = res.status;
+    throw err;
+  }
+  return res.json();
 }
 
 export type AccountActionType =
@@ -647,7 +702,7 @@ export async function dismissAdminTask(
 
 export async function loginKamiAccounts(
   provider = "chatgpt",
-  headless = true,
+  headless = false,
   force = false,
   accountIds: string[] = []
 ): Promise<{
@@ -714,7 +769,7 @@ export async function importAccounts(params: {
         raw_text: params.rawText,
         persist: params.persist ?? true,
         auto_login: params.autoLogin ?? false,
-        headless: params.headless ?? true,
+        headless: params.headless ?? false,
         generate_count: params.generateCount ?? 0,
       }),
     }
@@ -2974,4 +3029,96 @@ export async function revealGatewayKeySecret(id: string): Promise<string> {
     throw new Error(data?.error?.message || `获取 Key 明文失败: HTTP ${res.status}`);
   }
   return data?.key || "";
+}
+
+export interface DealItem {
+  id: string;
+  title: string;
+  summary: string;
+  url: string;
+  source: string;
+  category: string;
+  author?: string;
+  likes: number;
+  replies: number;
+  views: number;
+  score: number;
+  is_hot: boolean;
+  tags?: string[];
+  published_at: string;
+  crawled_at: string;
+}
+
+export interface DealsStatus {
+  total_count: number;
+  hot_count: number;
+  last_update_at: string;
+  next_update_at: string;
+  interval: string;
+  is_running: boolean;
+  sources: string[];
+}
+
+export async function fetchDeals(params?: {
+  sort?: string;
+  hot_only?: boolean;
+  source?: string;
+  category?: string;
+  keyword?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<{ items: DealItem[]; total: number }> {
+  const query = new URLSearchParams();
+  if (params?.sort) query.set("sort", params.sort);
+  if (params?.hot_only) query.set("hot_only", "true");
+  if (params?.source) query.set("source", params.source);
+  if (params?.category) query.set("category", params.category);
+  if (params?.keyword) query.set("keyword", params.keyword);
+  if (params?.limit) query.set("limit", String(params.limit));
+  if (params?.offset) query.set("offset", String(params.offset));
+
+  const qs = query.toString();
+  const url = `/admin/api/v1/deals${qs ? `?${qs}` : ""}`;
+  const res = await adminFetch(url);
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error || `获取羊毛资讯失败: HTTP ${res.status}`);
+  }
+  return { items: data.items || [], total: data.total || 0 };
+}
+
+export async function postDealsChat(params: {
+  messages: Array<{ role: "user" | "assistant"; content: string }>;
+  web_search: boolean;
+}): Promise<{ answer: string }> {
+  const res = await adminFetch("/admin/api/v1/deals/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(params),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error || `线报助手请求失败: HTTP ${res.status}`);
+  }
+  return { answer: data.answer || "" };
+}
+
+export async function refreshDeals(): Promise<{ message: string; updated: number; status: DealsStatus }> {
+  const res = await adminFetch("/admin/api/v1/deals/refresh", {
+    method: "POST",
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error || `刷新羊毛资讯失败: HTTP ${res.status}`);
+  }
+  return data;
+}
+
+export async function fetchDealsStatus(): Promise<DealsStatus> {
+  const res = await adminFetch("/admin/api/v1/deals/status");
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error || `获取羊毛调度状态失败: HTTP ${res.status}`);
+  }
+  return data;
 }

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Check,
   Clapperboard,
@@ -34,12 +34,14 @@ import {
   editImageWithReferences,
   expandImagePrompt,
   fetchAccounts,
+  fetchProviderDescriptors,
   fetchPromptPlaza,
   generateImage,
   triggerPromptPlazaSync,
   type PromptPlazaItem,
   type PromptSyncStatus,
   type PromptVariable,
+  type ProviderDescriptor,
 } from "../api/client";
 import { NoticeBanner } from "../components/ui";
 import { PromptChatAssistant } from "../components/PromptChatAssistant";
@@ -543,6 +545,31 @@ export const ImageStudio: React.FC = () => {
     refresh: refreshModels,
   } = useModelsCatalog();
 
+  const [imageProviders, setImageProviders] = useState<ProviderDescriptor[]>([]);
+  const [providersLoading, setProvidersLoading] = useState(true);
+
+  const loadImageProviders = useCallback(async () => {
+    setProvidersLoading(true);
+    try {
+      const providers = await fetchProviderDescriptors();
+      setImageProviders(
+        providers.filter(
+          (provider) =>
+            provider.status === "enabled" &&
+            provider.capabilities?.includes("image_generation")
+        )
+      );
+    } catch {
+      // Keep the last loaded channel list available if refresh fails.
+    } finally {
+      setProvidersLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadImageProviders();
+  }, [loadImageProviders]);
+
   const modelCards = useMemo(() => {
     if (imageModels.length > 0) {
       return imageModels.map((m) => ({
@@ -551,10 +578,35 @@ export const ImageStudio: React.FC = () => {
         tag: m.tag,
       }));
     }
-    return MODEL_CARDS;
+    return MODEL_CARDS.filter(
+      (m) => m.id.startsWith("gpt-image-") || m.id === "dall-e-3"
+    );
   }, [imageModels]);
 
+  const imageChannels = useMemo(() => {
+    const channels = imageProviders
+      .map((provider) => {
+        const models =
+          provider.id === "chatgpt"
+            ? modelCards
+            : (provider.image_models || []).map((id) => ({
+                id,
+                desc: `${provider.name} 生图模型`,
+                tag: "生图",
+              }));
+        return { ...provider, models };
+      })
+      .filter((provider) => provider.models.length > 0)
+      .sort((a, b) => {
+        if (a.id === "chatgpt") return -1;
+        if (b.id === "chatgpt") return 1;
+        return a.name.localeCompare(b.name);
+      });
+    return channels;
+  }, [imageProviders, modelCards]);
+
   const [mode, setMode] = useState<"generations" | "edits">("generations");
+  const [imageProviderId, setImageProviderId] = useState("chatgpt");
   const [prompt, setPrompt] = useState(FALLBACK_PRESETS[0].prompt);
   const [model, setModel] = useState(
     () => modelCards[0]?.id || "gpt-image-2.5-sunburst"
@@ -565,14 +617,22 @@ export const ImageStudio: React.FC = () => {
   const [filePreviews, setFilePreviews] = useState<string[]>([]);
   const [apiKey, setApiKey] = useState("");
   useEffect(() => {
-    if (modelCards.length === 0) return;
+    if (imageChannels.length === 0) return;
+    const activeChannel = imageChannels.find((channel) => channel.id === imageProviderId);
+    const channel = activeChannel || imageChannels[0];
+    if (channel.id !== imageProviderId) setImageProviderId(channel.id);
     setModel((prev) =>
-      modelCards.some((m) => m.id === prev)
+      channel.models.some((item) => item.id === prev)
         ? prev
-        : modelCards.find((m) => m.id === "gpt-image-2.5-sunburst")?.id ||
-          modelCards[0].id
+        : channel.models.find((item) => item.id === "gpt-image-2.5-sunburst")?.id ||
+          channel.models[0].id
     );
-  }, [modelCards]);
+  }, [imageChannels, imageProviderId]);
+
+  const activeImageChannel = imageChannels.find(
+    (channel) => channel.id === imageProviderId
+  );
+  const activeModelCards = activeImageChannel?.models || modelCards;
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<{
@@ -952,9 +1012,10 @@ export const ImageStudio: React.FC = () => {
   } => {
     const nextMode: "generations" | "edits" =
       item.recommended_mode === "edits" ? "edits" : "generations";
-    const nextModel = modelCards.some((m) => m.id === item.recommended_model)
-      ? item.recommended_model
-      : model;
+    const recommendedChannel = imageChannels.find((channel) =>
+      channel.models.some((m) => m.id === item.recommended_model)
+    );
+    const nextModel = recommendedChannel ? item.recommended_model : model;
     const nextSize = ASPECT_OPTIONS.some((a) => a.value === item.recommended_size)
       ? item.recommended_size
       : size;
@@ -972,6 +1033,7 @@ export const ImageStudio: React.FC = () => {
         : template;
 
     setMode(nextMode);
+    if (recommendedChannel) setImageProviderId(recommendedChannel.id);
     setModel(nextModel);
     setSize(nextSize);
     setPrompt(rendered);
@@ -1039,7 +1101,11 @@ export const ImageStudio: React.FC = () => {
           : expanded.prompt_en;
 
       setPrompt(rendered);
-      if (modelCards.some((m) => m.id === expanded.recommended_model)) {
+      const recommendedChannel = imageChannels.find((channel) =>
+        channel.models.some((m) => m.id === expanded.recommended_model)
+      );
+      if (recommendedChannel) {
+        setImageProviderId(recommendedChannel.id);
         setModel(expanded.recommended_model);
       }
       if (vars.length > 0) {
@@ -1176,7 +1242,11 @@ export const ImageStudio: React.FC = () => {
 
   const handleRemix = (item: HydratedImageItem) => {
     setPrompt(item.revisedPrompt || item.prompt);
-    if (modelCards.some((m) => m.id === item.model)) {
+    const sourceChannel = imageChannels.find((channel) =>
+      channel.models.some((m) => m.id === item.model)
+    );
+    if (sourceChannel) {
+      setImageProviderId(sourceChannel.id);
       setModel(item.model);
     }
     if (ASPECT_OPTIONS.some((a) => a.value === item.size)) {
@@ -1342,32 +1412,69 @@ export const ImageStudio: React.FC = () => {
                 setMode("edits");
                 setError(null);
               }}
+              disabled={imageProviderId !== "chatgpt"}
               className={`inline-flex items-center justify-center gap-1.5 py-1.5 rounded-lg cursor-pointer transition-all ${
                 mode === "edits"
                   ? "p-seg-active font-semibold"
                   : "z-text-muted z-ghost-btn"
-              }`}
+              } ${imageProviderId !== "chatgpt" ? "opacity-45 cursor-not-allowed" : ""}`}
             >
               <Layers size={12} />
               <span>参考图编辑</span>
             </button>
           </div>
 
-          {/* Tactile Model Cards */}
+          {/* Dynamic Image Channels and Models */}
           <div className="space-y-1.5">
+            <label className="font-medium z-text-sec block">生图渠道</label>
+            {imageChannels.length > 0 && (
+              <div className="p-surface p-1 rounded-xl grid grid-cols-2 gap-1">
+                {imageChannels.map((channel) => (
+                  <button
+                    key={channel.id}
+                    type="button"
+                    onClick={() => {
+                      setImageProviderId(channel.id);
+                      setModel(channel.models[0]?.id || "");
+                      if (channel.id !== "chatgpt") setMode("generations");
+                      setError(null);
+                    }}
+                    className={`min-w-0 px-2 py-1.5 rounded-lg text-left cursor-pointer transition-colors ${
+                      imageProviderId === channel.id
+                        ? "p-seg-active font-semibold"
+                        : "z-text-muted z-ghost-btn"
+                    }`}
+                    title={channel.description}
+                  >
+                    <span className="block truncate">{channel.name}</span>
+                    <span className="block text-[10px] font-normal opacity-75">
+                      {channel.models.length} 个模型
+                    </span>
+                  </button>
+                ))}
+              </div>
+            )}
             <div className="flex items-center justify-between gap-2">
               <label className="font-medium z-text-sec block">
-                生图模型档位 ({modelCards.length})
+                生图模型档位 ({activeModelCards.length})
               </label>
               <button
                 type="button"
-                disabled={modelsLoading}
-                onClick={() =>
-                  void refreshModels({
-                    forceRefresh: true,
-                    apiKey: apiKey.trim() || undefined,
-                  })
-                }
+                disabled={modelsLoading || providersLoading}
+                onClick={() => {
+                  void (async () => {
+                    try {
+                      await refreshModels({
+                        forceRefresh: true,
+                        apiKey: apiKey.trim() || undefined,
+                      });
+                    } catch (err: any) {
+                      setError(err?.message || "刷新模型目录失败");
+                    } finally {
+                      await loadImageProviders();
+                    }
+                  })();
+                }}
                 title={
                   modelsSource === "fallback"
                     ? "从网关重新拉取模型目录（当前暂无实时模型）"
@@ -1377,13 +1484,13 @@ export const ImageStudio: React.FC = () => {
               >
                 <RefreshCw
                   size={11}
-                  className={modelsLoading ? "animate-spin" : ""}
+                  className={modelsLoading || providersLoading ? "animate-spin" : ""}
                 />
-                <span>{modelsLoading ? "拉取中" : "刷新"}</span>
+                <span>{modelsLoading || providersLoading ? "拉取中" : "刷新"}</span>
               </button>
             </div>
             <div className="space-y-1.5">
-              {modelCards.map((m) => {
+              {activeModelCards.map((m) => {
                 const active = model === m.id;
                 return (
                   <button

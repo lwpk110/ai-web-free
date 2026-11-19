@@ -141,6 +141,14 @@ func classifyKamiFields(fields []string) (KamiAccount, bool) {
 	if len(leftovers) > 0 {
 		acc.Password = leftovers[0]
 	}
+	if len(leftovers) > 1 && acc.RefreshToken == "" {
+		for _, rem := range leftovers[1:] {
+			if len(rem) >= 20 && !strings.ContainsAny(rem, " \t\r\n") {
+				acc.RefreshToken = rem
+				break
+			}
+		}
+	}
 
 	if acc.Password == "" && acc.AccessToken == "" {
 		return KamiAccount{}, false

@@ -74,8 +74,8 @@ type KamiLoginOutcome struct {
 	Error            string `json:"error,omitempty"`
 }
 
-// resolveChromeExecutable 查找本机可用的 Chrome/Chromium 可执行文件。
-func resolveChromeExecutable() (string, error) {
+// ResolveChromeExecutable 查找本机可用的 Chrome/Chromium 可执行文件。
+func ResolveChromeExecutable() (string, error) {
 	if envPath := strings.TrimSpace(os.Getenv("CHROME_PATH")); envPath != "" {
 		if st, err := os.Stat(envPath); err == nil && !st.IsDir() {
 			return envPath, nil
@@ -126,6 +126,10 @@ func resolveChromeExecutable() (string, error) {
 		}
 	}
 	return "", errors.New("未找到 Chrome/Chromium 可执行文件，请安装 Chrome/Chromium、将其加入 PATH 或设置 CHROME_PATH")
+}
+
+func resolveChromeExecutable() (string, error) {
+	return ResolveChromeExecutable()
 }
 
 // KamiPhaseLabel 将内部登录阶段 key 映射为中文用户可读阶段名。
@@ -246,7 +250,7 @@ func loginSingleAccountCDP(chromePath, accountID, email, password, totpSecret, p
 	if headless {
 		opts = append(opts, chromedp.Flag("headless", "new"))
 	} else {
-		opts = append(opts, chromedp.Flag("headless", false))
+		opts = append(opts, chromedp.VisibleWindow)
 	}
 	if proxyURL != "" {
 		opts = append(opts, chromedp.ProxyServer(proxyURL))

@@ -308,7 +308,7 @@ func (p *GrokProvider) persistToDisk() {
 			if a.LegacyToken != "" {
 				parts = append(parts, a.LegacyToken)
 			}
-			if a.Cookie != "" {
+			if a.Cookie != "" && a.Cookie != fmt.Sprintf("sso=%s; sso-rw=%s", a.LegacyToken, a.LegacyToken) {
 				parts = append(parts, a.Cookie)
 			}
 			buf.WriteString(strings.Join(parts, "|") + "\n")
@@ -377,6 +377,10 @@ func (p *GrokProvider) addAccounts(tokens []string, persist bool) (int, []string
 				cookie = strings.TrimSpace(parts[1])
 			} else {
 				cookie = trimmed
+			}
+			if isGrokLegacyToken(cookie) {
+				legacyToken = cookie
+				cookie = fmt.Sprintf("sso=%s; sso-rw=%s", cookie, cookie)
 			}
 			if cookie == "" || existingCookie[cookie] {
 				continue
@@ -792,6 +796,7 @@ func (p *GrokProvider) Descriptor() ProviderDescriptor {
 			"image_generation",
 		},
 		FeaturedModels: models,
+		ImageModels:    []string{"grok-2-image"},
 		Tags:           MakeTags("daily-credits", "cookie-pool", "reverse-web", "img-flux-wanx"),
 		CostType:       "daily_credits",
 		AuthType:       "cookie",
@@ -901,7 +906,8 @@ func (p *GrokProvider) ListAccounts(typeFilter, statusFilter, search string) []a
 			Status:             st,
 			PlanType:           "grok_free",
 			TokenPreview:       preview,
-			HasKamiCredentials: a.Password != "" && a.TOTPSecret != "",
+			HasKamiCredentials: a.Password != "",
+			HasTOTPSecret:      a.TOTPSecret != "",
 			Proxy:              a.Proxy,
 			TotalCalls:         a.TotalCalls,
 			FailedCalls:        a.FailedCalls,
@@ -1050,7 +1056,7 @@ func (p *GrokProvider) ImportCredentials(req ImportRequest) (ImportResult, error
 	total := len(p.accounts)
 	loginIDs := make([]string, 0, len(affectedIDs))
 	for _, id := range affectedIDs {
-		if account := p.findGrokAccountLocked(id); account != nil && account.Password != "" && account.TOTPSecret != "" {
+		if account := p.findGrokAccountLocked(id); account != nil && account.Password != "" && account.Cookie == "" && account.TOTPSecret != "" {
 			loginIDs = append(loginIDs, id)
 		}
 	}
@@ -1077,9 +1083,9 @@ func (p *GrokProvider) ImportCredentials(req ImportRequest) (ImportResult, error
 	}
 	var loginTask *KamiLoginTask
 	if req.AutoLogin && len(loginIDs) > 0 {
-		if task, err := p.StartKamiLoginBatch(loginIDs, true); err == nil {
+		if task, err := p.StartKamiLoginBatch(loginIDs, req.Headless); err == nil {
 			loginTask = &task
-			messages = append(messages, fmt.Sprintf("已启动无头重登任务，队列 %d 个账号", task.Total-task.Completed))
+			messages = append(messages, fmt.Sprintf("已启动后台重登任务，队列 %d 个账号", task.Total-task.Completed))
 		} else {
 			messages = append(messages, "自动重登未启动: "+err.Error())
 		}
@@ -1098,7 +1104,7 @@ func (p *GrokProvider) ImportCredentials(req ImportRequest) (ImportResult, error
 
 // ExecuteAccountAction 执行单账号运维操作
 func (p *GrokProvider) ExecuteAccountAction(id, action string) (map[string]interface{}, error) {
-	return p.ExecuteAccountActionWithOpts(id, action, true)
+	return p.ExecuteAccountActionWithOpts(id, action, false)
 }
 
 func (p *GrokProvider) executeGrokProbe(id string) (map[string]interface{}, error) {
@@ -1108,6 +1114,7 @@ func (p *GrokProvider) executeGrokProbe(id string) (map[string]interface{}, erro
 		p.mu.RUnlock()
 		return nil, errors.New("账号不存在")
 	}
+	email := target.Email
 	proxyURL := target.Proxy
 	cookie := target.Cookie
 	p.mu.RUnlock()
@@ -1119,15 +1126,27 @@ func (p *GrokProvider) executeGrokProbe(id string) (map[string]interface{}, erro
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
 	req.Header.Set("Cookie", cookie)
 	req.Header.Set("Referer", p.baseURL+"/")
+
+	start := time.Now()
 	resp, err := client.Do(req)
+	latency := time.Since(start).Milliseconds()
 	if err != nil {
+		errMsg := fmt.Sprintf("网络连接异常: %v", err)
 		p.mu.Lock()
 		if account := p.findGrokAccountLocked(id); account != nil {
 			account.FailedCalls++
-			account.LastError = err.Error()
+			account.LastError = errMsg
 		}
 		p.mu.Unlock()
-		return nil, fmt.Errorf("连通性探测失败: %w", err)
+		go p.persistToDB()
+		return map[string]interface{}{
+			"id":         id,
+			"email":      email,
+			"ok":         false,
+			"status":     "network_error",
+			"latency_ms": latency,
+			"error":      errMsg,
+		}, nil
 	}
 	defer resp.Body.Close()
 
@@ -1140,11 +1159,46 @@ func (p *GrokProvider) executeGrokProbe(id string) (map[string]interface{}, erro
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		target.Status = accounts.StatusExpired
 		target.LastError = fmt.Sprintf("凭据已失效 HTTP %d", resp.StatusCode)
-		return map[string]interface{}{"id": id, "status": "expired", "http_status": resp.StatusCode}, nil
+		go p.persistToDB()
+		return map[string]interface{}{
+			"id":          id,
+			"email":       email,
+			"ok":          false,
+			"status":      "expired",
+			"http_status": resp.StatusCode,
+			"latency_ms":  latency,
+			"error":       target.LastError,
+		}, nil
 	}
+	if resp.StatusCode != http.StatusOK {
+		target.LastError = fmt.Sprintf("探测异常 HTTP %d", resp.StatusCode)
+		go p.persistToDB()
+		return map[string]interface{}{
+			"id":          id,
+			"email":       email,
+			"ok":          false,
+			"status":      target.Status.String(),
+			"http_status": resp.StatusCode,
+			"latency_ms":  latency,
+			"error":       target.LastError,
+		}, nil
+	}
+
 	target.LastError = ""
 	target.Status = accounts.StatusActive
-	return map[string]interface{}{"id": id, "status": "healthy", "ok": true, "http_status": resp.StatusCode}, nil
+	go p.persistToDB()
+	models := p.CachedModels()
+	return map[string]interface{}{
+		"id":           id,
+		"email":        email,
+		"ok":           true,
+		"status":       "active",
+		"http_status":  resp.StatusCode,
+		"latency_ms":   latency,
+		"models_count": len(models),
+		"models":       models,
+		"message":      fmt.Sprintf("测活通过 (%dms)", latency),
+	}, nil
 }
 
 // ExecuteAccountActionWithOpts 执行单账号运维操作（带选项）。
@@ -1164,9 +1218,9 @@ func (p *GrokProvider) ExecuteAccountActionWithOpts(id, action string, headless 
 			p.mu.RUnlock()
 			return nil, errors.New("账号已停用，请先启用后再重登")
 		}
-		if target.Email == "" || target.Password == "" || target.TOTPSecret == "" {
+		if target.Email == "" || target.Password == "" {
 			p.mu.RUnlock()
-			return nil, errors.New("该账号未配置邮箱/密码/2FA 卡密凭据，无法自动登录")
+			return nil, errors.New("该账号未配置邮箱与密码凭据，无法自动登录")
 		}
 		p.mu.RUnlock()
 
@@ -1243,21 +1297,33 @@ func (p *GrokProvider) ExecuteAccountActionWithOpts(id, action string, headless 
 	case "standby":
 		target.Status = accounts.StatusStandby
 		p.mu.Unlock()
+		go p.persistToDB()
 		return map[string]interface{}{"id": target.ID, "status": "standby"}, nil
 	case "activate", "enable":
 		target.Status = accounts.StatusActive
 		target.CooldownUntil = time.Time{}
 		target.ActivatedAt = time.Now()
 		p.mu.Unlock()
+		go p.persistToDB()
 		return map[string]interface{}{"id": target.ID, "status": "active"}, nil
 	case "disable":
 		target.Status = accounts.StatusDisabled
 		p.mu.Unlock()
+		go p.persistToDB()
 		return map[string]interface{}{"id": target.ID, "status": "disabled"}, nil
 	case "delete":
+		deletedID := id
 		p.accounts = append(p.accounts[:targetIdx], p.accounts[targetIdx+1:]...)
 		p.mu.Unlock()
 		go p.persistToDisk()
+		if gdb := p.grokCredentialPatternDB; gdb != nil || db.GetDB() != nil {
+			if gdb == nil {
+				gdb = db.GetDB()
+			}
+			if gdb != nil {
+				_ = gdb.Where("id = ? AND provider = ?", deletedID, "grok").Delete(&db.PoolAccountRecord{}).Error
+			}
+		}
 		return map[string]interface{}{"id": id, "deleted": true}, nil
 	default:
 		p.mu.Unlock()

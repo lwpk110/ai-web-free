@@ -527,7 +527,7 @@ func (p *MetaMuseProvider) UpdateAccountCookie(id, cookie string) (map[string]in
 }
 
 func (p *MetaMuseProvider) ExecuteAccountAction(id, action string) (map[string]interface{}, error) {
-	return p.ExecuteAccountActionWithOpts(id, action, true)
+	return p.ExecuteAccountActionWithOpts(id, action, false)
 }
 
 func (p *MetaMuseProvider) ExecuteAccountActionWithOpts(id, action string, headless bool) (map[string]interface{}, error) {

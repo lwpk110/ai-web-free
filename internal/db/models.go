@@ -303,3 +303,24 @@ type DramaRunRecord struct {
 	UpdatedAt   time.Time  `gorm:"index" json:"updated_at"`
 	FinishedAt  *time.Time `json:"finished_at,omitempty"`
 }
+
+// FreebieDeal 羊毛与免费额度资讯持久化模型
+type FreebieDeal struct {
+	ID          string    `gorm:"primaryKey;size:64" json:"id"`
+	Title       string    `gorm:"size:512;not null;index" json:"title"`
+	Summary     string    `gorm:"type:text" json:"summary"`
+	URL         string    `gorm:"size:512;uniqueIndex" json:"url"`
+	Source      string    `gorm:"size:64;index" json:"source"`       // linuxdo, nodeseek, v2ex, openrouter, official
+	Category    string    `gorm:"size:64;default:'welfare';index" json:"category"` // ai, api, vps, card, general
+	Author      string    `gorm:"size:128" json:"author,omitempty"`
+	Likes       int       `gorm:"default:0" json:"likes"`
+	Replies     int       `gorm:"default:0" json:"replies"`
+	Views       int       `gorm:"default:0" json:"views"`
+	Score       float64   `gorm:"index" json:"score"`                // 综合热度得分
+	IsHot       bool      `gorm:"default:false;index" json:"is_hot"` // 是否上热榜
+	TagsJSON    string    `gorm:"type:text" json:"tags_json,omitempty"`
+	PublishedAt time.Time `gorm:"index" json:"published_at"`
+	CrawledAt   time.Time `gorm:"index" json:"crawled_at"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
