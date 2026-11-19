@@ -257,39 +257,33 @@ func PullRestore(client *QiniuClient, dbPath, envPath string, pullAllMedia bool)
 		}
 	}
 
-	// 3. 多媒体文件机制
-	fmt.Printf("\n🎨 [3/3] 多媒体文件机制：\n")
-	if !pullAllMedia {
-		fmt.Printf("✨ 当前已启用【两级分层缓存引擎 (TieredStorage)】：\n")
-		fmt.Printf("   所有多媒体资源已在七牛云持久保存；当页面加载任何图片、短剧视频或音频时，\n")
-		fmt.Printf("   系统会自动触发按需回填并缓存在本地磁盘，换机无需等待冗长全量下载！\n")
-		fmt.Printf("   (若需要一次性全量预下载全部多媒体，请运行: ./ai-web-free restore --all)\n")
-	} else {
-		fmt.Printf("正在全量拉取云端多媒体文件 (storage/ 与 videos/)...\n")
-		downloaded := 0
-		for _, prefix := range []string{"storage/", "videos/"} {
-			keys, err := client.List(ctx, prefix, 1000)
-			if err != nil {
-				fmt.Printf("列举云端文件 [%s] 失败: %v\n", prefix, err)
+	// 3. 恢复关联多媒体与缓存物料（与 SQLite 数据库强关联）
+	fmt.Printf("\n🎨 [3/3] 正在同步云端关联多媒体与缓存物料 (storage/ 与 videos/)...\n")
+	downloaded := 0
+	skipped := 0
+	for _, prefix := range []string{"storage/", "videos/"} {
+		keys, err := client.List(ctx, prefix, 1000)
+		if err != nil {
+			fmt.Printf("列举云端文件 [%s] 失败: %v\n", prefix, err)
+			continue
+		}
+		for _, k := range keys {
+			localPath := filepath.Join("data", k)
+			if _, err := os.Stat(localPath); err == nil {
+				skipped++
 				continue
 			}
-			for _, k := range keys {
-				localPath := filepath.Join("data", k)
-				if _, err := os.Stat(localPath); err == nil {
-					continue
-				}
-				_ = os.MkdirAll(filepath.Dir(localPath), 0755)
-				data, err := client.Download(ctx, k)
-				if err != nil {
-					fmt.Printf("  ⚠️ 下载失败 %s: %v\n", k, err)
-				} else {
-					_ = os.WriteFile(localPath, data, 0644)
-					downloaded++
-				}
+			_ = os.MkdirAll(filepath.Dir(localPath), 0755)
+			data, err := client.Download(ctx, k)
+			if err != nil {
+				fmt.Printf("  ⚠️ 下载失败 %s: %v\n", k, err)
+			} else {
+				_ = os.WriteFile(localPath, data, 0644)
+				downloaded++
 			}
 		}
-		fmt.Printf("✅ 全量下载完成，新拉取 %d 个多媒体文件！\n", downloaded)
 	}
+	fmt.Printf("✅ 多媒体物料同步完成：新下载 %d 个文件，本地已有跳过 %d 个文件！\n", downloaded, skipped)
 
 	fmt.Printf("\n🎉 恢复完成！服务可直接正常启动。\n")
 	return nil
