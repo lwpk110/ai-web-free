@@ -111,17 +111,21 @@ func PushBackup(client *QiniuClient, dbPath, envPath, storageDir, videosDir stri
 
 	ctx := context.Background()
 
-	// 1. 同步 SQLite
-	fmt.Printf("📦 [1/3] 正在对 SQLite 数据库进行快照同步...\n")
-	_ = CheckpointSQLite(dbPath)
-	if data, err := os.ReadFile(dbPath); err == nil {
-		if _, err := client.Upload(ctx, "_backups/ai-web-free.db", data, "application/x-sqlite3"); err != nil {
-			fmt.Printf("❌ 上传数据库快照失败: %v\n", err)
-		} else {
-			fmt.Printf("✅ 已更新云端最新数据库快照: _backups/ai-web-free.db (大小: %.2f MB)\n", float64(len(data))/(1024*1024))
-		}
+	// 1. 同步 SQLite 数据库快照（若已配置云端 PostgreSQL 则由云厂商实时托管）
+	if strings.HasPrefix(dbPath, "postgres://") || strings.HasPrefix(dbPath, "postgresql://") {
+		fmt.Printf("📦 [1/3] 检测到已连接云端托管 PostgreSQL (Neon)，数据库已由云端实时高可用托管，跳过本地快照推送。\n")
 	} else {
-		fmt.Printf("⚠️ 未找到本地 SQLite 数据库文件 (%s)，跳过数据库备份\n", dbPath)
+		fmt.Printf("📦 [1/3] 正在对 SQLite 数据库进行快照同步...\n")
+		_ = CheckpointSQLite(dbPath)
+		if data, err := os.ReadFile(dbPath); err == nil {
+			if _, err := client.Upload(ctx, "_backups/ai-web-free.db", data, "application/x-sqlite3"); err != nil {
+				fmt.Printf("❌ 上传数据库快照失败: %v\n", err)
+			} else {
+				fmt.Printf("✅ 已更新云端最新数据库快照: _backups/ai-web-free.db (大小: %.2f MB)\n", float64(len(data))/(1024*1024))
+			}
+		} else {
+			fmt.Printf("⚠️ 未找到本地 SQLite 数据库文件 (%s)，跳过数据库备份\n", dbPath)
+		}
 	}
 
 	// 2. 同步 .env 与号池凭据
@@ -239,26 +243,31 @@ func PullRestore(client *QiniuClient, dbPath, envPath string, pullAllMedia bool)
 		}
 	}
 
-	// 2. 恢复 SQLite 数据库
-	fmt.Printf("\n📦 [2/3] 正在从云端拉取 SQLite 数据库快照...\n")
-	dbBytes, err := client.Download(ctx, "_backups/ai-web-free.db")
-	if err != nil {
-		fmt.Printf("⚠️ 未在云端找到 _backups/ai-web-free.db 或下载失败: %v\n", err)
+	// 2. 恢复 SQLite 数据库（若配置了云端 PostgreSQL，则直接对齐凭据，无需拉取 SQLite 文件）
+	if strings.HasPrefix(dbPath, "postgres://") || strings.HasPrefix(dbPath, "postgresql://") {
+		fmt.Printf("\n📦 [2/3] 检测到已配置云端托管 PostgreSQL (Neon)，多端实时直连共享，跳过 SQLite 文件下载。\n")
+		syncCloudCredentialsIntoDB(ctx, client, dbPath)
 	} else {
-		dbDir := filepath.Dir(dbPath)
-		_ = os.MkdirAll(dbDir, 0755)
-		if _, err := os.Stat(dbPath); err == nil {
-			backupOld := dbPath + ".bak." + time.Now().Format("20060102150405")
-			_ = os.Rename(dbPath, backupOld)
-			fmt.Printf("ℹ️ 检测到本地已有旧数据库，已归档为 %s\n", backupOld)
-		}
-		_ = os.Remove(filepath.Join(dbDir, "ai-web-free.db-wal"))
-		_ = os.Remove(filepath.Join(dbDir, "ai-web-free.db-shm"))
-		if err := os.WriteFile(dbPath, dbBytes, 0644); err != nil {
-			fmt.Printf("❌ 写入 SQLite 数据库失败: %v\n", err)
+		fmt.Printf("\n📦 [2/3] 正在从云端拉取 SQLite 数据库快照...\n")
+		dbBytes, err := client.Download(ctx, "_backups/ai-web-free.db")
+		if err != nil {
+			fmt.Printf("⚠️ 未在云端找到 _backups/ai-web-free.db 或下载失败: %v\n", err)
 		} else {
-			fmt.Printf("✅ 成功恢复 SQLite 数据库到 %s (大小: %.2f MB)！\n", dbPath, float64(len(dbBytes))/(1024*1024))
-			syncCloudCredentialsIntoDB(ctx, client, dbPath)
+			dbDir := filepath.Dir(dbPath)
+			_ = os.MkdirAll(dbDir, 0755)
+			if _, err := os.Stat(dbPath); err == nil {
+				backupOld := dbPath + ".bak." + time.Now().Format("20060102150405")
+				_ = os.Rename(dbPath, backupOld)
+				fmt.Printf("ℹ️ 检测到本地已有旧数据库，已归档为 %s\n", backupOld)
+			}
+			_ = os.Remove(filepath.Join(dbDir, "ai-web-free.db-wal"))
+			_ = os.Remove(filepath.Join(dbDir, "ai-web-free.db-shm"))
+			if err := os.WriteFile(dbPath, dbBytes, 0644); err != nil {
+				fmt.Printf("❌ 写入 SQLite 数据库失败: %v\n", err)
+			} else {
+				fmt.Printf("✅ 成功恢复 SQLite 数据库到 %s (大小: %.2f MB)！\n", dbPath, float64(len(dbBytes))/(1024*1024))
+				syncCloudCredentialsIntoDB(ctx, client, dbPath)
+			}
 		}
 	}
 

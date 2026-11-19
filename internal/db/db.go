@@ -108,9 +108,28 @@ func InitDB(dsn string) (*gorm.DB, error) {
 		return nil, fmt.Errorf("failed to auto migrate database schemas: %w", err)
 	}
 
+	// 针对不同数据库引擎调优连接池参数（特别是 Neon Serverless PG 连接池与 SQLite WAL 模式）
+	if sqlDB, err := db.DB(); err == nil {
+		if strings.HasPrefix(trimmed, "postgres://") || strings.HasPrefix(trimmed, "postgresql://") {
+			sqlDB.SetMaxIdleConns(5)
+			sqlDB.SetMaxOpenConns(25)
+			sqlDB.SetConnMaxLifetime(30 * time.Minute)
+			sqlDB.SetConnMaxIdleTime(5 * time.Minute)
+		} else if strings.Contains(trimmed, "sqlite") || !strings.Contains(trimmed, "://") {
+			sqlDB.SetMaxOpenConns(1)
+		}
+	}
+
 	// 种入默认内置角色预设与免密号池渠道
 	seedBuiltinPresets(db)
 	seedDefaultChannels(db)
+
+	// 若连接到云端 PostgreSQL，自动检查并从本地 SQLite 无缝自愈迁移历史数据
+	if strings.HasPrefix(trimmed, "postgres://") || strings.HasPrefix(trimmed, "postgresql://") {
+		if err := AutoMigrateSQLiteToPostgres("data/ai-web-free.db", db); err != nil {
+			log.Printf("[DB] 自动同步本地 SQLite 数据至 PostgreSQL 失败: %v", err)
+		}
+	}
 
 	SetDB(db)
 	return db, nil
