@@ -1041,13 +1041,29 @@ func (p *Pool) RecoverCooldowns() int {
 }
 
 // NeedsProactiveRenew 返回需要提前/自动续期的卡密账号（过期、缺 Token 或距离到期不足 within）。
+// 当账号类型启用了热池策略时，严格遵守热池容量：
+// 1) 仅提前续期热池中已激活且即将过期的账号，避免掉出热池；
+// 2) 对于失效或缺 Token 的卡密账号（StatusExpired / StatusPending），仅在当前健康可用数低于目标活跃数时才补位续期，且单次最多补足 deficit（受 ActivateBatch 限制）；
+// 3) 待命账号（StatusStandby）由 Rebalance 控制激活，不直接参与后台续期扫描。
 func (p *Pool) NeedsProactiveRenew(within time.Duration) []*Account {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := time.Now()
 	var out []*Account
-	for _, list := range [][]*Account{p.free, p.puid} {
-		for _, a := range list {
+
+	for _, t := range []AccountType{TypeFree, TypePUID} {
+		list := p.sliceFor(t)
+		if list == nil {
+			continue
+		}
+		pol, hasPol := p.policies[t]
+		polEnabled := hasPol && pol.Enabled()
+
+		var activeDue []*Account
+		var inactiveDue []*Account
+		healthyCount := 0
+
+		for _, a := range *list {
 			if a.IsTemporary || a.Password == "" || a.TOTPSecret == "" {
 				continue
 			}
@@ -1064,12 +1080,48 @@ func (p *Pool) NeedsProactiveRenew(within time.Duration) []*Account {
 			if !a.RenewCooldownUntil.IsZero() && now.Before(a.RenewCooldownUntil) {
 				continue
 			}
+
+			if a.isHealthy(now) {
+				healthyCount++
+			}
+
 			due := a.Status == StatusExpired || a.Token == ""
+			isExpiringActive := false
 			if !due && within > 0 && !a.ExpiresAt.IsZero() && a.ExpiresAt.Sub(now) < within {
 				due = true
+				if a.Status == StatusActive {
+					isExpiringActive = true
+				}
 			}
+
 			if due {
-				out = append(out, a)
+				if isExpiringActive {
+					activeDue = append(activeDue, a)
+				} else {
+					inactiveDue = append(inactiveDue, a)
+				}
+			}
+		}
+
+		if !polEnabled {
+			out = append(out, activeDue...)
+			out = append(out, inactiveDue...)
+			continue
+		}
+
+		out = append(out, activeDue...)
+
+		deficit := pol.ActiveTarget - healthyCount
+		if deficit > 0 {
+			batch := pol.ActivateBatch
+			if batch <= 0 {
+				batch = 5
+			}
+			if deficit > batch {
+				deficit = batch
+			}
+			for i := 0; i < len(inactiveDue) && i < deficit; i++ {
+				out = append(out, inactiveDue[i])
 			}
 		}
 	}

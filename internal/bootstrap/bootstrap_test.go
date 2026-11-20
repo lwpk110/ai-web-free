@@ -122,3 +122,18 @@ func TestExchangeSessionTokenNoopWithoutToken(t *testing.T) {
 		t.Error("expected false for empty session token")
 	}
 }
+
+func TestApplyPoolPolicyDefaultsTo15ForChatGPTFree(t *testing.T) {
+	pool := accounts.NewPool(nil)
+	applyPoolPolicy(pool, "chatgpt", accounts.TypeFree)
+	pol, ok := pool.Policy(accounts.TypeFree)
+	if !ok {
+		t.Fatal("expected policy to be set")
+	}
+	if pol.ActiveTarget != 15 {
+		t.Errorf("ActiveTarget = %d, want 15", pol.ActiveTarget)
+	}
+	if pol.MinHealthy != 7 && pol.MinHealthy != 8 {
+		t.Errorf("MinHealthy = %d, want 7 or 8", pol.MinHealthy)
+	}
+}

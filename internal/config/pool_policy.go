@@ -52,8 +52,13 @@ func LoadPoolPolicy(provider, acctType string) PoolPolicyConfig {
 		return def
 	}
 
+	defActiveTarget := 0
+	if strings.EqualFold(provider, "chatgpt") && strings.EqualFold(acctType, "free") {
+		defActiveTarget = 15
+	}
+
 	cfg := PoolPolicyConfig{
-		ActiveTarget:  intOf("ACTIVE_TARGET", 0),
+		ActiveTarget:  intOf("ACTIVE_TARGET", defActiveTarget),
 		MaxActive:     intOf("MAX_ACTIVE", 0),
 		ActivateBatch: intOf("ACTIVATE_BATCH", 5),
 		RotateRatio:   0.2,

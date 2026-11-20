@@ -342,6 +342,9 @@ func Init() (*App, error) {
 	applyPoolPolicy(accountPool, "chatgpt", accounts.TypeFree)
 	applyPoolPolicy(accountPool, "chatgpt", accounts.TypePUID)
 	accountPool.Rebalance()
+	if database != nil {
+		_ = accounts.BatchSaveAccountsToDB(database, accs)
+	}
 
 	// 初始化 TLS Client（待命账号延迟到激活时创建）
 	for _, acct := range accs {

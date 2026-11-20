@@ -136,18 +136,28 @@ func (p *Pool) rebalanceTypeLocked(t AccountType, entries []*Account, pol PoolPo
 		}
 		return
 	}
-	// 收缩/轮换时的降级顺序：限流中的优先，其后按进入热池时间最久者
+	// 收缩/轮换时的降级顺序：失效与限流中的优先，其后按进入热池时间最久者
 	demotable := func() []*Account {
 		var cands []*Account
 		for _, a := range entries {
-			if a.Status == StatusActive || a.Status == StatusRateLimited {
+			if a.Status == StatusActive || a.Status == StatusRateLimited || a.Status == StatusExpired {
 				cands = append(cands, a)
 			}
 		}
 		sort.SliceStable(cands, func(i, j int) bool {
-			ri, rj := cands[i].Status == StatusRateLimited, cands[j].Status == StatusRateLimited
-			if ri != rj {
-				return ri
+			pri := func(st AccountStatus) int {
+				switch st {
+				case StatusExpired:
+					return 0
+				case StatusRateLimited:
+					return 1
+				default:
+					return 2
+				}
+			}
+			pi, pj := pri(cands[i].Status), pri(cands[j].Status)
+			if pi != pj {
+				return pi < pj
 			}
 			if !cands[i].ActivatedAt.Equal(cands[j].ActivatedAt) {
 				return cands[i].ActivatedAt.Before(cands[j].ActivatedAt)
