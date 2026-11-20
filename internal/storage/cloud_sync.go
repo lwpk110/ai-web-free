@@ -111,9 +111,18 @@ func PushBackup(client *QiniuClient, dbPath, envPath, storageDir, videosDir stri
 
 	ctx := context.Background()
 
-	// 1. 同步 SQLite 数据库快照（若已配置云端 PostgreSQL 则由云厂商实时托管）
+	// 1. 同步 SQLite 数据库快照（若已配置云端 PostgreSQL 则物化同步后多端归档）
 	if strings.HasPrefix(dbPath, "postgres://") || strings.HasPrefix(dbPath, "postgresql://") {
-		fmt.Printf("📦 [1/3] 检测到已连接云端托管 PostgreSQL (Neon)，数据库已由云端实时高可用托管，跳过本地快照推送。\n")
+		fmt.Printf("📦 [1/3] 检测到已连接云端托管 PostgreSQL (Neon)，正在将云端数据物化写入本地 SQLite 快照并归档...\n")
+		if pgDB, err := db.InitDB(dbPath); err == nil {
+			_ = db.MaterializePostgresToSQLite(pgDB, "data/ai-web-free.db")
+		}
+		_ = CheckpointSQLite("data/ai-web-free.db")
+		if data, err := os.ReadFile("data/ai-web-free.db"); err == nil {
+			if _, err := client.Upload(ctx, "_backups/ai-web-free.db", data, "application/x-sqlite3"); err == nil {
+				fmt.Printf("✅ 已同步最新物化 SQLite 数据库快照至七牛云: _backups/ai-web-free.db (大小: %.2f MB)\n", float64(len(data))/(1024*1024))
+			}
+		}
 	} else {
 		fmt.Printf("📦 [1/3] 正在对 SQLite 数据库进行快照同步...\n")
 		_ = CheckpointSQLite(dbPath)
@@ -225,28 +234,47 @@ func PullRestore(client *QiniuClient, dbPath, envPath string, pullAllMedia bool)
 
 	ctx := context.Background()
 
-	// 1. 恢复 .env
+	// 1. 恢复 .env（智能合并保护本地云数据库连接串）
 	fmt.Printf("🔑 [1/3] 正在检查云端 .env 配置...\n")
 	envBytes, err := client.Download(ctx, "_backups/env.snapshot")
 	if err != nil {
 		fmt.Printf("⚠️ 未在云端找到 _backups/env.snapshot 或下载失败: %v\n", err)
 	} else {
-		if _, err := os.Stat(envPath); err == nil {
+		var preservedLines []string
+		if oldBytes, err := os.ReadFile(envPath); err == nil {
+			for _, line := range strings.Split(string(oldBytes), "\n") {
+				trimmed := strings.TrimSpace(line)
+				if strings.HasPrefix(trimmed, "DATABASE_URL=") ||
+					strings.HasPrefix(trimmed, "DATABASE_URL_UNPOOLED=") ||
+					strings.HasPrefix(trimmed, "NEON_") {
+					preservedLines = append(preservedLines, line)
+				}
+			}
 			backupOld := envPath + ".bak." + time.Now().Format("20060102150405")
 			_ = os.Rename(envPath, backupOld)
 			fmt.Printf("ℹ️ 检测到本地已有 %s，已备份为 %s\n", envPath, backupOld)
 		}
-		if err := os.WriteFile(envPath, envBytes, 0644); err != nil {
+		mergedBytes := envBytes
+		if len(preservedLines) > 0 && !strings.Contains(string(envBytes), "DATABASE_URL=") {
+			mergedStr := strings.TrimRight(string(envBytes), "\r\n") + "\n" + strings.Join(preservedLines, "\n") + "\n"
+			mergedBytes = []byte(mergedStr)
+			fmt.Printf("🔒 已自动保留并合并本地云端 PostgreSQL (Neon) 数据库配置，防止连接被旧快照抹除\n")
+		}
+		if err := os.WriteFile(envPath, mergedBytes, 0644); err != nil {
 			fmt.Printf("❌ 写入 %s 失败: %v\n", envPath, err)
 		} else {
 			fmt.Printf("✅ 成功恢复 %s！\n", envPath)
 		}
 	}
 
-	// 2. 恢复 SQLite 数据库（若配置了云端 PostgreSQL，则直接对齐凭据，无需拉取 SQLite 文件）
+	// 2. 恢复数据库与本地物化快照
 	if strings.HasPrefix(dbPath, "postgres://") || strings.HasPrefix(dbPath, "postgresql://") {
-		fmt.Printf("\n📦 [2/3] 检测到已配置云端托管 PostgreSQL (Neon)，多端实时直连共享，跳过 SQLite 文件下载。\n")
+		fmt.Printf("\n📦 [2/3] 检测到已配置云端托管 PostgreSQL (Neon)，多端实时直连共享，正在对齐云端凭据...\n")
 		syncCloudCredentialsIntoDB(ctx, client, dbPath)
+		if pgDB, err := db.InitDB(dbPath); err == nil {
+			fmt.Printf("📦 [2/3] 正在将云端 PostgreSQL 数据全量物化同步至本地 SQLite (data/ai-web-free.db)...\n")
+			_ = db.MaterializePostgresToSQLite(pgDB, "data/ai-web-free.db")
+		}
 	} else {
 		fmt.Printf("\n📦 [2/3] 正在从云端拉取 SQLite 数据库快照...\n")
 		dbBytes, err := client.Download(ctx, "_backups/ai-web-free.db")
