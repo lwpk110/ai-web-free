@@ -42,9 +42,11 @@ BACKEND_PID=$!
 
 # 等待后端服务就绪（避免前端 vite proxy 先行发起请求报 ECONNREFUSED）
 echo ">> 等待 Go 后端服务就绪..."
+READY=0
 for i in $(seq 1 60); do
     if curl -s "http://localhost:${PORT}/admin/api/v1/auth/status" >/dev/null 2>&1; then
-        echo ">> Go 后端服务已就绪！"
+        echo ">> Go 后端服务已就绪！(耗时: ~$(awk "BEGIN {print $i*0.5}")s)"
+        READY=1
         break
     fi
     if ! kill -0 "$BACKEND_PID" 2>/dev/null; then
@@ -53,6 +55,11 @@ for i in $(seq 1 60); do
     fi
     sleep 0.5
 done
+
+if [ "$READY" -ne 1 ]; then
+    echo "❌ 等待后端服务就绪超时 (30s)，请检查后端启动日志"
+    exit 1
+fi
 
 # 5. 启动 Vite 前端
 echo ">> 启动 Vite 前端: http://localhost:${WEB_PORT} (代理至 http://localhost:${PORT})"

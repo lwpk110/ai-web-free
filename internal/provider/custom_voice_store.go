@@ -142,10 +142,11 @@ func (s *VoiceCatalogStore) SaveCustomVoices(ctx context.Context, list []CustomV
 	customVoiceMemCache[s.memKey()] = cp
 	customVoiceMemMu.Unlock()
 
-	// 同步持久化写入 SQLite 数据库
-	if gdb := db.GetDB(); gdb != nil {
+	// 同步持久化写入 SQLite / PostgreSQL 数据库
+	if gdb := db.GetDB(); gdb != nil && len(cp) > 0 {
+		records := make([]db.CustomVoiceModelRecord, 0, len(cp))
 		for _, v := range cp {
-			rec := db.CustomVoiceModelRecord{
+			records = append(records, db.CustomVoiceModelRecord{
 				ID:            v.ID,
 				Name:          v.Name,
 				Role:          v.Role,
@@ -164,8 +165,10 @@ func (s *VoiceCatalogStore) SaveCustomVoices(ctx context.Context, list []CustomV
 				Error:         v.Error,
 				CreatedAt:     v.CreatedAt,
 				UpdatedAt:     v.UpdatedAt,
-			}
-			_ = gdb.Clauses(clause.OnConflict{UpdateAll: true}).Create(&rec).Error
+			})
+		}
+		if len(records) > 0 {
+			_ = gdb.Clauses(clause.OnConflict{UpdateAll: true}).CreateInBatches(records, 100).Error
 		}
 	}
 

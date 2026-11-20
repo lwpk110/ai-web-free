@@ -149,13 +149,13 @@ func RegisterRouterWithDeps(deps RouterDeps) *gin.Engine {
 	})
 	rt.MCPRegistry = mcpHandler.Registry()
 
-	// 初始化基础前置参数（DPL、BasicCookies 等）
+	// 异步预热基础前置参数（DPL、BasicCookies 等），避免阻塞服务端口监听
 	proxyUrl := cfg.ProxyURL
 	if proxyUrl == "" {
 		proxyUrl = cfg.HTTPProxy
 	}
 	client := bogdanfinn.NewStdClient()
-	chatgpt.GetDpl(client, proxyUrl)
+	go chatgpt.GetDpl(client, proxyUrl)
 
 	router := gin.Default()
 	router.Use(middlewares.Cors)

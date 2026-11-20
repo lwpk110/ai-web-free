@@ -101,21 +101,36 @@ func Init() (*App, error) {
 	disabledMap := accounts.LoadDisabledFromFile("disabled_accounts.txt")
 
 	if database != nil {
-		for id, reason := range db.LoadRestrictionsFromDB(database, "banned") {
+		dbBanned := db.LoadRestrictionsFromDB(database, "banned")
+		newBanned := make(map[string]string)
+		for id, reason := range bannedMap {
+			if _, exists := dbBanned[id]; !exists {
+				newBanned[id] = reason
+			}
+		}
+		for id, reason := range dbBanned {
 			if _, ok := bannedMap[id]; !ok {
 				bannedMap[id] = reason
 			}
 		}
-		for id, reason := range db.LoadRestrictionsFromDB(database, "disabled") {
+		if len(newBanned) > 0 {
+			_ = db.SaveRestrictionsBatchToDB(database, newBanned, "banned")
+		}
+
+		dbDisabled := db.LoadRestrictionsFromDB(database, "disabled")
+		newDisabled := make(map[string]string)
+		for id, reason := range disabledMap {
+			if _, exists := dbDisabled[id]; !exists {
+				newDisabled[id] = reason
+			}
+		}
+		for id, reason := range dbDisabled {
 			if _, ok := disabledMap[id]; !ok {
 				disabledMap[id] = reason
 			}
 		}
-		for id, reason := range bannedMap {
-			_ = db.SaveRestrictionToDB(database, id, "banned", reason)
-		}
-		for id, reason := range disabledMap {
-			_ = db.SaveRestrictionToDB(database, id, "disabled", reason)
+		if len(newDisabled) > 0 {
+			_ = db.SaveRestrictionsBatchToDB(database, newDisabled, "disabled")
 		}
 	}
 	// 加载账号粘性代理绑定关系（保证重启后账号出口 IP 不漂移）
@@ -410,9 +425,6 @@ func Init() (*App, error) {
 		}
 		_ = chatgptPlugin.PersistAccessTokens()
 	})
-	if len(bannedMap) > 0 {
-		_ = chatgptPlugin.PersistAccessTokens()
-	}
 	reg := provider.NewRegistry()
 	provider.RegisterDefaultProviders(reg, chatgptPlugin)
 	provider.ApplyConfig(reg, &cfg)

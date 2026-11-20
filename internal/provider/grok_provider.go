@@ -248,6 +248,12 @@ func (p *GrokProvider) persistToDB() {
 	copy(list, p.accounts)
 	p.mu.RUnlock()
 
+	if len(list) == 0 {
+		return
+	}
+
+	records := make([]db.PoolAccountRecord, 0, len(list))
+	now := time.Now()
 	for _, a := range list {
 		if a == nil {
 			continue
@@ -267,14 +273,14 @@ func (p *GrokProvider) persistToDB() {
 			TotalCalls:   a.TotalCalls,
 			FailedCalls:  a.FailedCalls,
 			CreatedAt:    a.CreatedAt,
-			UpdatedAt:    time.Now(),
+			UpdatedAt:    now,
 		}
 		if rec.ID == "" {
 			rec.ID = uuid.NewString()
 			a.ID = rec.ID
 		}
 		if rec.CreatedAt.IsZero() {
-			rec.CreatedAt = time.Now()
+			rec.CreatedAt = now
 		}
 		if !a.CooldownUntil.IsZero() {
 			t := a.CooldownUntil
@@ -284,7 +290,11 @@ func (p *GrokProvider) persistToDB() {
 			t := a.LastUsed
 			rec.LastUsed = &t
 		}
-		_ = gdb.Clauses(clause.OnConflict{UpdateAll: true}).Create(&rec).Error
+		records = append(records, rec)
+	}
+
+	if len(records) > 0 {
+		_ = gdb.Clauses(clause.OnConflict{UpdateAll: true}).CreateInBatches(records, 100).Error
 	}
 }
 

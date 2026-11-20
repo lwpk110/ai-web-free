@@ -165,8 +165,8 @@ func appendPostgresConnectTimeout(dsn string, timeoutSec int) string {
 }
 
 // InitDB 初始化持久化数据库，支持纯 Go SQLite、PostgreSQL 与 MySQL，严格零 CGO。
-func InitDB(dsn string) (*gorm.DB, error) {
-	db, err := openDialectorAndMigrate(context.Background(), dsn, true, true, true)
+func InitDB(dsn string, extraModels ...any) (*gorm.DB, error) {
+	db, err := openDialectorAndMigrate(context.Background(), dsn, true, true, true, extraModels...)
 	if err != nil {
 		return nil, err
 	}

@@ -105,8 +105,10 @@ func NewStore(db *gorm.DB, secret string) (*Store, error) {
 		}
 	}
 	if db != nil {
-		if err := db.AutoMigrate(&Group{}, &Key{}); err != nil {
-			return nil, err
+		if !db.Migrator().HasTable(&Group{}) || !db.Migrator().HasTable(&Key{}) {
+			if err := db.AutoMigrate(&Group{}, &Key{}); err != nil {
+				return nil, err
+			}
 		}
 		var gs []*Group
 		var ks []*Key

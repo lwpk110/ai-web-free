@@ -35,12 +35,13 @@ func LoadProxiesFromDB(database *gorm.DB) ([]string, error) {
 	return urls, nil
 }
 
-// SaveProxiesToDB 批量增量写入代理列表至 SQLite 数据库
+// SaveProxiesToDB 批量增量写入代理列表至 SQLite / PostgreSQL 数据库
 func SaveProxiesToDB(database *gorm.DB, urls []string) error {
 	if database == nil || len(urls) == 0 {
 		return nil
 	}
 	now := time.Now()
+	records := make([]ProxyNodeRecord, 0, len(urls))
 	for _, raw := range urls {
 		clean := strings.TrimSpace(raw)
 		if clean == "" || strings.HasPrefix(clean, "#") {
@@ -50,20 +51,22 @@ func SaveProxiesToDB(database *gorm.DB, urls []string) error {
 		if parsed, err := url.Parse(clean); err == nil && parsed.Scheme != "" {
 			proto = parsed.Scheme
 		}
-		rec := ProxyNodeRecord{
+		records = append(records, ProxyNodeRecord{
 			ID:        proxyID(clean),
 			URL:       clean,
 			Protocol:  proto,
 			Status:    "active",
 			CreatedAt: now,
 			UpdatedAt: now,
-		}
-		_ = database.Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "url"}},
-			DoUpdates: clause.AssignmentColumns([]string{"status", "updated_at"}),
-		}).Create(&rec).Error
+		})
 	}
-	return nil
+	if len(records) == 0 {
+		return nil
+	}
+	return database.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "url"}},
+		DoUpdates: clause.AssignmentColumns([]string{"status", "updated_at"}),
+	}).CreateInBatches(records, 100).Error
 }
 
 // ReplaceProxiesInDB 全量替换数据库中的代理列表

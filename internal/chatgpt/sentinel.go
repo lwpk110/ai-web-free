@@ -112,8 +112,8 @@ type sentinelExtraSignals struct {
 
 // GetInitConfig 生成 25 元素的初始化配置数组（用于 sentinel/fingerprint）。
 func GetInitConfig() []interface{} {
+	script := GetRandomCachedScript()
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
-	script := cachedScripts[rng.Intn(len(cachedScripts))]
 	nowMs := float64(time.Now().UnixMilli())
 	perfNow := float64(int64(rng.Float64()*49000)+1000) + rng.Float64()
 	timeOrigin := nowMs - perfNow

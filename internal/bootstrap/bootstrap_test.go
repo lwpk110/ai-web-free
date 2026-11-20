@@ -137,3 +137,13 @@ func TestApplyPoolPolicyDefaultsTo15ForChatGPTFree(t *testing.T) {
 		t.Errorf("MinHealthy = %d, want 7 or 8", pol.MinHealthy)
 	}
 }
+
+func TestBenchmarkInitTiming(t *testing.T) {
+	t.Log("Starting Init timing test...")
+	app, err := Init()
+	if err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+	defer app.Cleanup()
+	t.Log("Init completed successfully!")
+}

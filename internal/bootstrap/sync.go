@@ -159,16 +159,14 @@ func SyncLocalFilesToDB(cfg *config.Config) (int, error) {
 	}
 
 	// 7. 同步 banned_accounts.txt 与 disabled_accounts.txt 至数据库
-	for id, reason := range accounts.LoadBannedFromFile("banned_accounts.txt") {
-		_ = db.SaveRestrictionToDB(database, id, "banned", reason)
-	}
-	for id, reason := range accounts.LoadDisabledFromFile("disabled_accounts.txt") {
-		_ = db.SaveRestrictionToDB(database, id, "disabled", reason)
-	}
+	_ = db.SaveRestrictionsBatchToDB(database, accounts.LoadBannedFromFile("banned_accounts.txt"), "banned")
+	_ = db.SaveRestrictionsBatchToDB(database, accounts.LoadDisabledFromFile("disabled_accounts.txt"), "disabled")
 
 	// 8. 同步 grok_accounts.txt 至数据库
 	if _, err := os.Stat("grok_accounts.txt"); err == nil {
 		if data, err := os.ReadFile("grok_accounts.txt"); err == nil {
+			var grokRecs []db.PoolAccountRecord
+			now := time.Now()
 			for _, line := range strings.Split(string(data), "\n") {
 				line = strings.TrimSpace(line)
 				if line == "" || strings.HasPrefix(line, "#") {
@@ -178,8 +176,8 @@ func SyncLocalFilesToDB(cfg *config.Config) (int, error) {
 					Provider:  "grok",
 					Type:      "free",
 					Status:    "active",
-					CreatedAt: time.Now(),
-					UpdatedAt: time.Now(),
+					CreatedAt: now,
+					UpdatedAt: now,
 				}
 				if strings.Contains(line, "|") {
 					parts := strings.Split(line, "|")
@@ -231,7 +229,10 @@ func SyncLocalFilesToDB(cfg *config.Config) (int, error) {
 						gRec.ID = "grok:" + gRec.Token
 					}
 				}
-				_ = database.Clauses(clause.OnConflict{UpdateAll: true}).Create(&gRec).Error
+				grokRecs = append(grokRecs, gRec)
+			}
+			if len(grokRecs) > 0 {
+				_ = database.Clauses(clause.OnConflict{UpdateAll: true}).CreateInBatches(grokRecs, 100).Error
 			}
 		}
 	}

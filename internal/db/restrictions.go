@@ -53,6 +53,35 @@ func SaveRestrictionToDB(database *gorm.DB, identifier, rType, reason string) er
 	}).Create(&rec).Error
 }
 
+// SaveRestrictionsBatchToDB 批量保存黑名单/禁用记录
+func SaveRestrictionsBatchToDB(database *gorm.DB, restrictions map[string]string, rType string) error {
+	if database == nil || len(restrictions) == 0 {
+		return nil
+	}
+	now := time.Now()
+	records := make([]AccountRestrictionRecord, 0, len(restrictions))
+	cleanType := strings.ToLower(strings.TrimSpace(rType))
+	for id, reason := range restrictions {
+		cleanID := strings.ToLower(strings.TrimSpace(id))
+		if cleanID == "" {
+			continue
+		}
+		records = append(records, AccountRestrictionRecord{
+			ID:        cleanID,
+			Type:      cleanType,
+			Reason:    strings.TrimSpace(reason),
+			CreatedAt: now,
+			UpdatedAt: now,
+		})
+	}
+	if len(records) == 0 {
+		return nil
+	}
+	return database.Clauses(clause.OnConflict{
+		UpdateAll: true,
+	}).CreateInBatches(records, 100).Error
+}
+
 // DeleteRestrictionFromDB 从数据库删除指定黑名单/禁用记录
 func DeleteRestrictionFromDB(database *gorm.DB, identifier, rType string) error {
 	if database == nil {

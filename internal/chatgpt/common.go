@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
@@ -35,8 +36,9 @@ var (
 	timeLayout         = "Mon Jan 2 2006 15:04:05"
 	BasicCookies       []*http.Cookie
 	cachedHardware     = 0
-	cachedScripts      = []string{}
-	cachedDpl          = ""
+	cachedScriptsMu    sync.RWMutex
+	cachedScripts      = []string{"https://cdn.oaistatic.com/_next/static/chunks/polyfills-78c92fac7aa8fdd8.js?dpl=baf36960d05dde6d8b941194fa4093fb5cb78c6a"}
+	cachedDpl          = "dpl=baf36960d05dde6d8b941194fa4093fb5cb78c6a"
 	cachedRequireProof = ""
 )
 
@@ -55,12 +57,26 @@ func init() {
 	cachedHardware = core + screen
 }
 
+// GetRandomCachedScript 线程安全地随机获取一个缓存的 script 标签链接
+func GetRandomCachedScript() string {
+	cachedScriptsMu.RLock()
+	defer cachedScriptsMu.RUnlock()
+	if len(cachedScripts) == 0 {
+		return "https://cdn.oaistatic.com/_next/static/chunks/polyfills-78c92fac7aa8fdd8.js?dpl=baf36960d05dde6d8b941194fa4093fb5cb78c6a"
+	}
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+	return cachedScripts[rng.Intn(len(cachedScripts))]
+}
+
 // GetDpl 从 ChatGPT 首页解析 script 标签和 dpl 参数。
 // 缓存结果,避免重复请求。
 func GetDpl(client httpclient.HttpClient, proxy string) {
 	requestURL := strings.Replace(BaseURL, "/backend-api", "", 1)
 
-	if len(cachedScripts) > 0 {
+	cachedScriptsMu.RLock()
+	hasScripts := len(cachedScripts) > 1
+	cachedScriptsMu.RUnlock()
+	if hasScripts {
 		return
 	}
 	if proxy != "" {
@@ -74,19 +90,28 @@ func GetDpl(client httpclient.HttpClient, proxy string) {
 	}
 	defer response.Body.Close()
 	doc, _ := goquery.NewDocumentFromReader(response.Body)
-	cachedScripts = nil
+	var parsedScripts []string
+	var newDpl string
 	doc.Find("script[src]").Each(func(i int, s *goquery.Selection) {
 		src, exists := s.Attr("src")
 		if exists {
-			cachedScripts = append(cachedScripts, src)
-			if cachedDpl == "" {
+			parsedScripts = append(parsedScripts, src)
+			if newDpl == "" {
 				idx := strings.Index(src, "dpl")
 				if idx >= 0 {
-					cachedDpl = src[idx:]
+					newDpl = src[idx:]
 				}
 			}
 		}
 	})
+	if len(parsedScripts) > 0 {
+		cachedScriptsMu.Lock()
+		cachedScripts = parsedScripts
+		if newDpl != "" {
+			cachedDpl = newDpl
+		}
+		cachedScriptsMu.Unlock()
+	}
 	if BasicCookies == nil {
 		for _, cookie := range client.GetCookies("https://chatgpt.com") {
 			// __Secure-next-auth.callback-url 在登录后服务端会下发,这里强制为根路径
@@ -95,10 +120,6 @@ func GetDpl(client httpclient.HttpClient, proxy string) {
 			}
 			BasicCookies = append(BasicCookies, cookie)
 		}
-	}
-	if len(cachedScripts) == 0 {
-		cachedScripts = append(cachedScripts, "https://cdn.oaistatic.com/_next/static/chunks/polyfills-78c92fac7aa8fdd8.js?dpl=baf36960d05dde6d8b941194fa4093fb5cb78c6a")
-		cachedDpl = "dpl=baf36960d05dde6d8b941194fa4093fb5cb78c6a"
 	}
 }
 
