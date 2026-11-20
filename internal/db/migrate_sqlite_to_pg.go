@@ -27,6 +27,9 @@ func AutoMigrateSQLiteToPostgres(localSQLitePath string, targetPG *gorm.DB) erro
 	if err != nil {
 		return fmt.Errorf("打开本地 SQLite 待迁移数据失败: %w", err)
 	}
+	if sqlDB, closeErr := srcDB.DB(); closeErr == nil {
+		defer sqlDB.Close()
+	}
 
 	var targetAccountCount int64
 	_ = targetPG.Model(&PoolAccountRecord{}).Count(&targetAccountCount)

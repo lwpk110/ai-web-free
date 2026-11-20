@@ -5,19 +5,24 @@ import {
   Check,
   Copy,
   Cpu,
+  Database,
   Download,
   RefreshCw,
   Server,
   Shield,
+  Upload,
   Zap,
 } from "lucide-react";
 import {
   cancelKamiLogin,
+  fetchDBSyncStatus,
   fetchLogs,
   fetchOverview,
   fetchProxies,
   fetchServerStatus,
+  triggerDBSync,
   type AuditEntry,
+  type DBSyncStatus,
   type OverviewResponse,
   type ProxyNodeStatus,
   type ServerStatusReport,
@@ -119,6 +124,10 @@ export const OverviewView: React.FC<{
   const [serverStatus, setServerStatus] = useState<ServerStatusReport | null>(
     null
   );
+  const [dbSync, setDbSync] = useState<DBSyncStatus | null>(null);
+  const [syncingDir, setSyncingDir] = useState<"both" | "push" | "pull" | null>(
+    null
+  );
   const [recentLogs, setRecentLogs] = useState<AuditEntry[]>([]);
   const [trendLogs, setTrendLogs] = useState<AuditEntry[]>([]);
   const [proxyNodes, setProxyNodes] = useState<ProxyNodeStatus[]>([]);
@@ -140,14 +149,16 @@ export const OverviewView: React.FC<{
     setLoading(true);
     setError(null);
     try {
-      const [ov, logsRes, proxiesRes, sysRes] = await Promise.all([
+      const [ov, logsRes, proxiesRes, sysRes, syncRes] = await Promise.all([
         fetchOverview(),
         fetchLogs({ filter: "all", limit: 60 }),
         fetchProxies(),
         fetchServerStatus().catch(() => null),
+        fetchDBSyncStatus().catch(() => null),
       ]);
       setOverview(ov);
       if (sysRes) setServerStatus(sysRes);
+      if (syncRes) setDbSync(syncRes);
       const entries = logsRes.entries || [];
       setTrendLogs(entries);
       setRecentLogs(entries.slice(0, 6));
@@ -265,6 +276,34 @@ export const OverviewView: React.FC<{
       setError(e?.message || "取消排队失败");
     } finally {
       setCancellingQueue(false);
+    }
+  };
+
+  const handleTriggerDBSync = async (direction: "both" | "push" | "pull") => {
+    setSyncingDir(direction);
+    setError(null);
+    setQueueNotice(null);
+    try {
+      const res = await triggerDBSync(direction);
+      if (res.status) {
+        setDbSync(res.status);
+      }
+      if (res.ok) {
+        const label =
+          direction === "push"
+            ? "推送至云库"
+            : direction === "pull"
+              ? "从云库拉取"
+              : "双向同步";
+        setQueueNotice(`已完成数据库${label}（待推送 ${res.status?.outbox_pending ?? 0} 条，耗时 ${res.status?.last_sync_latency_ms ?? 0}ms）`);
+      } else {
+        setError(res.error || "数据库同步未完全成功");
+      }
+      await load();
+    } catch (e: any) {
+      setError(e?.message || "触发数据库同步失败");
+    } finally {
+      setSyncingDir(null);
     }
   };
 
@@ -808,6 +847,192 @@ export const OverviewView: React.FC<{
               </div>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Materialized SQLite <-> Cloud DB Sync Card */}
+      {dbSync && (
+        <div className="p-card rounded-2xl p-4 space-y-3 text-xs">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <Database size={15} />
+              <h2 className="text-sm font-semibold">数据库物化同步引擎</h2>
+              <span className="px-2 py-0.5 rounded-full border z-border z-muted z-text-muted font-medium">
+                {dbSync.mode === "materialized"
+                  ? "SQLite 物化 + 异步云同步"
+                  : dbSync.mode === "direct"
+                    ? "云库直连"
+                    : "纯本地 SQLite"}
+              </span>
+              {(() => {
+                const st = dbSync.state;
+                const pill =
+                  !dbSync.enabled
+                    ? "z-muted z-text-muted"
+                    : st === "degraded" || st === "stopped"
+                      ? "z-pill-warn"
+                      : "z-pill-success";
+                const dot =
+                  !dbSync.enabled
+                    ? "status-dot-amber"
+                    : st === "degraded" || st === "stopped"
+                      ? "status-dot-amber"
+                      : "status-dot-green";
+                const text = !dbSync.enabled
+                  ? "未启用"
+                  : st === "idle"
+                    ? "已同步"
+                    : st === "connecting"
+                      ? "连接中"
+                      : st === "hydrating"
+                        ? "初次水合"
+                        : st === "syncing"
+                          ? "同步中"
+                          : st === "degraded"
+                            ? "云端降级"
+                            : "已停止";
+                return (
+                  <span
+                    className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full border font-medium ${pill}`}
+                  >
+                    <span className={dot} />
+                    <span>{text}</span>
+                  </span>
+                );
+              })()}
+            </div>
+
+            {dbSync.enabled && (
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleTriggerDBSync("push")}
+                  disabled={syncingDir !== null}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border z-border z-surface z-ghost-btn font-medium cursor-pointer disabled:opacity-50"
+                >
+                  <Upload size={12} />
+                  <span>{syncingDir === "push" ? "推送中..." : "仅推送"}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleTriggerDBSync("pull")}
+                  disabled={syncingDir !== null}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border z-border z-surface z-ghost-btn font-medium cursor-pointer disabled:opacity-50"
+                >
+                  <Download size={12} />
+                  <span>{syncingDir === "pull" ? "拉取中..." : "仅拉取"}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleTriggerDBSync("both")}
+                  disabled={syncingDir !== null}
+                  className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg z-primary-btn font-medium cursor-pointer disabled:opacity-50"
+                >
+                  <RefreshCw
+                    size={12}
+                    className={syncingDir === "both" ? "animate-spin" : ""}
+                  />
+                  <span>
+                    {syncingDir === "both" ? "同步中..." : "立即双向同步"}
+                  </span>
+                </button>
+              </div>
+            )}
+          </div>
+
+          {dbSync.enabled ? (
+            <>
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 z-text-muted font-mono-num">
+                <span>本地物化: {dbSync.local_path || "data/ai-web-free.db"}</span>
+                {dbSync.cloud_target && <span>云端目标: {dbSync.cloud_target}</span>}
+                <span>
+                  防抖推送: {dbSync.push_interval || "5s"} · 定时拉取:{" "}
+                  {dbSync.pull_interval && dbSync.pull_interval !== "0s"
+                    ? dbSync.pull_interval
+                    : "仅启动/手动"}
+                </span>
+              </div>
+
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                <div
+                  className="p-2.5 rounded-xl"
+                  style={{
+                    background: "var(--bg-input)",
+                    border: "1px solid var(--hairline)",
+                  }}
+                >
+                  <div className="z-text-muted">Outbox 待推送</div>
+                  <div className="mt-1 font-mono-num text-sm font-semibold">
+                    {dbSync.outbox_pending} 条
+                  </div>
+                </div>
+                <div
+                  className="p-2.5 rounded-xl"
+                  style={{
+                    background: "var(--bg-input)",
+                    border: "1px solid var(--hairline)",
+                  }}
+                >
+                  <div className="z-text-muted">最近同步延迟</div>
+                  <div className="mt-1 font-mono-num text-sm font-semibold">
+                    {dbSync.last_sync_latency_ms} ms
+                  </div>
+                </div>
+                <div
+                  className="p-2.5 rounded-xl"
+                  style={{
+                    background: "var(--bg-input)",
+                    border: "1px solid var(--hairline)",
+                  }}
+                >
+                  <div className="z-text-muted">累计推 / 拉 / 删</div>
+                  <div className="mt-1 font-mono-num text-sm font-semibold">
+                    {dbSync.total_pushed} / {dbSync.total_pulled} /{" "}
+                    {dbSync.total_deleted}
+                  </div>
+                </div>
+                <div
+                  className="p-2.5 rounded-xl"
+                  style={{
+                    background: "var(--bg-input)",
+                    border: "1px solid var(--hairline)",
+                  }}
+                >
+                  <div className="z-text-muted">最近推 / 拉时间</div>
+                  <div className="mt-1 font-mono-num text-xs font-medium truncate">
+                    {dbSync.last_push_at
+                      ? formatClockTime(dbSync.last_push_at)
+                      : "未推送"}{" "}
+                    /{" "}
+                    {dbSync.last_pull_at
+                      ? formatClockTime(dbSync.last_pull_at)
+                      : "未拉取"}
+                  </div>
+                </div>
+              </div>
+
+              {(dbSync.last_error || dbSync.next_retry_at) && (
+                <div className="px-3 py-2 rounded-xl border z-pill-warn flex flex-wrap items-center justify-between gap-2">
+                  <span className="truncate">
+                    云端同步异常（连续失败 {dbSync.consecutive_failures} 次，本地
+                    SQLite 读写不受影响）: {dbSync.last_error}
+                  </span>
+                  {dbSync.next_retry_at && (
+                    <span className="font-mono-num shrink-0">
+                      下次重试 {formatClockTime(dbSync.next_retry_at)}
+                    </span>
+                  )}
+                </div>
+              )}
+            </>
+          ) : (
+            <div className="z-text-muted">
+              当前未开启 SQLite 物化同步（<code>DB_MATERIALIZE_ENABLED=false</code>
+              ）。若配置了远程云库（如 Neon PostgreSQL），建议在{" "}
+              <code>.env</code> 设置 <code>DB_MATERIALIZE_ENABLED=true</code>{" "}
+              以启用本地毫秒级读写与后台异步双向同步。
+            </div>
+          )}
         </div>
       )}
 

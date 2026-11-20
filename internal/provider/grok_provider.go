@@ -4,9 +4,11 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"net/url"
@@ -16,6 +18,8 @@ import (
 	"sync"
 	"time"
 
+	"ai-web-free/httpclient"
+	"ai-web-free/httpclient/bogdanfinn"
 	"ai-web-free/internal/accounts"
 	"ai-web-free/internal/db"
 	"ai-web-free/internal/proxy"
@@ -25,6 +29,8 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
+
+const grokBrowserUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
 
 var (
 	ErrNoGrokAccountAvailable = errors.New("no active grok account available in pool")
@@ -69,14 +75,15 @@ func (a *grokAccount) occupiesSlot() bool {
 
 // GrokProvider xAI Grok.com / X Web 免费号池插件
 type GrokProvider struct {
-	mu          sync.RWMutex
-	baseURL     string
-	accounts    []*grokAccount
-	idx         int
-	policy      accounts.PoolPolicy
-	lastRotate  time.Time
-	proxyPool   *proxy.Pool
-	persistFile string
+	mu           sync.RWMutex
+	baseURL      string
+	assetBaseURL string
+	accounts     []*grokAccount
+	idx          int
+	policy       accounts.PoolPolicy
+	lastRotate   time.Time
+	proxyPool    *proxy.Pool
+	persistFile  string
 
 	grokLoginMu        sync.Mutex
 	grokLoginTasks     map[string]*KamiLoginTask
@@ -93,6 +100,7 @@ type GrokProvider struct {
 
 	modelMu        sync.RWMutex
 	cachedModels   []string
+	modelModes     map[string]string
 	modelsCachedAt time.Time
 	defaultModel   string
 }
@@ -104,9 +112,11 @@ func NewGrokProvider(pPool *proxy.Pool, baseURL, persistFile string, policy acco
 	}
 	p := &GrokProvider{
 		baseURL:           baseURL,
+		assetBaseURL:      "https://assets.grok.com",
 		proxyPool:         pPool,
 		persistFile:       persistFile,
 		policy:            policy,
+		modelModes:        make(map[string]string),
 		grokLoginTasks:    make(map[string]*KamiLoginTask),
 		grokLoginCooldown: 10 * time.Second,
 		grokLoginFn: func(ctx context.Context, card GrokCardAccount, options GrokLoginOptions) (string, error) {
@@ -128,6 +138,13 @@ func NewGrokProvider(pPool *proxy.Pool, baseURL, persistFile string, policy acco
 	p.persistToDB()
 	p.Rebalance()
 	return p
+}
+
+// SetAssetBaseURL 设置静态资源下载基准地址（用于单测与反代映射）
+func (p *GrokProvider) SetAssetBaseURL(url string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.assetBaseURL = strings.TrimRight(strings.TrimSpace(url), "/")
 }
 
 func (p *GrokProvider) loadFromDB() {
@@ -662,7 +679,8 @@ func (p *GrokProvider) defaultGrokModel() string {
 
 type grokModelsResponse struct {
 	Models []struct {
-		ModelID string `json:"modelId"`
+		ModelID   string `json:"modelId"`
+		ModelMode string `json:"modelMode,omitempty"`
 	} `json:"models"`
 	DefaultFreeModel string `json:"defaultFreeModel"`
 	DefaultAnonModel string `json:"defaultAnonModel"`
@@ -693,7 +711,7 @@ func (p *GrokProvider) RefreshModels(ctx context.Context) ([]string, error) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36")
+	req.Header.Set("User-Agent", grokBrowserUserAgent)
 	req.Header.Set("Origin", p.baseURL)
 	req.Header.Set("Referer", p.baseURL+"/")
 	if cookie != "" {
@@ -738,8 +756,158 @@ func (p *GrokProvider) RefreshModels(ctx context.Context) ([]string, error) {
 	p.cachedModels = models
 	p.defaultModel = defaultModel
 	p.modelsCachedAt = time.Now()
+	if p.modelModes == nil {
+		p.modelModes = make(map[string]string)
+	}
+	for _, item := range payload.Models {
+		if item.ModelID != "" && item.ModelMode != "" {
+			p.modelModes[item.ModelID] = item.ModelMode
+		}
+	}
 	p.modelMu.Unlock()
 	return p.CachedModels(), nil
+}
+
+// resolveUpstreamModel 将用户传入的模型别名（如 grok-2-image / grok）映射为 Grok Web 可执行的模型与模式。
+func (p *GrokProvider) resolveUpstreamModel(ctx context.Context, requested string, forImage bool) (string, string) {
+	requested = strings.TrimSpace(requested)
+	p.modelMu.RLock()
+	cachedDef := p.defaultModel
+	mode := ""
+	if p.modelModes != nil && requested != "" {
+		mode = p.modelModes[requested]
+	}
+	p.modelMu.RUnlock()
+
+	targetModel := requested
+	if targetModel == "" || strings.EqualFold(targetModel, "grok") || strings.EqualFold(targetModel, "grok-2-image") || strings.EqualFold(targetModel, "aurora") {
+		if cachedDef != "" {
+			targetModel = cachedDef
+		} else {
+			targetModel = "grok-3"
+		}
+	}
+
+	if mode == "" {
+		p.modelMu.RLock()
+		if p.modelModes != nil {
+			mode = p.modelModes[targetModel]
+		}
+		p.modelMu.RUnlock()
+	}
+
+	if mode == "" {
+		switch {
+		case strings.HasPrefix(targetModel, "grok-4-1-thinking"):
+			mode = "MODEL_MODE_GROK_4_1_THINKING"
+		case strings.HasPrefix(targetModel, "grok-420"):
+			mode = "MODEL_MODE_GROK_420"
+		case strings.HasPrefix(targetModel, "grok-3"):
+			mode = "MODEL_MODE_FAST"
+		default:
+			mode = "MODEL_MODE_FAST"
+		}
+	}
+
+	return targetModel, mode
+}
+
+type grokAccountLease struct {
+	ID     string
+	Email  string
+	Cookie string
+	Proxy  string
+}
+
+func (p *GrokProvider) leaseAccount(excludedIDs map[string]bool) (*grokAccountLease, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	n := len(p.accounts)
+	if n == 0 {
+		return nil, ErrNoGrokAccountAvailable
+	}
+
+	now := time.Now()
+	for i := 0; i < n; i++ {
+		candidateIdx := (p.idx + i) % n
+		a := p.accounts[candidateIdx]
+		if excludedIDs != nil && excludedIDs[a.ID] {
+			continue
+		}
+		if a.Status == accounts.StatusRateLimited && !a.IsInCooldown(now) {
+			a.Status = accounts.StatusActive
+			a.CooldownUntil = time.Time{}
+		}
+		if a.Status == accounts.StatusActive && !a.IsInCooldown(now) && a.Cookie != "" {
+			p.idx = (candidateIdx + 1) % n
+			a.TotalCalls++
+			a.LastUsed = now
+			return &grokAccountLease{
+				ID:     a.ID,
+				Email:  a.Email,
+				Cookie: a.Cookie,
+				Proxy:  a.Proxy,
+			}, nil
+		}
+	}
+	return nil, ErrNoGrokAccountAvailable
+}
+
+func (p *GrokProvider) reportOutcomeByID(id string, success bool, statusCode int, errMsg string) {
+	p.mu.Lock()
+	var acct *grokAccount
+	for _, a := range p.accounts {
+		if a.ID == id {
+			acct = a
+			break
+		}
+	}
+	if acct == nil {
+		p.mu.Unlock()
+		return
+	}
+
+	now := time.Now()
+	if success {
+		acct.LastError = ""
+		p.mu.Unlock()
+		return
+	}
+
+	acct.FailedCalls++
+	acct.LastError = errMsg
+	needPersist := false
+	needRebalance := false
+
+	if statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden {
+		acct.Status = accounts.StatusExpired
+		acct.LastError = fmt.Sprintf("凭据已失效 HTTP %d: %s", statusCode, errMsg)
+		needPersist = true
+		needRebalance = true
+	} else if statusCode == http.StatusTooManyRequests {
+		acct.Status = accounts.StatusRateLimited
+		acct.CooldownUntil = now.Add(10 * time.Minute)
+		needPersist = true
+	}
+	if needRebalance {
+		p.rebalanceLocked(now)
+	}
+	p.mu.Unlock()
+
+	if needPersist {
+		go p.persistToDB()
+	}
+}
+
+func sanitizeTraceErr(errStr string) string {
+	errStr = strings.ReplaceAll(errStr, ":", "_")
+	errStr = strings.ReplaceAll(errStr, " ", "_")
+	errStr = strings.ReplaceAll(errStr, "\"", "")
+	if len(errStr) > 40 {
+		return errStr[:40]
+	}
+	return errStr
 }
 
 func (p *GrokProvider) reportStatus(idx int, success bool, isRateLimit bool, errMsg string) {
@@ -1228,11 +1396,15 @@ func (p *GrokProvider) ExecuteAccountActionWithOpts(id, action string, headless 
 		if err != nil {
 			return nil, err
 		}
-		message := fmt.Sprintf("账号 %s 已加入 Grok 后台重登任务（将实时回显执行阶段）", email)
+		modeHint := "有头可见模式，遇到人机验证请在弹出的 Chrome 窗口中完成"
+		if headless {
+			modeHint = "无头模式"
+		}
+		message := fmt.Sprintf("账号 %s 已加入 Grok 重登任务（%s）", email, modeHint)
 		if task.CurrentAccountID != "" && task.CurrentAccountID != id {
 			for index, queuedID := range task.QueuedAccountIDs {
 				if queuedID == id {
-					message = fmt.Sprintf("账号 %s 已加入 Grok 重登队列（排队 #%d）", email, index+1)
+					message = fmt.Sprintf("账号 %s 已加入 Grok 重登队列（排队 #%d，%s）", email, index+1, modeHint)
 					break
 				}
 			}
@@ -1370,20 +1542,12 @@ func (p *GrokProvider) UpdateAccountCookie(id, cookie string) (map[string]interf
 
 // ChatCompletion 对话实现（支持流式 SSE 与完整文本）
 func (p *GrokProvider) ChatCompletion(ctx context.Context, originalReq officialtypes.APIRequest) (<-chan string, func(), error) {
-	acct, idx, err := p.nextAccount()
+	lease, err := p.leaseAccount(nil)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	modelName := originalReq.Model
-	if modelName == "" || strings.EqualFold(modelName, "grok") {
-		modelName = p.defaultGrokModel()
-		if modelName == "" {
-			if models, err := p.RefreshModels(ctx); err == nil && len(models) > 0 {
-				modelName = p.defaultGrokModel()
-			}
-		}
-	}
+	upstreamModel, modelMode := p.resolveUpstreamModel(ctx, originalReq.Model, false)
 
 	// 拼接提示词
 	var promptBuilder strings.Builder
@@ -1400,12 +1564,13 @@ func (p *GrokProvider) ChatCompletion(ctx context.Context, originalReq officialt
 
 	payload := map[string]interface{}{
 		"temporary":             true,
-		"modelName":             modelName,
+		"modelName":             upstreamModel,
+		"modelMode":             modelMode,
 		"message":               finalPrompt,
 		"fileAttachments":       []interface{}{},
 		"imageAttachments":      []interface{}{},
 		"disableSearch":         false,
-		"enableImageGeneration": true,
+		"enableImageGeneration": false,
 		"returnImageBytes":      false,
 		"returnBuffers":         true,
 	}
@@ -1422,27 +1587,32 @@ func (p *GrokProvider) ChatCompletion(ctx context.Context, originalReq officialt
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36")
+	req.Header.Set("User-Agent", grokBrowserUserAgent)
 	req.Header.Set("Origin", p.baseURL)
 	req.Header.Set("Referer", p.baseURL+"/")
-	req.Header.Set("Cookie", acct.Cookie)
+	req.Header.Set("Cookie", lease.Cookie)
 	req.Header.Set("Accept", "text/event-stream")
 
-	client := p.createHTTPClient(acct.Proxy)
+	client := p.createHTTPClient(lease.Proxy)
 	resp, err := client.Do(req)
 	if err != nil {
-		p.reportStatus(idx, false, false, err.Error())
+		p.reportOutcomeByID(lease.ID, false, 0, err.Error())
 		return nil, nil, err
 	}
 
 	if resp.StatusCode == 429 {
 		resp.Body.Close()
-		p.reportStatus(idx, false, true, "Rate limit 429")
+		p.reportOutcomeByID(lease.ID, false, 429, "Rate limit 429")
 		return nil, nil, errors.New("grok upstream rate limited (429)")
+	}
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		resp.Body.Close()
+		p.reportOutcomeByID(lease.ID, false, resp.StatusCode, "Invalid credentials")
+		return nil, nil, fmt.Errorf("grok upstream invalid credentials (%d)", resp.StatusCode)
 	}
 	if resp.StatusCode != http.StatusOK {
 		resp.Body.Close()
-		p.reportStatus(idx, false, false, fmt.Sprintf("HTTP %d", resp.StatusCode))
+		p.reportOutcomeByID(lease.ID, false, resp.StatusCode, fmt.Sprintf("HTTP %d", resp.StatusCode))
 		return nil, nil, fmt.Errorf("grok upstream returned HTTP %d", resp.StatusCode)
 	}
 
@@ -1492,67 +1662,82 @@ func (p *GrokProvider) ChatCompletion(ctx context.Context, originalReq officialt
 				}
 			}
 		}
-		p.reportStatus(idx, true, false, "")
+		p.reportOutcomeByID(lease.ID, true, 200, "")
 	}()
 
 	return tokenChan, cancel, nil
 }
 
-// GenerateImage 使用 Grok Aurora 逆向生图
-func (p *GrokProvider) GenerateImage(ctx context.Context, prompt, model, size string) (string, error) {
-	acct, idx, err := p.nextAccount()
-	if err != nil {
-		return "", err
-	}
+// GrokImageItem 单张生成的图像元数据。
+type GrokImageItem struct {
+	URL           string `json:"url,omitempty"`
+	B64JSON       string `json:"b64_json,omitempty"`
+	RevisedPrompt string `json:"revised_prompt,omitempty"`
+}
 
-	modelName := "grok-2-image"
-	payload := map[string]interface{}{
-		"temporary":             true,
-		"modelName":             modelName,
-		"message":               "Generate an image: " + prompt,
-		"fileAttachments":       []interface{}{},
-		"imageAttachments":      []interface{}{},
-		"disableSearch":         true,
-		"enableImageGeneration": true,
-		"returnImageBytes":      false,
-		"returnBuffers":         true,
-	}
+// GrokImageAttemptSpan 单次 Grok 账号生图尝试追踪跨度。
+type GrokImageAttemptSpan struct {
+	AccountID string `json:"account_id"`
+	Email     string `json:"email"`
+	Proxy     string `json:"proxy"`
+	Status    int    `json:"status"`
+	Error     string `json:"error,omitempty"`
+}
 
-	bodyBytes, _ := json.Marshal(payload)
-	reqURL := p.baseURL + "/rest/app-chat/conversations/new"
-	req, err := http.NewRequestWithContext(ctx, "POST", reqURL, bytes.NewReader(bodyBytes))
-	if err != nil {
-		return "", err
-	}
+// GrokImageResult Grok 图像生成结果及容灾追踪元数据。
+type GrokImageResult struct {
+	Images     []GrokImageItem        `json:"images"`
+	Model      string                 `json:"model"`
+	AccountID  string                 `json:"account_id"`
+	Email      string                 `json:"email"`
+	Proxy      string                 `json:"proxy"`
+	Attempts   int                    `json:"attempts"`
+	DurationMs int64                  `json:"duration_ms"`
+	Trace      string                 `json:"trace"`
+	Spans      []GrokImageAttemptSpan `json:"spans"`
+}
 
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-	req.Header.Set("Origin", p.baseURL)
-	req.Header.Set("Referer", p.baseURL+"/")
-	req.Header.Set("Cookie", acct.Cookie)
-
-	client := p.createHTTPClient(acct.Proxy)
-	resp, err := client.Do(req)
-	if err != nil {
-		p.reportStatus(idx, false, false, err.Error())
-		return "", err
+func parseGrokCardAttachmentJSON(rawJSON string) string {
+	rawJSON = strings.TrimSpace(rawJSON)
+	if rawJSON == "" {
+		return ""
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == 429 {
-		p.reportStatus(idx, false, true, "Rate limit 429")
-		return "", errors.New("grok image rate limited")
+	var card struct {
+		ImageChunk struct {
+			ImageURL  string `json:"imageUrl"`
+			ImageUUID string `json:"imageUuid"`
+		} `json:"image_chunk"`
+		ImageURL string `json:"imageUrl"`
+		URL      string `json:"url"`
 	}
-	if resp.StatusCode != http.StatusOK {
-		p.reportStatus(idx, false, false, fmt.Sprintf("HTTP %d", resp.StatusCode))
-		return "", fmt.Errorf("grok upstream HTTP %d", resp.StatusCode)
+	if err := json.Unmarshal([]byte(rawJSON), &card); err == nil {
+		if card.ImageChunk.ImageURL != "" {
+			return card.ImageChunk.ImageURL
+		}
+		if card.ImageURL != "" {
+			return card.ImageURL
+		}
+		if card.URL != "" {
+			return card.URL
+		}
 	}
+	if idx := strings.Index(rawJSON, `"imageUrl":"`); idx != -1 {
+		rest := rawJSON[idx+12:]
+		if end := strings.Index(rest, `"`); end != -1 {
+			return rest[:end]
+		}
+	}
+	return ""
+}
 
-	scanner := bufio.NewScanner(resp.Body)
+func parseGrokImageStream(r io.Reader) (string, error) {
+	scanner := bufio.NewScanner(r)
 	buf := make([]byte, 64*1024)
-	scanner.Buffer(buf, 1024*1024)
+	scanner.Buffer(buf, 2*1024*1024)
 
 	var foundURL string
+	var lastErr string
+
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
@@ -1562,9 +1747,19 @@ func (p *GrokProvider) GenerateImage(ctx context.Context, prompt, model, size st
 			line = strings.TrimPrefix(line, "data: ")
 		}
 
-		var parsed struct {
+		var chunk struct {
+			Error *struct {
+				Message string `json:"message"`
+				Code    any    `json:"code"`
+			} `json:"error"`
 			Result struct {
 				Response struct {
+					CardAttachment struct {
+						JSONData string `json:"jsonData"`
+					} `json:"cardAttachment"`
+					ModelResponse struct {
+						CardAttachmentsJson []string `json:"cardAttachmentsJson"`
+					} `json:"modelResponse"`
 					ModelOutput struct {
 						ImageURLs []string `json:"imageUrls"`
 					} `json:"modelOutput"`
@@ -1572,23 +1767,361 @@ func (p *GrokProvider) GenerateImage(ctx context.Context, prompt, model, size st
 			} `json:"result"`
 			ImageURL string `json:"imageUrl"`
 		}
-		if err := json.Unmarshal([]byte(line), &parsed); err == nil {
-			if len(parsed.Result.Response.ModelOutput.ImageURLs) > 0 {
-				foundURL = parsed.Result.Response.ModelOutput.ImageURLs[0]
+
+		if err := json.Unmarshal([]byte(line), &chunk); err == nil {
+			if chunk.Error != nil && chunk.Error.Message != "" {
+				lastErr = chunk.Error.Message
+			}
+			// 1. Check cardAttachment.jsonData
+			if chunk.Result.Response.CardAttachment.JSONData != "" {
+				if u := parseGrokCardAttachmentJSON(chunk.Result.Response.CardAttachment.JSONData); u != "" {
+					foundURL = u
+					break
+				}
+			}
+			// 2. Check modelResponse.cardAttachmentsJson
+			for _, cardStr := range chunk.Result.Response.ModelResponse.CardAttachmentsJson {
+				if u := parseGrokCardAttachmentJSON(cardStr); u != "" {
+					foundURL = u
+					break
+				}
+			}
+			if foundURL != "" {
 				break
 			}
-			if parsed.ImageURL != "" {
-				foundURL = parsed.ImageURL
+			// 3. Check modelOutput.imageUrls
+			if len(chunk.Result.Response.ModelOutput.ImageURLs) > 0 && chunk.Result.Response.ModelOutput.ImageURLs[0] != "" {
+				foundURL = chunk.Result.Response.ModelOutput.ImageURLs[0]
+				break
+			}
+			// 4. Check top-level imageUrl
+			if chunk.ImageURL != "" {
+				foundURL = chunk.ImageURL
 				break
 			}
 		}
 	}
 
 	if foundURL == "" {
-		p.reportStatus(idx, false, false, "no image url returned")
+		if lastErr != "" {
+			return "", fmt.Errorf("grok stream error: %s", lastErr)
+		}
 		return "", errors.New("grok upstream did not return image url")
 	}
-
-	p.reportStatus(idx, true, false, "")
 	return foundURL, nil
+}
+
+func resolveGrokAssetURL(assetBaseURL, raw string) string {
+	raw = strings.TrimSpace(raw)
+	if strings.HasPrefix(raw, "http://") || strings.HasPrefix(raw, "https://") {
+		return raw
+	}
+	if assetBaseURL == "" {
+		assetBaseURL = "https://assets.grok.com"
+	}
+	assetBaseURL = strings.TrimRight(assetBaseURL, "/")
+	raw = strings.TrimLeft(raw, "/")
+	return assetBaseURL + "/" + raw
+}
+
+func (p *GrokProvider) downloadGrokImageAsset(ctx context.Context, rawURL, cookie, proxyURL string) ([]byte, error) {
+	p.mu.RLock()
+	assetBaseURL := p.assetBaseURL
+	p.mu.RUnlock()
+	targetURL := resolveGrokAssetURL(assetBaseURL, rawURL)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", grokBrowserUserAgent)
+	req.Header.Set("Referer", p.baseURL+"/")
+	req.Header.Set("Origin", p.baseURL)
+	if cookie != "" {
+		req.Header.Set("Cookie", cookie)
+	}
+
+	client := p.createHTTPClient(proxyURL)
+	resp, err := client.Do(req)
+	if err != nil || (resp != nil && resp.StatusCode == http.StatusForbidden) {
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+		// 备用：若标准 net/http 遭遇 403 挑战，使用 Bogdanfinn TLS 客户端穿透
+		tlsClient := bogdanfinn.NewStdClient()
+		if proxyURL != "" {
+			_ = tlsClient.SetProxy(proxyURL)
+		}
+		headers := httpclient.Headers{
+			"User-Agent": grokBrowserUserAgent,
+			"Referer":    p.baseURL + "/",
+			"Origin":     p.baseURL,
+		}
+		if cookie != "" {
+			headers["Cookie"] = cookie
+		}
+		tlsResp, doErr := tlsClient.Request(httpclient.GET, targetURL, headers, nil, nil)
+		if doErr == nil && tlsResp.StatusCode == http.StatusOK {
+			defer tlsResp.Body.Close()
+			return io.ReadAll(tlsResp.Body)
+		}
+		if tlsResp != nil {
+			_ = tlsResp.Body.Close()
+		}
+		if err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("download grok asset returned HTTP %d", resp.StatusCode)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("download grok asset returned HTTP %d", resp.StatusCode)
+	}
+	return io.ReadAll(resp.Body)
+}
+
+// GenerateImageAsset 使用 Grok Web Aurora 逆向生图（带多账号容灾轮转与资源安全回传）。
+func (p *GrokProvider) GenerateImageAsset(ctx context.Context, prompt, requestedModel, size string, count int) (GrokImageResult, error) {
+	start := time.Now()
+	res := GrokImageResult{
+		Model: requestedModel,
+		Spans: make([]GrokImageAttemptSpan, 0, 3),
+	}
+
+	upstreamModel, modelMode := p.resolveUpstreamModel(ctx, requestedModel, true)
+	if count <= 0 {
+		count = 1
+	}
+	if count > 4 {
+		count = 4
+	}
+
+	excluded := make(map[string]bool)
+	maxAttempts := 3
+	var lastErr error
+	var traceParts []string
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		lease, err := p.leaseAccount(excluded)
+		if err != nil {
+			if lastErr == nil {
+				lastErr = err
+			}
+			break
+		}
+		excluded[lease.ID] = true
+		res.AccountID = lease.ID
+		res.Email = lease.Email
+		res.Proxy = lease.Proxy
+		res.Attempts = attempt
+
+		payload := map[string]interface{}{
+			"temporary":             true,
+			"modelName":             upstreamModel,
+			"modelMode":             modelMode,
+			"message":               "Generate an image: " + prompt,
+			"fileAttachments":       []interface{}{},
+			"imageAttachments":      []interface{}{},
+			"disableSearch":         true,
+			"enableImageGeneration": true,
+			"returnImageBytes":      false,
+			"enableImageStreaming":  false,
+			"imageGenerationCount":  count,
+			"toolOverrides":         map[string]interface{}{"imageGen": true},
+			"sendFinalMetadata":     true,
+		}
+
+		bodyBytes, err := json.Marshal(payload)
+		if err != nil {
+			lastErr = err
+			span := GrokImageAttemptSpan{
+				AccountID: lease.ID,
+				Email:     lease.Email,
+				Proxy:     lease.Proxy,
+				Status:    500,
+				Error:     err.Error(),
+			}
+			res.Spans = append(res.Spans, span)
+			traceParts = append(traceParts, fmt.Sprintf("%s(500:marshal_err)", lease.ID))
+			break
+		}
+
+		reqURL := p.baseURL + "/rest/app-chat/conversations/new"
+		req, err := http.NewRequestWithContext(ctx, "POST", reqURL, bytes.NewReader(bodyBytes))
+		if err != nil {
+			lastErr = err
+			span := GrokImageAttemptSpan{
+				AccountID: lease.ID,
+				Email:     lease.Email,
+				Proxy:     lease.Proxy,
+				Status:    500,
+				Error:     err.Error(),
+			}
+			res.Spans = append(res.Spans, span)
+			traceParts = append(traceParts, fmt.Sprintf("%s(500:req_err)", lease.ID))
+			break
+		}
+
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "text/event-stream")
+		req.Header.Set("User-Agent", grokBrowserUserAgent)
+		req.Header.Set("Origin", p.baseURL)
+		req.Header.Set("Referer", p.baseURL+"/")
+		req.Header.Set("Cookie", lease.Cookie)
+
+		client := p.createHTTPClient(lease.Proxy)
+		resp, err := client.Do(req)
+		if err != nil {
+			p.reportOutcomeByID(lease.ID, false, 0, err.Error())
+			lastErr = err
+			span := GrokImageAttemptSpan{
+				AccountID: lease.ID,
+				Email:     lease.Email,
+				Proxy:     lease.Proxy,
+				Status:    0,
+				Error:     err.Error(),
+			}
+			res.Spans = append(res.Spans, span)
+			traceParts = append(traceParts, fmt.Sprintf("%s(err:%s)", lease.ID, sanitizeTraceErr(err.Error())))
+			continue
+		}
+
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			resp.Body.Close()
+			p.reportOutcomeByID(lease.ID, false, resp.StatusCode, "Invalid credentials")
+			lastErr = fmt.Errorf("grok account %s invalid credentials (%d)", lease.ID, resp.StatusCode)
+			span := GrokImageAttemptSpan{
+				AccountID: lease.ID,
+				Email:     lease.Email,
+				Proxy:     lease.Proxy,
+				Status:    resp.StatusCode,
+				Error:     "Invalid credentials",
+			}
+			res.Spans = append(res.Spans, span)
+			traceParts = append(traceParts, fmt.Sprintf("%s(%d:auth_fail)", lease.ID, resp.StatusCode))
+			continue
+		}
+
+		if resp.StatusCode == http.StatusTooManyRequests {
+			resp.Body.Close()
+			p.reportOutcomeByID(lease.ID, false, resp.StatusCode, "Rate limited")
+			lastErr = fmt.Errorf("grok account %s rate limited (429)", lease.ID)
+			span := GrokImageAttemptSpan{
+				AccountID: lease.ID,
+				Email:     lease.Email,
+				Proxy:     lease.Proxy,
+				Status:    resp.StatusCode,
+				Error:     "Rate limited",
+			}
+			res.Spans = append(res.Spans, span)
+			traceParts = append(traceParts, fmt.Sprintf("%s(429:rate_limit)", lease.ID))
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			bodySnippet, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+			resp.Body.Close()
+			errMsg := fmt.Sprintf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(bodySnippet)))
+			p.reportOutcomeByID(lease.ID, false, resp.StatusCode, errMsg)
+			lastErr = fmt.Errorf("grok upstream returned %s", errMsg)
+			span := GrokImageAttemptSpan{
+				AccountID: lease.ID,
+				Email:     lease.Email,
+				Proxy:     lease.Proxy,
+				Status:    resp.StatusCode,
+				Error:     errMsg,
+			}
+			res.Spans = append(res.Spans, span)
+			traceParts = append(traceParts, fmt.Sprintf("%s(%d:status_err)", lease.ID, resp.StatusCode))
+			continue
+		}
+
+		// 解析图像流响应
+		rawImageURL, parseErr := parseGrokImageStream(resp.Body)
+		resp.Body.Close()
+		if parseErr != nil {
+			p.reportOutcomeByID(lease.ID, false, 200, parseErr.Error())
+			lastErr = parseErr
+			span := GrokImageAttemptSpan{
+				AccountID: lease.ID,
+				Email:     lease.Email,
+				Proxy:     lease.Proxy,
+				Status:    200,
+				Error:     parseErr.Error(),
+			}
+			res.Spans = append(res.Spans, span)
+			traceParts = append(traceParts, fmt.Sprintf("%s(200:parse_err)", lease.ID))
+			continue
+		}
+
+		// 使用当前已登录账号的鉴权 Cookie 与粘性代理下载图像字节
+		imgBytes, dlErr := p.downloadGrokImageAsset(ctx, rawImageURL, lease.Cookie, lease.Proxy)
+		if dlErr != nil {
+			p.reportOutcomeByID(lease.ID, false, 200, dlErr.Error())
+			lastErr = dlErr
+			span := GrokImageAttemptSpan{
+				AccountID: lease.ID,
+				Email:     lease.Email,
+				Proxy:     lease.Proxy,
+				Status:    200,
+				Error:     dlErr.Error(),
+			}
+			res.Spans = append(res.Spans, span)
+			traceParts = append(traceParts, fmt.Sprintf("%s(200:dl_err)", lease.ID))
+			continue
+		}
+
+		// 成功返回
+		p.reportOutcomeByID(lease.ID, true, 200, "")
+		span := GrokImageAttemptSpan{
+			AccountID: lease.ID,
+			Email:     lease.Email,
+			Proxy:     lease.Proxy,
+			Status:    200,
+		}
+		res.Spans = append(res.Spans, span)
+		traceParts = append(traceParts, fmt.Sprintf("%s(200:ok)", lease.ID))
+
+		b64 := base64.StdEncoding.EncodeToString(imgBytes)
+		p.mu.RLock()
+		assetBaseURL := p.assetBaseURL
+		p.mu.RUnlock()
+		fullAssetURL := resolveGrokAssetURL(assetBaseURL, rawImageURL)
+		res.Images = []GrokImageItem{
+			{
+				URL:           fullAssetURL,
+				B64JSON:       b64,
+				RevisedPrompt: prompt,
+			},
+		}
+		res.DurationMs = time.Since(start).Milliseconds()
+		res.Trace = strings.Join(traceParts, " -> ")
+		return res, nil
+	}
+
+	res.DurationMs = time.Since(start).Milliseconds()
+	res.Trace = strings.Join(traceParts, " -> ")
+	if lastErr == nil {
+		lastErr = ErrNoGrokAccountAvailable
+	}
+	return res, lastErr
+}
+
+// GenerateImage 使用 Grok Aurora 逆向生图（兼容旧接口签名）
+func (p *GrokProvider) GenerateImage(ctx context.Context, prompt, model, size string) (string, error) {
+	res, err := p.GenerateImageAsset(ctx, prompt, model, size, 1)
+	if err != nil {
+		return "", err
+	}
+	if len(res.Images) == 0 {
+		return "", errors.New("grok image generation returned no images")
+	}
+	if res.Images[0].URL != "" {
+		return res.Images[0].URL, nil
+	}
+	if res.Images[0].B64JSON != "" {
+		return "data:image/jpeg;base64," + res.Images[0].B64JSON, nil
+	}
+	return "", errors.New("empty grok image result")
 }

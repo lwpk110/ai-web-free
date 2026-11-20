@@ -21,6 +21,7 @@ import (
 	"ai-web-free/internal/config"
 	"ai-web-free/internal/db"
 	"ai-web-free/internal/deals"
+	"ai-web-free/internal/gatewaykeys"
 	"ai-web-free/internal/handler"
 	"ai-web-free/internal/health"
 	"ai-web-free/internal/opslog"
@@ -55,7 +56,16 @@ func Init() (*App, error) {
 
 	cfg := config.Load()
 
-	// ─── 初始化持久化数据库与云端同步引擎 ────────────────────────
+	// ─── 初始化持久化数据库与物化同步模式判断 ──────────────────────
+	materializeActive := cfg.DBMaterializeEnabled && db.IsRemoteDSN(cfg.DatabaseURL)
+	primaryDSN := cfg.DatabaseURL
+	if materializeActive {
+		primaryDSN = cfg.DBLocalPath
+		if strings.TrimSpace(primaryDSN) == "" {
+			primaryDSN = "data/ai-web-free.db"
+		}
+	}
+
 	var qiniuClient *storage.QiniuClient
 	if cfg.QiniuAccessKey != "" && cfg.QiniuSecretKey != "" && cfg.QiniuBucket != "" {
 		qiniuClient = storage.NewQiniuClient(storage.QiniuConfig{
@@ -66,12 +76,15 @@ func Init() (*App, error) {
 			Region:    cfg.QiniuRegion,
 			UploadURL: cfg.QiniuUploadURL,
 		})
-		storage.AutoRestoreDBIfMissing(cfg.DatabaseURL, qiniuClient)
+		storage.AutoRestoreDBIfMissing(primaryDSN, qiniuClient)
 	}
 
-	database, dbErr := db.InitDB(cfg.DatabaseURL)
+	database, dbErr := db.InitDB(primaryDSN)
 	if dbErr != nil {
 		log.Printf("[Bootstrap] 严重警告: 数据库初始化失败: %v", dbErr)
+	}
+	if materializeActive && dbErr == nil {
+		log.Printf("[Bootstrap] 已启用本地 SQLite 物化层 (%s)，云数据库 (%s) 将在后台异步双向同步", primaryDSN, db.MaskDSN(cfg.DatabaseURL))
 	}
 
 	proxies := loadProxyList(database)
@@ -549,6 +562,119 @@ func Init() (*App, error) {
 		cfg.PromptSyncIntervalHours > 0,
 	)
 
+	gwSecret := strings.TrimSpace(os.Getenv("GATEWAY_KEY_SECRET"))
+	if gwSecret == "" {
+		gwSecret = cfg.AdminToken
+	}
+	gwStore, gwErr := gatewaykeys.NewStore(database, gwSecret)
+	if gwErr != nil {
+		log.Printf("[Gateway] API Key store init failed: %v", gwErr)
+	}
+
+	var syncEngine *db.SyncEngine
+	if materializeActive && database != nil {
+		syncCfg := db.SyncConfig{
+			Enabled:      true,
+			LocalPath:    primaryDSN,
+			PushInterval: cfg.DBSyncPushInterval,
+			PullInterval: cfg.DBSyncPullInterval,
+			BatchSize:    cfg.DBSyncBatchSize,
+			Timeout:      cfg.DBSyncTimeout,
+			OnRemoteChanged: func(changedTables map[string]int) {
+				if changedTables["proxy_node_records"] > 0 {
+					if nextProxies, err := db.LoadProxiesFromDB(database); err == nil {
+						proxyPool.Replace(nextProxies)
+					}
+				}
+				if changedTables["pool_account_records"] > 0 || changedTables["account_restriction_records"] > 0 {
+					if reloaded, err := accounts.LoadAccountsFromDB(database, profiles); err == nil {
+						latestBanned := db.LoadRestrictionsFromDB(database, "banned")
+						latestDisabled := db.LoadRestrictionsFromDB(database, "disabled")
+						for _, acct := range reloaded {
+							if acct.Proxy == "" {
+								acct.Proxy = proxyPool.Allocate()
+							}
+							keyID := strings.ToLower(strings.TrimSpace(acct.ChatGPTAccountID))
+							keyEmail := strings.ToLower(strings.TrimSpace(acct.Email))
+							banReason := ""
+							disableReason := ""
+							if keyID != "" {
+								banReason = latestBanned[keyID]
+								disableReason = latestDisabled[keyID]
+							}
+							if banReason == "" && keyEmail != "" {
+								banReason = latestBanned[keyEmail]
+							}
+							if disableReason == "" && keyEmail != "" {
+								disableReason = latestDisabled[keyEmail]
+							}
+							if banReason != "" {
+								acct.Status = accounts.StatusBanned
+								acct.LastError = banReason
+								acct.Token = ""
+							} else if disableReason != "" {
+								acct.Status = accounts.StatusDisabled
+								acct.LastError = disableReason
+							} else if !acct.ExpiresAt.IsZero() && acct.ExpiresAt.Before(time.Now()) {
+								acct.Status = accounts.StatusExpired
+								acct.LastError = "Token 已过期"
+							}
+						}
+						accountPool.SyncPersistentAccounts(reloaded)
+					}
+				}
+				if changedTables["gateway_groups"] > 0 || changedTables["gateway_keys"] > 0 {
+					if gwStore != nil {
+						_ = gwStore.ReloadFromDB()
+					}
+				}
+			},
+			OnStatusChange: func(st db.SyncStatus) {
+				detail := fmt.Sprintf("状态 %s · Outbox %d 条 · 推送 %d / 拉取 %d", st.State, st.OutboxPending, st.TotalPushed, st.TotalPulled)
+				if st.LastError != "" {
+					detail = fmt.Sprintf("降级重试中 (失败 %d 次): %s", st.ConsecutiveFailures, st.LastError)
+				}
+				healthTracker.MarkTick("db_materialized_sync", detail)
+			},
+		}
+		syncEngine = db.NewSyncEngine(database, cfg.DatabaseURL, syncCfg)
+		tables := append(db.DefaultSyncTables(),
+			db.NewTypedSyncTable[gatewaykeys.Group](),
+			db.NewTypedSyncTable[gatewaykeys.Key](),
+		)
+		syncEngine.RegisterTables(tables...)
+		if err := syncEngine.PrepareLocal(); err != nil {
+			log.Printf("[DB Sync] 本地 SQLite 同步触发器初始化失败: %v", err)
+		} else {
+			db.SetSyncEngine(syncEngine)
+			syncEngine.Start()
+			healthTracker.RegisterService(
+				"db_materialized_sync",
+				"数据库物化同步引擎",
+				"worker",
+				cfg.DBSyncPushInterval.String(),
+				fmt.Sprintf("本地 SQLite (%s) <-> %s 异步双向同步中", primaryDSN, db.MaskDSN(cfg.DatabaseURL)),
+				true,
+				true,
+			)
+		}
+	} else {
+		db.SetSyncEngine(nil)
+		disabledReason := "已禁用（DB_MATERIALIZE_ENABLED=false）"
+		if cfg.DBMaterializeEnabled && !db.IsRemoteDSN(cfg.DatabaseURL) {
+			disabledReason = "未启用（当前 DATABASE_URL 为本地 SQLite，无需额外物化）"
+		}
+		healthTracker.RegisterService(
+			"db_materialized_sync",
+			"数据库物化同步引擎",
+			"worker",
+			"",
+			disabledReason,
+			false,
+			false,
+		)
+	}
+
 	router := handler.RegisterRouterWithDeps(handler.RouterDeps{
 		AccountPool:   accountPool,
 		ProxyPool:     proxyPool,
@@ -559,6 +685,8 @@ func Init() (*App, error) {
 		OpsLog:        opsLog,
 		PromptPlaza:   plazaMgr,
 		DB:            database,
+		SyncEngine:    syncEngine,
+		GatewayKeys:   gwStore,
 		StorageEngine: storageEngine,
 		HealthTracker: healthTracker,
 	})
@@ -569,6 +697,10 @@ func Init() (*App, error) {
 		AccountPool:   accountPool,
 		HealthTracker: healthTracker,
 		Cleanup: func() {
+			if syncEngine != nil {
+				syncEngine.Stop(5 * time.Second)
+				healthTracker.MarkRunning("db_materialized_sync", false, "已完成停机刷盘并停止")
+			}
 			stopHealthCheck()
 			stopRebalancer()
 			healthTracker.MarkRunning("account_health_check", false, "已停止")

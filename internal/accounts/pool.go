@@ -1284,3 +1284,144 @@ func (p *Pool) ProviderModels(provider string) ([]string, time.Time) {
 	copy(out, models)
 	return out, p.providerModelsCachedAt[provider]
 }
+
+// SyncPersistentAccounts 在后台拉取云端账号变更后原位热刷新内存号池。
+// 对已有账号保留指针地址（保护活跃 WSSActor 与运行中操作），仅在代理变更或新账号加入时创建 TLS Client；
+// 对云端已删除的持久账号从池中剔除（不影响 IsTemporary 临时账号）。
+func (p *Pool) SyncPersistentAccounts(incoming []*Account) (added, updated, removed int) {
+	if p == nil {
+		return 0, 0, 0
+	}
+
+	incomingByID := make(map[string]*Account, len(incoming))
+	for _, inc := range incoming {
+		if inc == nil || strings.TrimSpace(inc.ID) == "" || inc.IsTemporary {
+			continue
+		}
+		incomingByID[inc.ID] = inc
+	}
+
+	p.mu.Lock()
+	existingByID := make(map[string]*Account)
+	for _, list := range [][]*Account{p.noauth, p.free, p.puid} {
+		for _, a := range list {
+			if a != nil && !a.IsTemporary && a.ID != "" {
+				existingByID[a.ID] = a
+			}
+		}
+	}
+
+	nextNoAuth := make([]*Account, 0, len(p.noauth))
+	nextFree := make([]*Account, 0, len(p.free))
+	nextPUID := make([]*Account, 0, len(p.puid))
+
+	appendToType := func(a *Account) {
+		switch a.Type {
+		case TypeNoAuth:
+			nextNoAuth = append(nextNoAuth, a)
+		case TypeFree:
+			nextFree = append(nextFree, a)
+		case TypePUID:
+			nextPUID = append(nextPUID, a)
+		}
+	}
+
+	// 1. 保留并原位更新已有持久账号，或剔除云端已删除账号
+	for _, list := range [][]*Account{p.noauth, p.free, p.puid} {
+		for _, cur := range list {
+			if cur == nil {
+				continue
+			}
+			if cur.IsTemporary {
+				appendToType(cur)
+				continue
+			}
+			inc, keep := incomingByID[cur.ID]
+			if !keep {
+				removed++
+				continue
+			}
+			// 若账号正处于登录/续期/测活任务中，暂不覆写凭据与状态，避免打断进行中任务
+			if cur.ActiveAction == "" {
+				changed := cur.Type != inc.Type ||
+					cur.Token != inc.Token ||
+					cur.RefreshToken != inc.RefreshToken ||
+					cur.SessionToken != inc.SessionToken ||
+					cur.PUID != inc.PUID ||
+					cur.TeamUserID != inc.TeamUserID ||
+					cur.ChatGPTAccountID != inc.ChatGPTAccountID ||
+					cur.PlanType != inc.PlanType ||
+					cur.Email != inc.Email ||
+					cur.Password != inc.Password ||
+					cur.TOTPSecret != inc.TOTPSecret ||
+					cur.Proxy != inc.Proxy ||
+					cur.Status != inc.Status ||
+					cur.LastError != inc.LastError ||
+					!cur.ExpiresAt.Equal(inc.ExpiresAt) ||
+					!cur.CooldownUntil.Equal(inc.CooldownUntil) ||
+					!cur.ImageCooldownUntil.Equal(inc.ImageCooldownUntil)
+
+				proxyChanged := cur.Proxy != inc.Proxy
+				cur.Type = inc.Type
+				cur.Token = inc.Token
+				cur.RefreshToken = inc.RefreshToken
+				cur.SessionToken = inc.SessionToken
+				cur.PUID = inc.PUID
+				cur.TeamUserID = inc.TeamUserID
+				cur.ChatGPTAccountID = inc.ChatGPTAccountID
+				cur.PlanType = inc.PlanType
+				cur.Email = inc.Email
+				cur.Password = inc.Password
+				cur.TOTPSecret = inc.TOTPSecret
+				cur.Proxy = inc.Proxy
+				cur.Status = inc.Status
+				cur.LastError = inc.LastError
+				cur.ExpiresAt = inc.ExpiresAt
+				cur.CooldownUntil = inc.CooldownUntil
+				cur.ImageCooldownUntil = inc.ImageCooldownUntil
+				if inc.TotalCalls > cur.TotalCalls {
+					cur.TotalCalls = inc.TotalCalls
+				}
+				if inc.FailedCalls > cur.FailedCalls {
+					cur.FailedCalls = inc.FailedCalls
+				}
+				if inc.LastUsed.After(cur.LastUsed) {
+					cur.LastUsed = inc.LastUsed
+				}
+				if (proxyChanged || cur.Client == nil) && cur.Status != StatusStandby {
+					_ = cur.InitClient()
+				}
+				if changed {
+					updated++
+				}
+			}
+			appendToType(cur)
+		}
+	}
+
+	// 2. 插入新增持久账号（保持 incoming 顺序）
+	for _, inc := range incoming {
+		if inc == nil || strings.TrimSpace(inc.ID) == "" || inc.IsTemporary {
+			continue
+		}
+		if _, exists := existingByID[inc.ID]; exists {
+			continue
+		}
+		if inc.Status != StatusStandby && inc.Client == nil {
+			_ = inc.InitClient()
+		}
+		appendToType(inc)
+		added++
+	}
+
+	p.noauth = nextNoAuth
+	p.free = nextFree
+	p.puid = nextPUID
+	p.cursors = [3]int{}
+	p.mu.Unlock()
+
+	if added > 0 || updated > 0 || removed > 0 {
+		p.Rebalance()
+	}
+	return added, updated, removed
+}

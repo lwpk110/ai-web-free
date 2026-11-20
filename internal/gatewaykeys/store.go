@@ -127,6 +127,44 @@ func NewStore(db *gorm.DB, secret string) (*Store, error) {
 	return s, nil
 }
 
+// ReloadFromDB 从数据库全量热重载分组与网关 API Key，保留既有内存限流器窗口。
+func (s *Store) ReloadFromDB() error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	var gs []*Group
+	var ks []*Key
+	if err := s.db.Find(&gs).Error; err != nil {
+		return err
+	}
+	if err := s.db.Find(&ks).Error; err != nil {
+		return err
+	}
+
+	nextGroups := make(map[string]*Group, len(gs))
+	for _, g := range gs {
+		nextGroups[g.ID] = g
+	}
+	nextKeys := make(map[string]*Key, len(ks))
+	nextByHash := make(map[string]string, len(ks))
+	for _, k := range ks {
+		nextKeys[k.ID] = k
+		nextByHash[k.KeyHash] = k.ID
+	}
+
+	s.mu.Lock()
+	s.groups = nextGroups
+	s.keys = nextKeys
+	s.byHash = nextByHash
+	for id := range s.limits {
+		if _, exists := nextKeys[id]; !exists {
+			delete(s.limits, id)
+		}
+	}
+	s.mu.Unlock()
+	return nil
+}
+
 func hashKey(plain string) string {
 	sum := sha256.Sum256([]byte(plain))
 	return hex.EncodeToString(sum[:])

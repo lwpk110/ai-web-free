@@ -57,6 +57,9 @@ func TestDramaModelCatalogAggregatesExecutableModels(t *testing.T) {
 	if !containsString(imageModels, "wanx-v1") || !containsString(imageModels, "black-forest-labs/FLUX.1-schnell") {
 		t.Fatalf("expected provider-specific image models, got %+v", imageCatalog)
 	}
+	if grokImageModels := dramaModelsForProvider("grok", []string{"grok-3"}, nil, "image_generation"); !containsString(grokImageModels, "grok-2-image") {
+		t.Fatalf("expected grok-2-image in drama models for grok, got: %+v", grokImageModels)
+	}
 	if containsString(imageModels, "auto") {
 		t.Fatalf("auto should only be the UI sentinel, not a provider model")
 	}

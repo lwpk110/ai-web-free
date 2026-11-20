@@ -4,6 +4,10 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/glebarez/sqlite"
+	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 func newTestStore(t *testing.T, secret string) (*Store, *Group) {
@@ -90,5 +94,59 @@ func TestLimiter(t *testing.T) {
 	}
 	if _, err := l.admit(2, 0, now.Add(2*time.Minute)); err != nil {
 		t.Fatalf("window should reset: %v", err)
+	}
+}
+
+func TestStoreReloadFromDB(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{
+		Logger: logger.Default.LogMode(logger.Silent),
+	})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if sqlDB, err := gdb.DB(); err == nil {
+		defer sqlDB.Close()
+	}
+
+	writer, err := NewStore(gdb, "shared-secret")
+	if err != nil {
+		t.Fatalf("writer NewStore: %v", err)
+	}
+	reader, err := NewStore(gdb, "shared-secret")
+	if err != nil {
+		t.Fatalf("reader NewStore: %v", err)
+	}
+
+	g, err := writer.CreateGroup(Group{Name: "vip-pool", Enabled: true, ModelAllowlist: []string{"gpt-4o"}})
+	if err != nil {
+		t.Fatalf("CreateGroup: %v", err)
+	}
+	k, plain, err := writer.CreateKey("sync-agent", g.ID, 60, 2)
+	if err != nil {
+		t.Fatalf("CreateKey: %v", err)
+	}
+
+	// 热重载前 reader 尚未知晓新增分组和 Key
+	if _, _, err := reader.Authenticate(plain); err == nil {
+		t.Fatal("expected un-reloaded reader to reject new key")
+	}
+
+	if err := reader.ReloadFromDB(); err != nil {
+		t.Fatalf("ReloadFromDB: %v", err)
+	}
+	gotKey, gotGroup, err := reader.Authenticate(plain)
+	if err != nil || gotKey.ID != k.ID || gotGroup.Name != "vip-pool" {
+		t.Fatalf("expected reader to authenticate reloaded key, key=%+v grp=%+v err=%v", gotKey, gotGroup, err)
+	}
+
+	// 删除 Key 并再次 ReloadFromDB 后应失效
+	if err := writer.DeleteKey(k.ID); err != nil {
+		t.Fatalf("DeleteKey: %v", err)
+	}
+	if err := reader.ReloadFromDB(); err != nil {
+		t.Fatalf("ReloadFromDB after delete: %v", err)
+	}
+	if _, _, err := reader.Authenticate(plain); err == nil {
+		t.Fatal("expected deleted key to fail auth after ReloadFromDB")
 	}
 }

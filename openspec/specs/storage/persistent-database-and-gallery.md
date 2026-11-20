@@ -252,4 +252,36 @@ type StorageEngine interface {
      CGO_ENABLED=0 go build -o ai-web-free .
      python3 -m unittest discover -s scripts -p "test_*.py" -v
      ```
-   - 确保 `docs/adr/ADR-0007-*.md` 状态正式流转至 `Accepted` 并更新 `docs/adr/README.md`。
+   - 确保 `docs/adr/ADR-XXXX-*.md` 状态正式流转至 `Accepted` 并更新 `docs/adr/README.md`。
+
+---
+
+## 7. 物化数据库架构 (SQLite Materialized + Async Cloud Sync)
+
+### 7.1 开关与环境变量
+当远程云数据库（如跨洋部署的 Neon Serverless PostgreSQL）存在较高网络 RTT 时，直接由请求链路与启动链路同步建连/`AutoMigrate` 会造成端口阻塞与接口卡顿。为此引入显式开关驱动的本地 SQLite 物化层：
+
+| 环境变量 | 默认值 | 说明 |
+| :--- | :--- | :--- |
+| `DB_MATERIALIZE_ENABLED` | `false` | 布尔开关。设为 `true` 且 `DATABASE_URL` 为远程数据库（`postgres://` / `mysql://`）时启用物化架构；默认 `false` 保持直连兼容无盘只读容器。 |
+| `DB_LOCAL_PATH` | `data/ai-web-free.db` | 本地物化 SQLite 文件路径。 |
+| `DB_SYNC_PUSH_INTERVAL` | `5s` | Outbox 防抖批量推送轮询间隔；空闲无本地变更时不发起任何云库请求（利于 Neon 自动休眠）。 |
+| `DB_SYNC_PULL_INTERVAL` | `0` | 定时从云端拉取更新的间隔；默认 `0`（仅启动后后台水合对齐一次 + 支持管理端手动触发）。 |
+| `DB_SYNC_BATCH_SIZE` | `100` | 常规表批量推送/拉取分片上限（含 `BlobData` 大字段的表自动限流至 ≤10 行/批）。 |
+| `DB_SYNC_TIMEOUT` | `30s` | 单次同步/建连超时阈值（首次冷建表时后台初始化放宽至 ≥180s）。 |
+
+### 7.2 核心机制与同步范围
+1. **非阻塞秒启**：启动阶段 `bootstrap.Init()` 仅初始化本地 SQLite（`<1s`）并立即监听业务端口；云端建连、Schema 指纹校验（`schema_meta`）及双向水合均在后台协程执行。
+2. **全量 20 表捕获（Outbox + Tombstones）**：
+   - 覆盖 `internal/db` 全部 18 张业务表及 `gateway_groups`、`gateway_keys` 共 **20 张表**（含 `FreebieDeal`、`AccountRuntimeState`、`BlobData` 与 JSON 序列化字段）。
+   - 在本地 SQLite 为每张业务表安装事务级 `AFTER INSERT / UPDATE / DELETE` 触发器（受 `_sync_control.suppress_triggers` 控制防回环），同事务写入 `_sync_outbox`，天然兼容单行变更与 `AllowGlobalUpdate` 批量清表。
+   - 删除操作同步推送至云端 `_sync_tombstones` 表，确保跨设备切换时准确回放删除；同时云端维护 `_sync_journal` 逻辑同步水位，确保离线延迟推送或存在时钟偏差的设备写入在增量拉取时不会被遗漏。
+3. **冲突裁决与热重载**：
+   - 采用 LWW（优先比较 `updated_at`，回退 `created_at`，较新时间戳胜出），墓碑与本地写入亦按时间戳裁决；推/拉均先删后写以保护唯一索引。
+   - 后台拉取到 `pool_account_records`、`account_restriction_records`、`proxy_node_records` 或 `gateway_groups`/`gateway_keys` 变更后，自动调用 `Pool.SyncPersistentAccounts`（原位保留活跃指针）、`ProxyPool.Replace` 与 `gatewaykeys.Store.ReloadFromDB` 热刷新内存。
+4. **优雅停机与降级熔断**：云端断网时按指数退避（`2s -> 5s -> 15s -> 30s -> 60s`）自动重试，本地 SQLite 读写不受影响；服务停机时在 5s 内自动刷盘剩余 Outbox。
+
+### 7.3 物化同步管理端 API 契约
+- `GET /admin/api/v1/db/sync/status`：返回 `db.SyncStatus`（所有 `cloud_target` 严格经 `MaskDSN` 脱敏移除账号密码与查询串）。
+- `POST /admin/api/v1/db/sync/trigger`：接收 `{"direction": "both" | "push" | "pull"}` 手动触发即时同步并返回最新状态；未启用物化同步或方向非法返回 `400 Bad Request`。
+- `/admin/api/v1/system/status`：`database` 子系统与 `db_materialized_sync` 后台服务实时汇报物化同步状态与 Outbox 积压。

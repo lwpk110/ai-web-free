@@ -117,6 +117,7 @@ type VideoTaskRecord struct {
 	ExpectedBytes     int64      `gorm:"default:0" json:"expected_bytes,omitempty"`
 	UpstreamMeta      string     `gorm:"type:text" json:"upstream_meta,omitempty"`
 	CreatedAt         time.Time  `gorm:"index" json:"created_at"`
+	UpdatedAt         time.Time  `gorm:"index" json:"updated_at,omitempty"`
 	CompletedAt       *time.Time `json:"completed_at,omitempty"`
 }
 

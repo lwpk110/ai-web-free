@@ -5,6 +5,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type Config struct {
@@ -36,6 +37,12 @@ type Config struct {
 	PromptSyncIntervalHours  int
 	PromptPlazaFile          string
 	DatabaseURL              string
+	DBMaterializeEnabled     bool
+	DBLocalPath              string
+	DBSyncPushInterval       time.Duration
+	DBSyncPullInterval       time.Duration
+	DBSyncBatchSize          int
+	DBSyncTimeout            time.Duration
 	StorageDir               string
 	S3Endpoint               string
 	S3Bucket                 string
@@ -92,6 +99,12 @@ func Load() Config {
 		PromptSyncIntervalHours:  getIntEnv("PROMPT_SYNC_INTERVAL_HOURS", 6),
 		PromptPlazaFile:          os.Getenv("PROMPT_PLAZA_FILE"),
 		DatabaseURL:              getEnvWithFallback("DATABASE_URL", "DB_DSN", "data/ai-web-free.db"),
+		DBMaterializeEnabled:     getBoolEnv("DB_MATERIALIZE_ENABLED", false),
+		DBLocalPath:              getEnv("DB_LOCAL_PATH", "data/ai-web-free.db"),
+		DBSyncPushInterval:       getDurationEnv("DB_SYNC_PUSH_INTERVAL", 5*time.Second),
+		DBSyncPullInterval:       getDurationEnv("DB_SYNC_PULL_INTERVAL", 0),
+		DBSyncBatchSize:          getIntEnv("DB_SYNC_BATCH_SIZE", 100),
+		DBSyncTimeout:            getDurationEnv("DB_SYNC_TIMEOUT", 30*time.Second),
 		StorageDir:               getEnv("STORAGE_DIR", "data/storage"),
 		S3Endpoint:               os.Getenv("S3_ENDPOINT"),
 		S3Bucket:                 os.Getenv("S3_BUCKET"),
@@ -158,6 +171,23 @@ func getIntEnv(key string, defaultVal int) int {
 		return defaultVal
 	}
 	return n
+}
+
+func getDurationEnv(key string, defaultVal time.Duration) time.Duration {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return defaultVal
+	}
+	if d, err := time.ParseDuration(v); err == nil {
+		if d < 0 {
+			return defaultVal
+		}
+		return d
+	}
+	if secs, err := strconv.Atoi(v); err == nil && secs >= 0 {
+		return time.Duration(secs) * time.Second
+	}
+	return defaultVal
 }
 
 func getKamiHeadlessDefault() bool {

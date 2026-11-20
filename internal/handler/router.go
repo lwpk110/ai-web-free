@@ -13,6 +13,7 @@ import (
 	"ai-web-free/internal/audit"
 	"ai-web-free/internal/chatgpt"
 	"ai-web-free/internal/config"
+	"ai-web-free/internal/db"
 	"ai-web-free/internal/drama"
 	"ai-web-free/internal/gatewaykeys"
 	"ai-web-free/internal/health"
@@ -49,6 +50,7 @@ type RouterDeps struct {
 	OpsLog        *opslog.Buffer
 	PromptPlaza   *promptplaza.Manager
 	DB            *gorm.DB
+	SyncEngine    *db.SyncEngine
 	StorageEngine storage.StorageEngine
 	VectorStore   vectorstore.VectorStore
 	HealthTracker *health.Tracker
@@ -85,6 +87,7 @@ func RegisterRouterWithDeps(deps RouterDeps) *gin.Engine {
 		PromptPlaza:   deps.PromptPlaza,
 		Config:        cfg,
 		DB:            deps.DB,
+		SyncEngine:    deps.SyncEngine,
 		StorageEngine: deps.StorageEngine,
 		VectorStore:   deps.VectorStore,
 		HealthTracker: deps.HealthTracker,
@@ -243,6 +246,8 @@ func RegisterRouterWithDeps(deps RouterDeps) *gin.Engine {
 		}
 		adminGroup.GET("/overview", adminHandler.Overview)
 		adminGroup.GET("/system/status", adminHandler.SystemStatus)
+		adminGroup.GET("/db/sync/status", adminHandler.DBSyncStatus)
+		adminGroup.POST("/db/sync/trigger", adminHandler.TriggerDBSync)
 		adminGroup.GET("/models", adminHandler.ListModelsCatalog)
 		adminGroup.GET("/diagnostics", adminHandler.Diagnostics)
 		adminGroup.POST("/diagnostics/repair", adminHandler.ExecuteDiagnosticRepair)

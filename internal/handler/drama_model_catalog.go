@@ -118,6 +118,11 @@ func dramaModelsForProvider(providerID string, featured []string, cachedChatGPT 
 			return nil
 		}
 		return filter([]string{"jimeng-4.5", "jimeng-3.0"})
+	case "grok":
+		if textOnly {
+			return filter(featured)
+		}
+		return []string{"grok-2-image"}
 	default:
 		return filter(featured)
 	}

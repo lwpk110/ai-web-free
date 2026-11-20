@@ -1,10 +1,15 @@
 package db
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -13,12 +18,43 @@ import (
 	"gorm.io/driver/mysql"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 	"gorm.io/gorm/logger"
 )
 
+// SchemaMetaRecord 记录数据库 Schema 指纹，避免远程 PostgreSQL 每次启动都重复执行耗时极高的全表 AutoMigrate。
+type SchemaMetaRecord struct {
+	Key       string    `gorm:"primaryKey;size:64"`
+	Value     string    `gorm:"type:text"`
+	UpdatedAt time.Time `gorm:"autoUpdateTime"`
+}
+
+func (SchemaMetaRecord) TableName() string {
+	return "schema_meta"
+}
+
+func computeSchemaFingerprint(models []any) string {
+	h := sha256.New()
+	for _, m := range models {
+		t := reflect.TypeOf(m)
+		for t.Kind() == reflect.Ptr {
+			t = t.Elem()
+		}
+		_, _ = fmt.Fprintf(h, "%s{", t.Name())
+		for i := 0; i < t.NumField(); i++ {
+			f := t.Field(i)
+			_, _ = fmt.Fprintf(h, "%s:%s:%s;", f.Name, f.Type.String(), f.Tag.Get("gorm"))
+		}
+		_, _ = h.Write([]byte("}\n"))
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
 var (
-	globalDB   *gorm.DB
-	globalDBMu sync.RWMutex
+	globalDB         *gorm.DB
+	globalDBMu       sync.RWMutex
+	globalSyncEngine *SyncEngine
+	globalSyncMu     sync.RWMutex
 )
 
 // SetDB 设置全局 GORM 实例
@@ -35,58 +71,67 @@ func GetDB() *gorm.DB {
 	return globalDB
 }
 
-// InitDB 初始化持久化数据库，支持纯 Go SQLite、PostgreSQL 与 MySQL，严格零 CGO。
-func InitDB(dsn string) (*gorm.DB, error) {
+// SetSyncEngine 设置全局物化数据库同步引擎实例
+func SetSyncEngine(engine *SyncEngine) {
+	globalSyncMu.Lock()
+	defer globalSyncMu.Unlock()
+	globalSyncEngine = engine
+}
+
+// GetSyncEngine 获取全局物化数据库同步引擎实例
+func GetSyncEngine() *SyncEngine {
+	globalSyncMu.RLock()
+	defer globalSyncMu.RUnlock()
+	return globalSyncEngine
+}
+
+// IsRemoteDSN 判断给定的连接串是否指向远程云数据库（PostgreSQL / MySQL）。
+func IsRemoteDSN(dsn string) bool {
 	trimmed := strings.TrimSpace(dsn)
-	var dialector gorm.Dialector
+	lower := strings.ToLower(trimmed)
+	return strings.HasPrefix(lower, "postgres://") ||
+		strings.HasPrefix(lower, "postgresql://") ||
+		strings.HasPrefix(lower, "mysql://") ||
+		strings.Contains(lower, "@tcp(")
+}
 
-	gormCfg := &gorm.Config{
-		Logger: logger.Default.LogMode(logger.Silent),
-		NowFunc: func() time.Time {
-			return time.Now().UTC()
-		},
+// MaskDSN 对数据库连接串进行严格脱敏，移除账号、密码与敏感查询参数，仅保留协议与主机/库名。
+func MaskDSN(dsn string) string {
+	trimmed := strings.TrimSpace(dsn)
+	if trimmed == "" || trimmed == "default" {
+		return "data/ai-web-free.db"
 	}
-
-	switch {
-	case strings.HasPrefix(trimmed, "postgres://") || strings.HasPrefix(trimmed, "postgresql://"):
-		dialector = postgres.Open(trimmed)
-	case strings.HasPrefix(trimmed, "mysql://"):
-		rawDSN := strings.TrimPrefix(trimmed, "mysql://")
-		dialector = mysql.Open(rawDSN)
-	case strings.Contains(trimmed, "@tcp("):
-		dialector = mysql.Open(trimmed)
-	case trimmed == ":memory:":
-		dialector = sqlite.Open(":memory:?_pragma=busy_timeout(5000)")
-	default:
-		filePath := trimmed
-		if filePath == "" || filePath == "default" {
-			filePath = "data/ai-web-free.db"
-		}
-		dir := filepath.Dir(filePath)
-		if dir != "." && dir != "/" {
-			if err := os.MkdirAll(dir, 0755); err != nil {
-				log.Printf("[DB] Warning: cannot create db dir %q (%v), falling back to :memory:", dir, err)
-				dialector = sqlite.Open(":memory:?_pragma=busy_timeout(5000)")
-			}
-		}
-		if dialector == nil {
-			sqliteDSN := fmt.Sprintf("%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)", filePath)
-			dialector = sqlite.Open(sqliteDSN)
-		}
+	if !IsRemoteDSN(trimmed) {
+		return trimmed
 	}
-
-	db, err := gorm.Open(dialector, gormCfg)
+	if strings.Contains(trimmed, "@tcp(") && !strings.Contains(trimmed, "://") {
+		idx := strings.Index(trimmed, "@tcp(")
+		rest := trimmed[idx+1:]
+		if q := strings.Index(rest, "?"); q >= 0 {
+			rest = rest[:q]
+		}
+		return "mysql://" + rest
+	}
+	u, err := url.Parse(trimmed)
 	if err != nil {
-		log.Printf("[DB] Failed to open database with %q (%v), attempting fallback to :memory:", dsn, err)
-		memDb, memErr := gorm.Open(sqlite.Open(":memory:?_pragma=busy_timeout(5000)"), gormCfg)
-		if memErr != nil {
-			return nil, fmt.Errorf("failed to open database (%v) and memory fallback failed (%v)", err, memErr)
+		if at := strings.LastIndex(trimmed, "@"); at >= 0 {
+			rest := trimmed[at+1:]
+			if q := strings.Index(rest, "?"); q >= 0 {
+				rest = rest[:q]
+			}
+			return "***@" + rest
 		}
-		db = memDb
+		return "***"
 	}
+	u.User = nil
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String()
+}
 
-	// 自动平滑迁移模型表结构
-	if err := db.AutoMigrate(
+// CoreModels 返回 internal/db 内定义的全部核心业务表模型切片。
+func CoreModels() []any {
+	return []any{
 		&GalleryWork{},
 		&Conversation{},
 		&ChatMessageRecord{},
@@ -105,34 +150,176 @@ func InitDB(dsn string) (*gorm.DB, error) {
 		&DramaProjectRecord{},
 		&DramaRunRecord{},
 		&FreebieDeal{},
-	); err != nil {
-		return nil, fmt.Errorf("failed to auto migrate database schemas: %w", err)
+	}
+}
+
+func appendPostgresConnectTimeout(dsn string, timeoutSec int) string {
+	if timeoutSec <= 0 || strings.Contains(strings.ToLower(dsn), "connect_timeout=") {
+		return dsn
+	}
+	sep := "?"
+	if strings.Contains(dsn, "?") {
+		sep = "&"
+	}
+	return fmt.Sprintf("%s%sconnect_timeout=%d", dsn, sep, timeoutSec)
+}
+
+// InitDB 初始化持久化数据库，支持纯 Go SQLite、PostgreSQL 与 MySQL，严格零 CGO。
+func InitDB(dsn string) (*gorm.DB, error) {
+	db, err := openDialectorAndMigrate(context.Background(), dsn, true, true, true)
+	if err != nil {
+		return nil, err
+	}
+	SetDB(db)
+	return db, nil
+}
+
+// OpenCloudDB 连接并迁移远程云端数据库（禁止静默回退到内存 SQLite，确保同步目标真实可用）。
+func OpenCloudDB(ctx context.Context, dsn string, extraModels ...any) (*gorm.DB, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return openDialectorAndMigrate(ctx, dsn, false, false, false, extraModels...)
+}
+
+func openDialectorAndMigrate(ctx context.Context, dsn string, allowMemoryFallback, runSeeds, runLegacySQLiteMigration bool, extraModels ...any) (*gorm.DB, error) {
+	trimmed := strings.TrimSpace(dsn)
+	var dialector gorm.Dialector
+
+	gormCfg := &gorm.Config{
+		Logger: logger.Default.LogMode(logger.Silent),
+		NowFunc: func() time.Time {
+			return time.Now().UTC()
+		},
+	}
+
+	lower := strings.ToLower(trimmed)
+	isPostgres := strings.HasPrefix(lower, "postgres://") || strings.HasPrefix(lower, "postgresql://")
+	isMySQL := strings.HasPrefix(lower, "mysql://") || strings.Contains(lower, "@tcp(")
+
+	switch {
+	case isPostgres:
+		// PreferSimpleProtocol 避免 PgBouncer/Neon-pooler 下的预处理语句额外往返，显著降低跨洋延迟
+		dialector = postgres.New(postgres.Config{
+			DSN:                  appendPostgresConnectTimeout(trimmed, 15),
+			PreferSimpleProtocol: true,
+		})
+	case strings.HasPrefix(lower, "mysql://"):
+		rawDSN := strings.TrimPrefix(trimmed, "mysql://")
+		dialector = mysql.Open(rawDSN)
+	case strings.Contains(lower, "@tcp("):
+		dialector = mysql.Open(trimmed)
+	case trimmed == ":memory:":
+		dialector = sqlite.Open(":memory:?_pragma=busy_timeout(5000)")
+	default:
+		filePath := trimmed
+		if filePath == "" || filePath == "default" {
+			filePath = "data/ai-web-free.db"
+		}
+		dir := filepath.Dir(filePath)
+		if dir != "." && dir != "/" {
+			if err := os.MkdirAll(dir, 0755); err != nil {
+				if !allowMemoryFallback {
+					return nil, fmt.Errorf("cannot create db dir %q: %w", dir, err)
+				}
+				log.Printf("[DB] Warning: cannot create db dir %q (%v), falling back to :memory:", dir, err)
+				dialector = sqlite.Open(":memory:?_pragma=busy_timeout(5000)")
+			}
+		}
+		if dialector == nil {
+			sqliteDSN := fmt.Sprintf("%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)", filePath)
+			dialector = sqlite.Open(sqliteDSN)
+		}
+	}
+
+	db, err := gorm.Open(dialector, gormCfg)
+	if err != nil {
+		if !allowMemoryFallback {
+			return nil, fmt.Errorf("failed to open remote database (%s): %w", MaskDSN(dsn), err)
+		}
+		log.Printf("[DB] Failed to open database with %q (%v), attempting fallback to :memory:", MaskDSN(dsn), err)
+		memDb, memErr := gorm.Open(sqlite.Open(":memory:?_pragma=busy_timeout(5000)"), gormCfg)
+		if memErr != nil {
+			return nil, fmt.Errorf("failed to open database (%v) and memory fallback failed (%v)", err, memErr)
+		}
+		db = memDb
+		isPostgres = false
+		isMySQL = false
+	}
+
+	if !allowMemoryFallback {
+		if sqlDB, sqlErr := db.DB(); sqlErr == nil {
+			if pingErr := sqlDB.PingContext(ctx); pingErr != nil {
+				_ = sqlDB.Close()
+				return nil, fmt.Errorf("failed to ping remote database (%s): %w", MaskDSN(dsn), pingErr)
+			}
+		}
 	}
 
 	// 针对不同数据库引擎调优连接池参数（特别是 Neon Serverless PG 连接池与 SQLite WAL 模式）
-	if sqlDB, err := db.DB(); err == nil {
-		if strings.HasPrefix(trimmed, "postgres://") || strings.HasPrefix(trimmed, "postgresql://") {
+	if sqlDB, sqlErr := db.DB(); sqlErr == nil {
+		if isPostgres || isMySQL {
 			sqlDB.SetMaxIdleConns(5)
 			sqlDB.SetMaxOpenConns(25)
 			sqlDB.SetConnMaxLifetime(30 * time.Minute)
 			sqlDB.SetConnMaxIdleTime(5 * time.Minute)
-		} else if strings.Contains(trimmed, "sqlite") || !strings.Contains(trimmed, "://") {
+		} else {
 			sqlDB.SetMaxOpenConns(1)
 		}
 	}
 
-	// 种入默认内置角色预设与免密号池渠道
-	seedBuiltinPresets(db)
-	seedDefaultChannels(db)
-
-	// 若连接到云端 PostgreSQL，自动检查并从本地 SQLite 无缝自愈迁移历史数据
-	if strings.HasPrefix(trimmed, "postgres://") || strings.HasPrefix(trimmed, "postgresql://") {
-		if err := AutoMigrateSQLiteToPostgres("data/ai-web-free.db", db); err != nil {
-			log.Printf("[DB] 自动同步本地 SQLite 数据至 PostgreSQL 失败: %v", err)
+	models := CoreModels()
+	for _, em := range extraModels {
+		if em != nil {
+			models = append(models, em)
 		}
 	}
 
-	SetDB(db)
+	// 自动平滑迁移模型表结构：对远程数据库先比对 Schema 指纹，未变更时跳过耗时极高的逐表元数据巡检
+	needMigrate := true
+	schemaFingerprint := ""
+	useFingerprint := isPostgres || isMySQL
+	if useFingerprint {
+		schemaFingerprint = computeSchemaFingerprint(models)
+		var meta SchemaMetaRecord
+		if qErr := db.WithContext(ctx).Where("key = ?", "schema_fingerprint").Limit(1).Take(&meta).Error; qErr == nil && meta.Value == schemaFingerprint {
+			needMigrate = false
+		}
+	}
+	if needMigrate {
+		migrateTargets := models
+		if useFingerprint {
+			migrateTargets = append(migrateTargets, &SchemaMetaRecord{})
+		}
+		if mErr := db.WithContext(ctx).AutoMigrate(migrateTargets...); mErr != nil {
+			if !allowMemoryFallback {
+				if sqlDB, sqlErr := db.DB(); sqlErr == nil {
+					_ = sqlDB.Close()
+				}
+			}
+			return nil, fmt.Errorf("failed to auto migrate database schemas: %w", mErr)
+		}
+		if useFingerprint && schemaFingerprint != "" {
+			_ = db.WithContext(ctx).Clauses(clause.OnConflict{UpdateAll: true}).Create(&SchemaMetaRecord{
+				Key:   "schema_fingerprint",
+				Value: schemaFingerprint,
+			}).Error
+		}
+	}
+
+	// 种入默认内置角色预设与免密号池渠道
+	if runSeeds {
+		seedBuiltinPresets(db)
+		seedDefaultChannels(db)
+	}
+
+	// 若在直连云库模式下连接到云端 PostgreSQL，自动检查并从本地 SQLite 无缝自愈迁移历史数据
+	if runLegacySQLiteMigration && isPostgres {
+		if migErr := AutoMigrateSQLiteToPostgres("data/ai-web-free.db", db); migErr != nil {
+			log.Printf("[DB] 自动同步本地 SQLite 数据至 PostgreSQL 失败: %v", migErr)
+		}
+	}
+
 	return db, nil
 }
 
@@ -191,14 +378,12 @@ func seedBuiltinPresets(db *gorm.DB) {
 		},
 	}
 
-	for _, p := range builtin {
-		var existing ChatPreset
-		if err := db.Where("id = ?", p.ID).First(&existing).Error; err != nil {
-			p.CreatedAt = time.Now().UTC()
-			p.UpdatedAt = time.Now().UTC()
-			_ = db.Create(&p).Error
-		}
+	now := time.Now().UTC()
+	for i := range builtin {
+		builtin[i].CreatedAt = now
+		builtin[i].UpdatedAt = now
 	}
+	_ = db.Clauses(clause.OnConflict{DoNothing: true}).Create(&builtin).Error
 }
 
 // seedDefaultChannels 自动录入无需登录与可用的免费多模态渠道到号池数据库
@@ -283,18 +468,17 @@ func seedDefaultChannels(db *gorm.DB) {
 		},
 	}
 
-	for _, ch := range channels {
-		var existing ProviderChannelRecord
-		if err := db.Where("id = ?", ch.ID).First(&existing).Error; err != nil {
-			ch.CreatedAt = time.Now().UTC()
-			ch.UpdatedAt = time.Now().UTC()
-			_ = db.Create(&ch).Error
-		} else if ch.ID == "chan-jianying-tts" && existing.Status == "active" {
-			_ = db.Model(&existing).Updates(map[string]interface{}{
-				"status":      "disabled",
-				"description": ch.Description,
-				"updated_at":  time.Now().UTC(),
-			}).Error
-		}
+	now := time.Now().UTC()
+	for i := range channels {
+		channels[i].CreatedAt = now
+		channels[i].UpdatedAt = now
 	}
+	_ = db.Clauses(clause.OnConflict{DoNothing: true}).Create(&channels).Error
+	_ = db.Model(&ProviderChannelRecord{}).
+		Where("id = ? AND status = ?", "chan-jianying-tts", "active").
+		Updates(map[string]interface{}{
+			"status":      "disabled",
+			"description": channels[0].Description,
+			"updated_at":  now,
+		}).Error
 }

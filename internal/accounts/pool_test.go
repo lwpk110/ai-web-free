@@ -137,3 +137,76 @@ func TestReconcileProxiesKeepsBindingWhenNoHealthyAlternativeExists(t *testing.T
 		t.Fatalf("expected existing proxy binding to be preserved without a healthy alternative, migrated=%d proxy=%q", migrated, acct.Proxy)
 	}
 }
+
+func TestPoolSyncPersistentAccounts(t *testing.T) {
+	p := NewPool(nil)
+
+	a1 := CreateAccount("old-tok-1", TypeFree, DefaultProfiles)
+	a1.ID = "acc-1"
+	a1.Email = "one@example.com"
+	a1.Proxy = "http://127.0.0.1:8001"
+	a1.Status = StatusActive
+	_ = a1.InitClient()
+	origClient := a1.Client
+
+	aBusy := CreateAccount("busy-tok", TypeFree, DefaultProfiles)
+	aBusy.ID = "acc-busy"
+	aBusy.Status = StatusActive
+	aBusy.ActiveAction = "login"
+
+	aDel := CreateAccount("del-tok", TypeFree, DefaultProfiles)
+	aDel.ID = "acc-deleted"
+	aDel.Status = StatusActive
+
+	aTemp := CreateAccount("temp-tok", TypeFree, DefaultProfiles)
+	aTemp.ID = "temp-1"
+	aTemp.IsTemporary = true
+	aTemp.Status = StatusActive
+
+	p.AddAccount(a1)
+	p.AddAccount(aBusy)
+	p.AddAccount(aDel)
+	p.AddAccount(aTemp)
+
+	// 构造云端拉取到的最新持久化账号快照：
+	// - acc-1 更新了 Token，Proxy 未变（应保持 *Account 指针与原 Client）
+	// - acc-busy 进行中不应被覆写
+	// - acc-deleted 被云端删除（应从池中移除）
+	// - acc-new 为新增账号（应加入池）
+	inc1 := CreateAccount("new-tok-1", TypeFree, DefaultProfiles)
+	inc1.ID = "acc-1"
+	inc1.Email = "one@example.com"
+	inc1.Proxy = "http://127.0.0.1:8001"
+	inc1.Status = StatusRateLimited
+	inc1.LastError = "429"
+
+	incBusy := CreateAccount("override-tok", TypeFree, DefaultProfiles)
+	incBusy.ID = "acc-busy"
+	incBusy.Status = StatusExpired
+
+	incNew := CreateAccount("tok-new", TypePUID, DefaultProfiles)
+	incNew.ID = "acc-new"
+	incNew.Status = StatusActive
+
+	added, updated, removed := p.SyncPersistentAccounts([]*Account{inc1, incBusy, incNew})
+	if added != 1 || updated != 1 || removed != 1 {
+		t.Fatalf("unexpected sync counts: added=%d updated=%d removed=%d", added, updated, removed)
+	}
+
+	got1 := p.GetByID("acc-1")
+	if got1 != a1 || got1.Token != "new-tok-1" || got1.Status != StatusRateLimited || got1.Client != origClient {
+		t.Fatalf("expected in-place update preserving pointer & client, got %+v", got1)
+	}
+	if p.GetByID("acc-busy").Token != "busy-tok" {
+		t.Fatal("expected in-flight ActiveAction account not to be clobbered")
+	}
+	if p.GetByID("acc-deleted") != nil {
+		t.Fatal("expected deleted persistent account to be removed")
+	}
+	if p.GetByID("temp-1") == nil {
+		t.Fatal("expected temporary account to be preserved")
+	}
+	if gotNew := p.GetByID("acc-new"); gotNew == nil || gotNew.Client == nil || gotNew.Type != TypePUID {
+		t.Fatalf("expected new PUID account initialized in pool, got %+v", gotNew)
+	}
+}

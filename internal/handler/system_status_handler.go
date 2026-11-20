@@ -1,10 +1,15 @@
 package handler
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"strings"
 	"time"
 
+	"ai-web-free/internal/db"
 	"ai-web-free/internal/health"
 	"ai-web-free/internal/proxy"
 	"ai-web-free/internal/storage"
@@ -181,7 +186,8 @@ func (h *AdminHandler) collectSubsystemHealth() []health.SubsystemHealth {
 		})
 	}
 
-	// 4. 持久化数据库
+	// 4. 持久化数据库（支持本地 SQLite 物化 + 异步云同步模式识别）
+	syncEng := h.syncEngine()
 	if h.runtime != nil && h.runtime.DB != nil {
 		sqlDB, err := h.runtime.DB.DB()
 		if err != nil {
@@ -198,12 +204,46 @@ func (h *AdminHandler) collectSubsystemHealth() []health.SubsystemHealth {
 				Status: "unhealthy",
 				Detail: fmt.Sprintf("数据库 Ping 失败: %v", pingErr),
 			})
+		} else if syncEng != nil {
+			st := syncEng.Status()
+			subStatus := "healthy"
+			detail := fmt.Sprintf("本地 SQLite 物化就绪 · 同步至 %s · Outbox 待推送 %d 条", st.CloudTarget, st.OutboxPending)
+			if st.State == "degraded" {
+				subStatus = "degraded"
+				detail = fmt.Sprintf("本地 SQLite 正常，云端同步降级重试中 (失败 %d 次，待推送 %d 条)", st.ConsecutiveFailures, st.OutboxPending)
+			} else if st.State == "connecting" || st.State == "hydrating" {
+				detail = fmt.Sprintf("本地 SQLite 已就绪，后台正在建连/对齐 %s", st.CloudTarget)
+			}
+			subsystems = append(subsystems, health.SubsystemHealth{
+				Name:   "database",
+				Label:  "持久化数据库",
+				Status: subStatus,
+				Detail: detail,
+				Meta: map[string]any{
+					"mode":                 st.Mode,
+					"state":                st.State,
+					"outbox_pending":       st.OutboxPending,
+					"cloud_connected":      st.CloudConnected,
+					"initial_hydrated":     st.InitialHydrated,
+					"last_sync_latency_ms": st.LastSyncLatencyMs,
+					"cloud_target":         st.CloudTarget,
+					"local_path":           st.LocalPath,
+				},
+			})
 		} else {
+			mode := "local_only"
+			meta := map[string]any{"mode": mode}
+			if h.cfg != nil && db.IsRemoteDSN(h.cfg.DatabaseURL) {
+				mode = "direct"
+				meta["mode"] = mode
+				meta["cloud_target"] = db.MaskDSN(h.cfg.DatabaseURL)
+			}
 			subsystems = append(subsystems, health.SubsystemHealth{
 				Name:   "database",
 				Label:  "持久化数据库",
 				Status: "healthy",
 				Detail: fmt.Sprintf("连接正常（%s）", h.runtime.DB.Dialector.Name()),
+				Meta:   meta,
 			})
 		}
 	} else {
@@ -304,4 +344,94 @@ func (h *AdminHandler) PublicHealth(c *gin.Context) {
 // SystemStatus 返回完整服务器状态监控报告：GET /admin/api/v1/system/status。
 func (h *AdminHandler) SystemStatus(c *gin.Context) {
 	c.JSON(http.StatusOK, h.BuildServerStatus())
+}
+
+func (h *AdminHandler) syncEngine() *db.SyncEngine {
+	if h.runtime != nil && h.runtime.SyncEngine != nil {
+		return h.runtime.SyncEngine
+	}
+	return db.GetSyncEngine()
+}
+
+func (h *AdminHandler) buildDBSyncStatus() db.SyncStatus {
+	if eng := h.syncEngine(); eng != nil {
+		return eng.Status()
+	}
+	mode := "local_only"
+	localPath := "data/ai-web-free.db"
+	cloudTarget := ""
+	if h.cfg != nil {
+		if strings.TrimSpace(h.cfg.DBLocalPath) != "" {
+			localPath = h.cfg.DBLocalPath
+		}
+		if db.IsRemoteDSN(h.cfg.DatabaseURL) {
+			mode = "direct"
+			cloudTarget = db.MaskDSN(h.cfg.DatabaseURL)
+		} else if strings.TrimSpace(h.cfg.DatabaseURL) != "" {
+			localPath = h.cfg.DatabaseURL
+		}
+	}
+	return db.SyncStatus{
+		Enabled:     false,
+		Mode:        mode,
+		State:       "disabled",
+		LocalPath:   localPath,
+		CloudTarget: cloudTarget,
+	}
+}
+
+// DBSyncStatus 返回物化数据库同步引擎状态：GET /admin/api/v1/db/sync/status。
+func (h *AdminHandler) DBSyncStatus(c *gin.Context) {
+	c.JSON(http.StatusOK, h.buildDBSyncStatus())
+}
+
+type triggerDBSyncReq struct {
+	Direction string `json:"direction"`
+}
+
+// TriggerDBSync 手动触发一次物化同步推/拉：POST /admin/api/v1/db/sync/trigger。
+func (h *AdminHandler) TriggerDBSync(c *gin.Context) {
+	var req triggerDBSyncReq
+	if err := c.ShouldBindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请求 JSON 格式无效"})
+		return
+	}
+
+	dir := strings.ToLower(strings.TrimSpace(req.Direction))
+	if dir == "" {
+		dir = string(db.SyncDirectionBoth)
+	}
+	switch db.SyncDirection(dir) {
+	case db.SyncDirectionBoth, db.SyncDirectionPush, db.SyncDirectionPull:
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的同步方向，仅支持 both / push / pull"})
+		return
+	}
+
+	eng := h.syncEngine()
+	if eng == nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":  "物化数据库同步未启用（需设置 DB_MATERIALIZE_ENABLED=true 且配置远程 DATABASE_URL）",
+			"status": h.buildDBSyncStatus(),
+		})
+		return
+	}
+
+	timeout := 20 * time.Second
+	if h.cfg != nil && h.cfg.DBSyncTimeout > 0 && h.cfg.DBSyncTimeout < timeout {
+		timeout = h.cfg.DBSyncTimeout
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), timeout)
+	defer cancel()
+
+	status, err := eng.TriggerSync(ctx, db.SyncDirection(dir))
+	resp := gin.H{
+		"ok":        err == nil,
+		"direction": dir,
+		"status":    status,
+	}
+	if err != nil {
+		resp["error"] = err.Error()
+	}
+	c.JSON(http.StatusOK, resp)
 }

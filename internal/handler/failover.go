@@ -15,6 +15,7 @@ import (
 	"ai-web-free/internal/audit"
 	"ai-web-free/internal/chatgpt"
 	"ai-web-free/internal/config"
+	"ai-web-free/internal/db"
 	"ai-web-free/internal/health"
 	"ai-web-free/internal/mcp"
 	"ai-web-free/internal/opslog"
@@ -39,6 +40,7 @@ type GatewayRuntime struct {
 	PromptPlaza   *promptplaza.Manager
 	Config        *config.Config
 	DB            *gorm.DB
+	SyncEngine    *db.SyncEngine
 	StorageEngine storage.StorageEngine
 	VectorStore   vectorstore.VectorStore
 	HealthTracker *health.Tracker

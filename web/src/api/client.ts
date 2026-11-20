@@ -366,6 +366,55 @@ export interface ServerStatusReport {
   subsystems: SubsystemHealth[];
 }
 
+export interface TableSyncStatus {
+  table_name: string;
+  last_pull_at?: string;
+  initial_reconciled: boolean;
+  pending_outbox: number;
+  pushed_rows: number;
+  pulled_rows: number;
+  deleted_rows: number;
+  has_blob_data?: boolean;
+}
+
+export interface DBSyncStatus {
+  enabled: boolean;
+  mode: "materialized" | "direct" | "local_only" | string;
+  state:
+    | "idle"
+    | "connecting"
+    | "hydrating"
+    | "syncing"
+    | "degraded"
+    | "disabled"
+    | "stopped"
+    | string;
+  local_path?: string;
+  cloud_target?: string;
+  cloud_connected: boolean;
+  initial_hydrated: boolean;
+  outbox_pending: number;
+  last_push_at?: string;
+  last_pull_at?: string;
+  last_sync_latency_ms: number;
+  total_pushed: number;
+  total_pulled: number;
+  total_deleted: number;
+  consecutive_failures: number;
+  last_error?: string;
+  next_retry_at?: string;
+  push_interval?: string;
+  pull_interval?: string;
+  tables?: TableSyncStatus[];
+}
+
+export interface TriggerDBSyncResponse {
+  ok: boolean;
+  direction: "both" | "push" | "pull" | string;
+  error?: string;
+  status: DBSyncStatus;
+}
+
 export interface OverviewResponse {
   service: string;
   version: string;
@@ -460,6 +509,27 @@ export async function fetchServerStatus(): Promise<ServerStatusReport> {
   const res = await adminFetch("/admin/api/v1/system/status");
   if (!res.ok) throw new Error(`Server status failed: HTTP ${res.status}`);
   return res.json();
+}
+
+export async function fetchDBSyncStatus(): Promise<DBSyncStatus> {
+  const res = await adminFetch("/admin/api/v1/db/sync/status");
+  if (!res.ok) throw new Error(`DB sync status failed: HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function triggerDBSync(
+  direction: "both" | "push" | "pull" = "both"
+): Promise<TriggerDBSyncResponse> {
+  const res = await adminFetch("/admin/api/v1/db/sync/trigger", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ direction }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(data?.error || `Trigger DB sync failed: HTTP ${res.status}`);
+  }
+  return data;
 }
 
 export async function fetchAccounts(

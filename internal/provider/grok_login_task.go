@@ -525,12 +525,16 @@ func (p *GrokProvider) runGrokLoginTask(taskID string) {
 		p.setGrokAccountActionState(item.accountID, "launch_browser", taskID, 0, startedAt)
 		ranBrowser = true
 
-		loginCtx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+		loginTimeout := 180 * time.Second
+		if !item.headless {
+			loginTimeout = 240 * time.Second
+		}
+		loginCtx, cancel := context.WithTimeout(context.Background(), loginTimeout)
 		p.updateGrokLoginPhase(taskID, item.accountID, "open_login")
 		cookie, err := loginFn(loginCtx, card, GrokLoginOptions{
 			ProxyURL: proxyURL,
 			Headless: item.headless,
-			Timeout:  180 * time.Second,
+			Timeout:  loginTimeout,
 		})
 		cancel()
 

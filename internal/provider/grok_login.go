@@ -8,11 +8,13 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
 
 	"ai-web-free/internal/accounts"
 
+	"github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/chromedp"
@@ -228,8 +230,7 @@ func loginGrokCard(ctx context.Context, card GrokCardAccount, options GrokLoginO
 		proxyURL = options.ProxyURL
 	}
 
-	var allocatorOptions []chromedp.ExecAllocatorOption
-	allocatorOptions = append(allocatorOptions,
+	allocatorOptions := append(chromedp.DefaultExecAllocatorOptions[:],
 		chromedp.ExecPath(options.BrowserPath),
 		chromedp.NoFirstRun,
 		chromedp.NoDefaultBrowserCheck,
@@ -239,16 +240,26 @@ func loginGrokCard(ctx context.Context, card GrokCardAccount, options GrokLoginO
 		chromedp.Flag("lang", "zh-CN,zh,en-US,en"),
 		chromedp.WindowSize(1280, 800),
 	)
-	if proxyURL != "" {
-		allocatorOptions = append(allocatorOptions, chromedp.ProxyServer(proxyURL))
+	if runtime.GOOS == "linux" {
+		allocatorOptions = append(allocatorOptions,
+			chromedp.Flag("no-sandbox", true),
+			chromedp.Flag("disable-dev-shm-usage", true),
+		)
 	}
 	if options.Headless {
 		allocatorOptions = append(allocatorOptions, chromedp.Flag("headless", "new"))
 	} else {
-		allocatorOptions = append(allocatorOptions, chromedp.Flag("start-maximized", true))
+		allocatorOptions = append(allocatorOptions,
+			chromedp.VisibleWindow,
+			chromedp.Flag("new-window", true),
+			chromedp.Flag("start-maximized", true),
+		)
+	}
+	if proxyURL != "" {
+		allocatorOptions = append(allocatorOptions, chromedp.ProxyServer(proxyURL))
 	}
 
-	allocatorContext, allocatorCancel := chromedp.NewExecAllocator(ctx, allocatorOptions...)
+	allocatorContext, allocatorCancel := chromedp.NewExecAllocator(context.Background(), allocatorOptions...)
 	defer allocatorCancel()
 
 	browserContext, browserCancel := chromedp.NewContext(allocatorContext)
@@ -277,6 +288,7 @@ func loginGrokCard(ctx context.Context, card GrokCardAccount, options GrokLoginO
 	if err := chromedp.Do(loginContext, chromedp.Navigate(grokSignInURL)); err != nil {
 		return "", fmt.Errorf("open sign-in page: %w", err)
 	}
+	_, _ = chromedp.Call(loginContext, page.BringToFront, cdp.Empty{})
 	time.Sleep(500 * time.Millisecond)
 	dismissGrokCookieBanner(loginContext)
 
@@ -312,10 +324,11 @@ func loginGrokCard(ctx context.Context, card GrokCardAccount, options GrokLoginO
 	// 探测 Cloudflare Turnstile 人机验证
 	turnstilePresent, token := checkGrokTurnstileState(loginContext)
 	if turnstilePresent && token == "" {
+		_, _ = chromedp.Call(loginContext, page.BringToFront, cdp.Empty{})
 		reportPhase("waiting_challenge")
-		waitMax := 10 * time.Second
+		waitMax := 15 * time.Second
 		if !options.Headless {
-			waitMax = 90 * time.Second
+			waitMax = 120 * time.Second
 		}
 		waitDeadline := time.Now().Add(waitMax)
 		resolved := false

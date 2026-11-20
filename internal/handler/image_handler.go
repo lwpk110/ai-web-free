@@ -21,6 +21,7 @@ import (
 	officialtypes "ai-web-free/typings/official"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 type ImageHandler struct {
@@ -225,7 +226,116 @@ func (h *ImageHandler) Generations(c *gin.Context) {
 	}
 
 	modelLower := strings.ToLower(strings.TrimSpace(imageRequest.Model))
-	if strings.Contains(modelLower, "wanx") || strings.Contains(modelLower, "jimeng") || strings.Contains(modelLower, "flux") || strings.Contains(modelLower, "grok") {
+	if strings.Contains(modelLower, "grok") {
+		gr := h.getGrokProvider()
+		if gr == nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"error": gin.H{
+					"message": "Grok provider not configured or unavailable",
+					"type":    "provider_unavailable",
+					"param":   "model",
+					"code":    "provider_unavailable",
+				},
+			})
+			return
+		}
+
+		stream := requestStreamFlag(c, imageRequest.Stream)
+		res, err := gr.GenerateImageAsset(c.Request.Context(), imageRequest.Prompt, imageRequest.Model, imageRequest.Size, imageRequest.N)
+		rt := h.ensureRuntime()
+		failoverRes := FailoverResult{
+			Account:    &accounts.Account{ID: res.AccountID, Email: res.Email, Proxy: res.Proxy},
+			Attempts:   res.Attempts,
+			Trace:      res.Trace,
+			DurationMs: res.DurationMs,
+		}
+
+		if err != nil {
+			// 若显式允许降级，尝试回退至 SiliconFlow FLUX
+			if strings.EqualFold(c.GetHeader("X-Allow-Fallback"), "true") {
+				if sf := h.getSiliconFlowProvider(); sf != nil {
+					fallbackURL, sfErr := sf.GenerateImage(c.Request.Context(), imageRequest.Prompt, imageRequest.Model, imageRequest.Size)
+					if sfErr == nil && fallbackURL != "" {
+						c.Header("X-Image-Provider", "siliconflow")
+						c.Header("X-Fallback-Provider", "siliconflow")
+						c.JSON(200, gin.H{
+							"created": time.Now().Unix(),
+							"data": []gin.H{
+								{
+									"url":            fallbackURL,
+									"revised_prompt": imageRequest.Prompt,
+								},
+							},
+						})
+						rt.RecordAudit(c, imageRequest.Model, failoverRes, 200, nil)
+						return
+					}
+				}
+			}
+
+			rt.RecordAudit(c, imageRequest.Model, failoverRes, 502, err)
+			h.writeImageFailure(c, stream, 0, imageRequest.N, "image_generation_error", err)
+			return
+		}
+
+		rt.RecordAudit(c, imageRequest.Model, failoverRes, 200, nil)
+		c.Header("X-Image-Provider", "grok")
+
+		data := make([]officialtypes.ImageGenerationData, 0, len(res.Images))
+		for _, img := range res.Images {
+			item := officialtypes.ImageGenerationData{
+				RevisedPrompt: img.RevisedPrompt,
+			}
+			if imageRequest.ResponseFormat == "b64_json" {
+				item.B64JSON = img.B64JSON
+			} else {
+				// 若已挂载存储引擎，将鉴权资源落地为本地无损静态链接
+				if h.runtime != nil && h.runtime.StorageEngine != nil && img.B64JSON != "" {
+					if rawBytes, decErr := base64.StdEncoding.DecodeString(img.B64JSON); decErr == nil && len(rawBytes) > 0 {
+						idHint := "grok-" + uuid.NewString()[:8]
+						if savedURL, _, sErr := h.runtime.StorageEngine.Save(c.Request.Context(), idHint, rawBytes, "image/jpeg"); sErr == nil && savedURL != "" {
+							item.URL = savedURL
+						}
+					}
+				}
+				if item.URL == "" {
+					if img.B64JSON != "" {
+						item.URL = "data:image/jpeg;base64," + img.B64JSON
+					} else {
+						item.URL = img.URL
+					}
+				}
+			}
+			data = append(data, item)
+		}
+
+		if stream {
+			writeImageStreamHeader(c)
+			for i, item := range data {
+				writeImageStreamEvent(c, "image.generation.result", imageStreamResult{
+					Object:  "image.generation.result",
+					Index:   i,
+					Total:   len(data),
+					Created: time.Now().Unix(),
+					Model:   imageRequest.Model,
+					Data:    []officialtypes.ImageGenerationData{item},
+				})
+			}
+			writeImageStreamEvent(c, "image.generation.completed", imageStreamCompleted{
+				Object:  "image.generation.completed",
+				Created: time.Now().Unix(),
+				Model:   imageRequest.Model,
+				Data:    data,
+			})
+			writeImageStreamDone(c)
+			return
+		}
+
+		c.JSON(200, officialtypes.NewImageGenerationResponse(data))
+		return
+	}
+
+	if strings.Contains(modelLower, "wanx") || strings.Contains(modelLower, "jimeng") || strings.Contains(modelLower, "flux") {
 		var imgURL string
 		var genErr error
 		usedProvider := ""
@@ -239,11 +349,6 @@ func (h *ImageHandler) Generations(c *gin.Context) {
 			if jm := h.getJimengProvider(); jm != nil {
 				imgURL, genErr = jm.GenerateImage(c.Request.Context(), imageRequest.Prompt, imageRequest.Model, imageRequest.Size)
 				usedProvider = "jimeng"
-			}
-		} else if strings.Contains(modelLower, "grok") {
-			if gr := h.getGrokProvider(); gr != nil {
-				imgURL, genErr = gr.GenerateImage(c.Request.Context(), imageRequest.Prompt, imageRequest.Model, imageRequest.Size)
-				usedProvider = "grok"
 			}
 		}
 
@@ -273,6 +378,14 @@ func (h *ImageHandler) Generations(c *gin.Context) {
 			})
 			return
 		}
+
+		// 非 ChatGPT 模型若失败，坚决不可向下穿透至 ChatGPT 号池
+		stream := requestStreamFlag(c, imageRequest.Stream)
+		if genErr == nil {
+			genErr = fmt.Errorf("provider %s failed to generate image", usedProvider)
+		}
+		h.writeImageFailure(c, stream, 0, imageRequest.N, "image_generation_error", genErr)
+		return
 	}
 
 	effectivePrompt := chatgpt.DecorateImagePrompt(imageRequest.Prompt, imageRequest.Model, imageRequest.Size, imageRequest.Quality)
@@ -1118,6 +1231,17 @@ func (h *ImageHandler) runImageEditFlow(c *gin.Context, asVariation bool) {
 		}
 	}
 
+	modelLower := strings.ToLower(strings.TrimSpace(model))
+	if strings.Contains(modelLower, "grok") {
+		c.JSON(400, gin.H{"error": gin.H{
+			"message": "Grok does not support image editing or variation",
+			"type":    "invalid_request_error",
+			"param":   "model",
+			"code":    "model_unsupported",
+		}})
+		return
+	}
+
 	if len(imageSources) == 0 {
 		c.JSON(400, gin.H{"error": gin.H{
 			"message": "Missing required image input. Provide multipart 'image'/'images' field, or JSON 'image'/'images' field with image_url.",
@@ -1188,8 +1312,11 @@ func (h *ImageHandler) GenerateImageData(ctx context.Context, prompt, model, siz
 			}
 		} else if strings.Contains(modelLower, "grok") {
 			if gr := h.getGrokProvider(); gr != nil {
-				imgURL, genErr = gr.GenerateImage(ctx, prompt, model, size)
-				usedModel = model
+				res, err := gr.GenerateImageAsset(ctx, prompt, model, size, 1)
+				if err == nil && len(res.Images) > 0 {
+					return res.Images[0].URL, res.Images[0].B64JSON, model, nil
+				}
+				genErr = err
 			}
 		}
 		if imgURL == "" && (strings.Contains(modelLower, "flux") || genErr != nil) {
