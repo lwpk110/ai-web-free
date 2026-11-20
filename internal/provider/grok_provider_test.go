@@ -227,7 +227,23 @@ func TestGrokProviderAccountActions(t *testing.T) {
 		t.Fatalf("expected 1 active account")
 	}
 
-	// 3. 停用
+	// 3. 读取 Cookie
+	res, err = p.ExecuteAccountAction(acctID, "get_cookie")
+	if err != nil || res["cookie"] != "sso=action_token; sso-rw=action_rw" {
+		t.Fatalf("failed to get_cookie: %v, %v", res, err)
+	}
+
+	// 4. 手动更新 Cookie
+	updRes, err := p.UpdateAccountCookie(acctID, "sso=new_sso; sso-rw=new_rw")
+	if err != nil || updRes["updated"] != true {
+		t.Fatalf("failed to update cookie: %v, %v", updRes, err)
+	}
+	res, err = p.ExecuteAccountAction(acctID, "get_cookie")
+	if err != nil || res["cookie"] != "sso=new_sso; sso-rw=new_rw" {
+		t.Fatalf("failed to verify updated cookie: %v, %v", res, err)
+	}
+
+	// 5. 停用
 	res, err = p.ExecuteAccountAction(acctID, "disable")
 	if err != nil || res["status"] != "disabled" {
 		t.Fatalf("failed to disable: %v, %v", res, err)
@@ -236,7 +252,7 @@ func TestGrokProviderAccountActions(t *testing.T) {
 		t.Fatalf("expected 1 disabled account")
 	}
 
-	// 4. 删除
+	// 6. 删除
 	res, err = p.ExecuteAccountAction(acctID, "delete")
 	if err != nil || res["deleted"] != true {
 		t.Fatalf("failed to delete: %v, %v", res, err)

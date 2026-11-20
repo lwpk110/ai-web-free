@@ -17,6 +17,7 @@ import (
 	"github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/cdproto/page"
+	"github.com/chromedp/cdproto/storage"
 	"github.com/chromedp/chromedp"
 )
 
@@ -230,13 +231,25 @@ func loginGrokCard(ctx context.Context, card GrokCardAccount, options GrokLoginO
 		proxyURL = options.ProxyURL
 	}
 
+	var defaultUA string
+	switch runtime.GOOS {
+	case "linux":
+		defaultUA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
+	case "darwin":
+		defaultUA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
+	default:
+		defaultUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
+	}
+
 	allocatorOptions := append(chromedp.DefaultExecAllocatorOptions[:],
 		chromedp.ExecPath(options.BrowserPath),
 		chromedp.NoFirstRun,
 		chromedp.NoDefaultBrowserCheck,
 		chromedp.Flag("incognito", true),
 		chromedp.Flag("disable-blink-features", "AutomationControlled"),
-		chromedp.Flag("user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"),
+		chromedp.Flag("enable-automation", false),
+		chromedp.Flag("excludeSwitches", "enable-automation"),
+		chromedp.Flag("user-agent", defaultUA),
 		chromedp.Flag("lang", "zh-CN,zh,en-US,en"),
 		chromedp.WindowSize(1280, 800),
 	)
@@ -272,9 +285,7 @@ func loginGrokCard(ctx context.Context, card GrokCardAccount, options GrokLoginO
 		return "", fmt.Errorf("enable network events: %w", err)
 	}
 	_, _ = chromedp.Call(loginContext, page.AddScriptToEvaluateOnNewDocument, page.AddScriptToEvaluateOnNewDocumentParams{
-		Source: `Object.defineProperty(navigator, "webdriver", {get: () => undefined});` +
-			`window.chrome = window.chrome || {runtime: {}};` +
-			`if (!navigator.languages || navigator.languages.length === 0) {` +
+		Source: `if (!navigator.languages || navigator.languages.length === 0) {` +
 			`Object.defineProperty(navigator, "languages", {get: () => ["zh-CN", "zh", "en-US", "en"]});}`,
 	})
 
@@ -282,6 +293,11 @@ func loginGrokCard(ctx context.Context, card GrokCardAccount, options GrokLoginO
 		if options.OnPhase != nil {
 			options.OnPhase(card.Email, phase, KamiPhaseLabel(phase))
 		}
+	}
+
+	// 轮询检查是否已在任意页面截获有效 SSO Cookie
+	pollCookie := func() string {
+		return extractGrokSSOCookie(loginContext)
 	}
 
 	reportPhase("open_login")
@@ -292,9 +308,16 @@ func loginGrokCard(ctx context.Context, card GrokCardAccount, options GrokLoginO
 	time.Sleep(500 * time.Millisecond)
 	dismissGrokCookieBanner(loginContext)
 
+	if cookie := pollCookie(); cookie != "" {
+		return cookie, nil
+	}
+
 	reportPhase("enter_email")
 	emailSelector := `input[name="email"], input#email, input[type="email"]`
 	if err := waitGrokVisible(loginContext, emailSelector, 30*time.Second); err != nil {
+		if cookie := pollCookie(); cookie != "" {
+			return cookie, nil
+		}
 		return "", fmt.Errorf("email input not found: %w", err)
 	}
 	if err := chromedp.Do(loginContext,
@@ -305,12 +328,22 @@ func loginGrokCard(ctx context.Context, card GrokCardAccount, options GrokLoginO
 	}
 	time.Sleep(300 * time.Millisecond)
 	if err := clickGrokSubmit(loginContext); err != nil {
+		if cookie := pollCookie(); cookie != "" {
+			return cookie, nil
+		}
 		return "", fmt.Errorf("submit email: %w", err)
+	}
+
+	if cookie := pollCookie(); cookie != "" {
+		return cookie, nil
 	}
 
 	reportPhase("enter_password")
 	passwordSelector := `input[name="password"], input[type="password"]`
 	if err := waitGrokVisible(loginContext, passwordSelector, 30*time.Second); err != nil {
+		if cookie := pollCookie(); cookie != "" {
+			return cookie, nil
+		}
 		return "", fmt.Errorf("password input not found: %w", err)
 	}
 	dismissGrokCookieBanner(loginContext)
@@ -321,7 +354,27 @@ func loginGrokCard(ctx context.Context, card GrokCardAccount, options GrokLoginO
 		return "", fmt.Errorf("fill password: %w", err)
 	}
 
-	// 探测 Cloudflare Turnstile 人机验证
+	// 等待 Turnstile 人机验证通过或捕获 SSO Cookie 的统一循环
+	waitForTurnstileOrCookie := func(maxWait time.Duration) (bool, error) {
+		deadline := time.Now().Add(maxWait)
+		for time.Now().Before(deadline) {
+			select {
+			case <-loginContext.Done():
+				return false, loginContext.Err()
+			case <-time.After(500 * time.Millisecond):
+			}
+			if cookie := pollCookie(); cookie != "" {
+				return true, nil
+			}
+			present, curToken := checkGrokTurnstileState(loginContext)
+			if !present || curToken != "" {
+				return true, nil
+			}
+		}
+		return false, nil
+	}
+
+	// 探测 Cloudflare Turnstile 人机验证（密码输入后）
 	turnstilePresent, token := checkGrokTurnstileState(loginContext)
 	if turnstilePresent && token == "" {
 		_, _ = chromedp.Call(loginContext, page.BringToFront, cdp.Empty{})
@@ -330,19 +383,12 @@ func loginGrokCard(ctx context.Context, card GrokCardAccount, options GrokLoginO
 		if !options.Headless {
 			waitMax = 120 * time.Second
 		}
-		waitDeadline := time.Now().Add(waitMax)
-		resolved := false
-		for time.Now().Before(waitDeadline) {
-			select {
-			case <-loginContext.Done():
-				return "", loginContext.Err()
-			case <-time.After(500 * time.Millisecond):
-			}
-			_, curToken := checkGrokTurnstileState(loginContext)
-			if curToken != "" {
-				resolved = true
-				break
-			}
+		resolved, err := waitForTurnstileOrCookie(waitMax)
+		if err != nil {
+			return "", err
+		}
+		if cookie := pollCookie(); cookie != "" {
+			return cookie, nil
 		}
 		if !resolved {
 			if options.Headless {
@@ -354,19 +400,66 @@ func loginGrokCard(ctx context.Context, card GrokCardAccount, options GrokLoginO
 	}
 
 	dismissGrokCookieBanner(loginContext)
-	if err := clickGrokSubmit(loginContext); err != nil {
-		return "", fmt.Errorf("submit password: %w", err)
-	}
+	_ = clickGrokSubmit(loginContext)
 
 	time.Sleep(1 * time.Second)
+	if cookie := pollCookie(); cookie != "" {
+		return cookie, nil
+	}
+
+	// 若点击提交后再次触发 Turnstile 人机验证
+	turnstilePresent, token = checkGrokTurnstileState(loginContext)
+	if turnstilePresent && token == "" {
+		_, _ = chromedp.Call(loginContext, page.BringToFront, cdp.Empty{})
+		reportPhase("waiting_challenge")
+		waitMax := 15 * time.Second
+		if !options.Headless {
+			waitMax = 120 * time.Second
+		}
+		resolved, err := waitForTurnstileOrCookie(waitMax)
+		if err != nil {
+			return "", err
+		}
+		if cookie := pollCookie(); cookie != "" {
+			return cookie, nil
+		}
+		if resolved {
+			_ = clickGrokSubmit(loginContext)
+			time.Sleep(1 * time.Second)
+		}
+	}
+
 	if postErr := checkGrokPostSubmitError(loginContext); postErr != nil {
-		return "", postErr
+		if cookie := pollCookie(); cookie != "" {
+			return cookie, nil
+		}
+		if !options.Headless && strings.Contains(postErr.Error(), "Turnstile") {
+			reportPhase("waiting_challenge")
+			_, _ = waitForTurnstileOrCookie(60 * time.Second)
+			if cookie := pollCookie(); cookie != "" {
+				return cookie, nil
+			}
+		} else {
+			return "", postErr
+		}
 	}
 
 	otpSelector := `input[inputmode="numeric"], input[name="code"], input[name="otp"], input[autocomplete="one-time-code"], input[placeholder*="code" i], input[placeholder*="验证码" i]`
 	if err := waitGrokVisible(loginContext, otpSelector, 10*time.Second); err == nil {
+		if cookie := pollCookie(); cookie != "" {
+			return cookie, nil
+		}
 		reportPhase("enter_totp")
 		if card.TOTPSecret == "" {
+			if !options.Headless {
+				deadline := time.Now().Add(60 * time.Second)
+				for time.Now().Before(deadline) {
+					if cookie := pollCookie(); cookie != "" {
+						return cookie, nil
+					}
+					time.Sleep(1 * time.Second)
+				}
+			}
 			return "", errors.New("该账号需要 2FA 验证码，但卡密中未配置 TOTP Secret")
 		}
 		code, _, totpErr := accounts.GenerateTOTP(card.TOTPSecret, time.Now())
@@ -380,6 +473,9 @@ func loginGrokCard(ctx context.Context, card GrokCardAccount, options GrokLoginO
 			return "", fmt.Errorf("fill OTP: %w", err)
 		}
 		if err := clickGrokSubmit(loginContext); err != nil {
+			if cookie := pollCookie(); cookie != "" {
+				return cookie, nil
+			}
 			return "", fmt.Errorf("submit OTP: %w", err)
 		}
 	}
@@ -387,7 +483,7 @@ func loginGrokCard(ctx context.Context, card GrokCardAccount, options GrokLoginO
 	reportPhase("wait_session_token")
 	deadline := time.Now().Add(options.Timeout)
 	for time.Now().Before(deadline) {
-		cookie := extractGrokSSOCookie(loginContext)
+		cookie := pollCookie()
 		if cookie != "" {
 			return cookie, nil
 		}
@@ -424,11 +520,12 @@ func waitGrokVisible(ctx context.Context, selector string, timeout time.Duration
 
 func clickGrokSubmit(ctx context.Context) error {
 	clicked, err := chromedp.Run(ctx, chromedp.Evaluate[bool](`(() => {
-		const submit = document.querySelector('button[type="submit"]');
-		if (submit && submit.offsetParent !== null) { submit.click(); return true; }
-		const buttons = Array.from(document.querySelectorAll("button"));
-		const match = buttons.find(button => button.offsetParent !== null && /^(next|continue|verify|下一步|继续|验证)$/i.test((button.innerText || "").trim()));
+		const submit = document.querySelector('button[type="submit"], input[type="submit"]');
+		if (submit && submit.offsetParent !== null && !submit.disabled) { submit.click(); return true; }
+		const buttons = Array.from(document.querySelectorAll("button, input[type=\"button\"]"));
+		const match = buttons.find(button => button.offsetParent !== null && !button.disabled && /^(next|continue|verify|submit|log in|sign in|下一步|继续|验证|登录)$/i.test((button.innerText || button.value || "").trim()));
 		if (match) { match.click(); return true; }
+		if (submit && submit.offsetParent !== null) { submit.click(); return true; }
 		return false;
 	})()`))
 	if err != nil {
@@ -494,20 +591,34 @@ func checkGrokPostSubmitError(ctx context.Context) error {
 }
 
 func extractGrokSSOCookie(ctx context.Context) string {
+	values := make(map[string]string)
+
+	// 1. 全局存储检索（不受特定 URL 路径限制）
+	if storageRes, err := chromedp.Call(ctx, storage.GetCookies, storage.GetCookiesParams{}); err == nil {
+		for _, cookie := range storageRes.Cookies {
+			name := strings.ToLower(cookie.Name)
+			if (name == "sso" || name == "sso-rw") && cookie.Value != "" && grokCookieDomainAllowed(cookie.Domain) {
+				values[name] = cookie.Value
+			}
+		}
+		if len(values) > 0 {
+			return FormatGrokSSOCookie(values)
+		}
+	}
+
+	// 2. 显式 URL 域检索兜底
 	response, err := chromedp.Call(ctx, network.GetCookies, network.GetCookiesParams{
-		URLs: []string{"https://grok.com", "https://x.ai", "https://accounts.x.ai"},
+		URLs: []string{"https://grok.com", "https://x.ai", "https://accounts.x.ai", "https://x.com"},
 	})
 	if err != nil {
 		return ""
 	}
 
-	values := make(map[string]string)
 	for _, cookie := range response.Cookies {
 		name := strings.ToLower(cookie.Name)
-		if name != "sso" && name != "sso-rw" || cookie.Value == "" || !grokCookieDomainAllowed(cookie.Domain) {
-			continue
+		if (name == "sso" || name == "sso-rw") && cookie.Value != "" && grokCookieDomainAllowed(cookie.Domain) {
+			values[name] = cookie.Value
 		}
-		values[name] = cookie.Value
 	}
 	return FormatGrokSSOCookie(values)
 }

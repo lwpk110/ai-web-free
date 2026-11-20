@@ -1491,6 +1491,23 @@ func (p *GrokProvider) ExecuteAccountActionWithOpts(id, action string, headless 
 		}, nil
 	}
 
+	if action == "get_cookie" {
+		p.mu.RLock()
+		target := p.findGrokAccountLocked(id)
+		if target == nil {
+			p.mu.RUnlock()
+			return nil, errors.New("账号不存在")
+		}
+		cookie := target.Cookie
+		email := target.Email
+		p.mu.RUnlock()
+		return map[string]interface{}{
+			"id":     id,
+			"email":  email,
+			"cookie": cookie,
+		}, nil
+	}
+
 	if action == "probe" || action == "test" {
 		return p.executeGrokProbe(id)
 	}
@@ -1578,8 +1595,15 @@ func (p *GrokProvider) UpdateAccountCookie(id, cookie string) (map[string]interf
 			a.Cookie = strings.TrimSpace(cookie)
 			a.Status = accounts.StatusActive
 			a.LastError = ""
+			a.CooldownUntil = time.Time{}
+			a.ActivatedAt = time.Now()
+			a.LastAction = "update_cookie"
+			a.LastActionOK = true
+			a.LastActionSummary = "已手动更新 Cookie 凭据"
+			a.LastActionAt = time.Now()
 			go p.persistToDisk()
-			return map[string]interface{}{"id": id, "updated": true}, nil
+			go p.persistToDB()
+			return map[string]interface{}{"id": id, "updated": true, "message": "Cookie 更新成功，账号已重新激活"}, nil
 		}
 	}
 	return nil, errors.New("账号不存在")

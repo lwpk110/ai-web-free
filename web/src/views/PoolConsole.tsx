@@ -1097,6 +1097,13 @@ export const PoolConsole: React.FC<{
       });
       return;
     }
+    if (activeProvider === "grok" && !trimmed.includes("sso=") && !trimmed.includes("sso-rw=") && !trimmed.startsWith("eyJ")) {
+      setNotice({
+        type: "error",
+        text: "Grok Cookie 需包含 sso= 或 sso-rw= 鉴权字段（或直接粘贴 JWT token）。",
+      });
+      return;
+    }
     setSavingEditCookie(true);
     try {
       const res = await executeAccountAction(activeProvider, editingCookieAccount.id, "update_cookie", {
@@ -2204,7 +2211,7 @@ export const PoolConsole: React.FC<{
                                 </span>
                               </button>
                             )}
-                            {(acc.type === "cookie" || activeProvider === "meta_muse") && (
+                            {(acc.type === "cookie" || acc.type === "sso_cookie" || activeProvider === "grok" || activeProvider === "meta_muse") && (
                               <button
                                 type="button"
                                 onClick={() => handleOpenEditCookie(acc)}
@@ -3072,6 +3079,19 @@ export const PoolConsole: React.FC<{
                         : "缺少 hatch_sess"}
                     </span>
                   )}
+                  {activeProvider === "grok" && (
+                    <span
+                      className={`px-1.5 py-0.5 rounded font-medium ${
+                        editCookieValue.includes("sso=") || editCookieValue.includes("sso-rw=") || editCookieValue.trim().startsWith("eyJ")
+                          ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
+                          : "bg-amber-500/15 text-amber-600 dark:text-amber-400"
+                      }`}
+                    >
+                      {editCookieValue.includes("sso=") || editCookieValue.includes("sso-rw=") || editCookieValue.trim().startsWith("eyJ")
+                        ? "已包含 SSO 凭据"
+                        : "缺少 sso 字段"}
+                    </span>
+                  )}
                 </div>
               </div>
               {loadingEditCookie ? (
@@ -3084,7 +3104,11 @@ export const PoolConsole: React.FC<{
                   rows={7}
                   value={editCookieValue}
                   onChange={(e) => setEditCookieValue(e.target.value)}
-                  placeholder="粘贴或修改完整的 Cookie 字符串（例如：hatch_sess=...; hatch_gw=...;）"
+                  placeholder={
+                    activeProvider === "grok"
+                      ? "粘贴从浏览器 grok.com 提取的完整 Cookie（例如：sso=eyJ...; sso-rw=eyJ...）或单独的 JWT Token"
+                      : "粘贴或修改完整的 Cookie 字符串（例如：hatch_sess=...; hatch_gw=...;）"
+                  }
                   className="w-full p-2.5 rounded-xl p-code-box font-mono-num text-xs resize-y focus:outline-none"
                 />
               )}

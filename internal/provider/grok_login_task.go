@@ -535,6 +535,9 @@ func (p *GrokProvider) runGrokLoginTask(taskID string) {
 			ProxyURL: proxyURL,
 			Headless: item.headless,
 			Timeout:  loginTimeout,
+			OnPhase: func(_ string, phase, _ string) {
+				p.updateGrokLoginPhase(taskID, item.accountID, phase)
+			},
 		})
 		cancel()
 
