@@ -16,6 +16,49 @@ import (
 	"ai-web-free/internal/accounts"
 )
 
+func TestGrokLeaseAccountPrioritizesHealthyAndSkipsExpired(t *testing.T) {
+	p := NewGrokProvider(nil, "https://grok.com", "", accounts.PoolPolicy{})
+
+	p.accounts = []*grokAccount{
+		{
+			ID:        "acc-expired-status",
+			Email:     "bad1@example.com",
+			Cookie:    "sso=token_bad1",
+			Status:    accounts.StatusExpired,
+			LastError: "凭据已失效 HTTP 401",
+		},
+		{
+			ID:        "acc-active-with-401",
+			Email:     "bad2@example.com",
+			Cookie:    "sso=token_bad2",
+			Status:    accounts.StatusActive,
+			LastError: "凭据已失效 HTTP 401",
+		},
+		{
+			ID:        "acc-healthy",
+			Email:     "good@example.com",
+			Cookie:    "sso=token_good",
+			Status:    accounts.StatusActive,
+			LastError: "",
+		},
+	}
+
+	lease, err := p.leaseAccount(nil)
+	if err != nil {
+		t.Fatalf("expected lease success, got err: %v", err)
+	}
+	if lease.ID != "acc-healthy" {
+		t.Fatalf("expected acc-healthy to be leased, got: %s", lease.ID)
+	}
+
+	// 再次 lease 并排除 acc-healthy 时，由于剩余两个均为 expired/401，应返回 ErrNoGrokAccountAvailable
+	excluded := map[string]bool{"acc-healthy": true}
+	_, err2 := p.leaseAccount(excluded)
+	if err2 != ErrNoGrokAccountAvailable {
+		t.Fatalf("expected ErrNoGrokAccountAvailable when only expired accounts remain, got: %v", err2)
+	}
+}
+
 func TestGrokProviderImportAndStats(t *testing.T) {
 	p := NewGrokProvider(nil, "https://grok.com", "", accounts.PoolPolicy{})
 

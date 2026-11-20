@@ -216,6 +216,8 @@ func (p *GrokProvider) loadFromDB() {
 			acct.Status = accounts.StatusRateLimited
 		} else if r.Status == "standby" {
 			acct.Status = accounts.StatusStandby
+		} else if r.Status == "expired" || strings.Contains(r.LastError, "401") || strings.Contains(r.LastError, "失效") || strings.Contains(r.LastError, "Invalid credentials") {
+			acct.Status = accounts.StatusExpired
 		} else {
 			acct.Status = accounts.StatusActive
 		}
@@ -839,17 +841,32 @@ func (p *GrokProvider) leaseAccount(excludedIDs map[string]bool) (*grokAccountLe
 	}
 
 	now := time.Now()
-	for i := 0; i < n; i++ {
-		candidateIdx := (p.idx + i) % n
-		a := p.accounts[candidateIdx]
-		if excludedIDs != nil && excludedIDs[a.ID] {
-			continue
+
+	// 候选过滤：排除已被排除、已封禁、已禁用、已失效、冷却中或无凭据的账号
+	isCandidate := func(a *grokAccount) bool {
+		if a == nil || (excludedIDs != nil && excludedIDs[a.ID]) {
+			return false
 		}
 		if a.Status == accounts.StatusRateLimited && !a.IsInCooldown(now) {
 			a.Status = accounts.StatusActive
 			a.CooldownUntil = time.Time{}
 		}
-		if a.Status == accounts.StatusActive && !a.IsInCooldown(now) && a.Cookie != "" {
+		if a.Status != accounts.StatusActive || a.IsInCooldown(now) || a.Cookie == "" {
+			return false
+		}
+		// 若已有明确凭据失效错误记录且未更换新 Cookie，自动置为 expired 并跳过
+		if strings.Contains(a.LastError, "401") || strings.Contains(a.LastError, "失效") || strings.Contains(a.LastError, "Invalid credentials") {
+			a.Status = accounts.StatusExpired
+			return false
+		}
+		return true
+	}
+
+	// 第一轮优先挑选完全无报错记录的健康活跃账号
+	for i := 0; i < n; i++ {
+		candidateIdx := (p.idx + i) % n
+		a := p.accounts[candidateIdx]
+		if isCandidate(a) && a.LastError == "" {
 			p.idx = (candidateIdx + 1) % n
 			a.TotalCalls++
 			a.LastUsed = now
@@ -861,6 +878,24 @@ func (p *GrokProvider) leaseAccount(excludedIDs map[string]bool) (*grokAccountLe
 			}, nil
 		}
 	}
+
+	// 第二轮选择其余候选可用账号
+	for i := 0; i < n; i++ {
+		candidateIdx := (p.idx + i) % n
+		a := p.accounts[candidateIdx]
+		if isCandidate(a) {
+			p.idx = (candidateIdx + 1) % n
+			a.TotalCalls++
+			a.LastUsed = now
+			return &grokAccountLease{
+				ID:     a.ID,
+				Email:  a.Email,
+				Cookie: a.Cookie,
+				Proxy:  a.Proxy,
+			}, nil
+		}
+	}
+
 	return nil, ErrNoGrokAccountAvailable
 }
 
@@ -1908,7 +1943,12 @@ func (p *GrokProvider) GenerateImageAsset(ctx context.Context, prompt, requested
 	}
 
 	excluded := make(map[string]bool)
-	maxAttempts := 3
+	maxAttempts := 5
+	p.mu.RLock()
+	if totalAccs := len(p.accounts); totalAccs > 0 && totalAccs < maxAttempts {
+		maxAttempts = totalAccs
+	}
+	p.mu.RUnlock()
 	var lastErr error
 	var traceParts []string
 
