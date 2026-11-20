@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 func parseAccountType(s string) AccountType {
@@ -216,18 +217,98 @@ func SaveAccountToDB(database *gorm.DB, a *Account) error {
 	return database.Save(rec).Error
 }
 
-// BatchSaveAccountsToDB 批量持久化账号列表至数据库
+// BatchSaveAccountsToDB 批量持久化账号列表至数据库（通过内存映射与批量 Upsert，避免 N 次往返造成严重启动延迟）
 func BatchSaveAccountsToDB(database *gorm.DB, accs []*Account) error {
 	if database == nil || len(accs) == 0 {
 		return nil
 	}
+
+	// 1. 一次性读取已有账号建立索引映射
+	var existingList []db.PoolAccountRecord
+	_ = database.Find(&existingList).Error
+	existingByID := make(map[string]*db.PoolAccountRecord, len(existingList))
+	existingByEmail := make(map[string]*db.PoolAccountRecord, len(existingList))
+	existingByChatID := make(map[string]*db.PoolAccountRecord, len(existingList))
+	for i := range existingList {
+		r := &existingList[i]
+		if r.ID != "" {
+			existingByID[r.ID] = r
+		}
+		if r.Email != "" {
+			existingByEmail[strings.ToLower(strings.TrimSpace(r.Email))] = r
+		}
+		if r.ChatGPTAccountID != "" {
+			existingByChatID[strings.TrimSpace(r.ChatGPTAccountID)] = r
+		}
+	}
+
+	// 2. 在内存中合并已有凭据与更新
+	recordsToSave := make([]*db.PoolAccountRecord, 0, len(accs))
 	for _, a := range accs {
 		if a == nil || a.IsTemporary {
 			continue
 		}
-		_ = SaveAccountToDB(database, a)
+		rec := AccountToRecord(a)
+		if rec == nil {
+			continue
+		}
+
+		var existing *db.PoolAccountRecord
+		if ex, ok := existingByID[rec.ID]; ok {
+			existing = ex
+		} else if rec.Email != "" {
+			if ex, ok := existingByEmail[strings.ToLower(strings.TrimSpace(rec.Email))]; ok {
+				existing = ex
+			}
+		} else if rec.ChatGPTAccountID != "" {
+			if ex, ok := existingByChatID[strings.TrimSpace(rec.ChatGPTAccountID)]; ok {
+				existing = ex
+			}
+		}
+
+		if existing != nil && existing.ID != "" {
+			rec.ID = existing.ID
+			a.ID = existing.ID
+			if rec.CreatedAt.IsZero() {
+				rec.CreatedAt = existing.CreatedAt
+			}
+			if rec.Password == "" && existing.Password != "" {
+				rec.Password = existing.Password
+				a.Password = existing.Password
+			}
+			if rec.TOTPSecret == "" && existing.TOTPSecret != "" {
+				rec.TOTPSecret = existing.TOTPSecret
+				a.TOTPSecret = existing.TOTPSecret
+			}
+			if rec.RefreshToken == "" && existing.RefreshToken != "" {
+				rec.RefreshToken = existing.RefreshToken
+				a.RefreshToken = existing.RefreshToken
+			}
+			if rec.SessionToken == "" && existing.SessionToken != "" {
+				rec.SessionToken = existing.SessionToken
+				a.SessionToken = existing.SessionToken
+			}
+			if rec.Token == "" && existing.Token != "" {
+				rec.Token = existing.Token
+				a.Token = existing.Token
+			}
+			if rec.Proxy == "" && existing.Proxy != "" {
+				rec.Proxy = existing.Proxy
+				a.Proxy = existing.Proxy
+			}
+		}
+
+		recordsToSave = append(recordsToSave, rec)
 	}
-	return nil
+
+	if len(recordsToSave) == 0 {
+		return nil
+	}
+
+	// 3. 批量 Upsert（支持 SQLite 与 PostgreSQL）
+	return database.Clauses(clause.OnConflict{
+		UpdateAll: true,
+	}).CreateInBatches(recordsToSave, 100).Error
 }
 
 // LoadAccountsFromDB 从数据库读取全部号池账号

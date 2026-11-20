@@ -327,23 +327,20 @@ func Init() (*App, error) {
 		}
 	}
 
-	// 9. 将合并后的全量账号持久化同步写入 SQLite 数据库
-	if database != nil {
-		if err := accounts.BatchSaveAccountsToDB(database, accs); err != nil {
-			log.Printf("[Bootstrap] 同步账号至持久化数据库失败: %v", err)
-		} else {
-			log.Printf("[Bootstrap] 已成功将 %d 个号池账号同步持久化至 SQLite 数据库", len(accs))
-		}
-	}
-
 	accountPool := accounts.NewPool(accs)
 
 	// 热池/待命池：按供应商 + 账号类型读取阈值（POOL_CHATGPT_FREE_ACTIVE_TARGET 等），0 表示不限制
 	applyPoolPolicy(accountPool, "chatgpt", accounts.TypeFree)
 	applyPoolPolicy(accountPool, "chatgpt", accounts.TypePUID)
 	accountPool.Rebalance()
+
+	// 9. 将调谐后的全量账号持久化同步写入数据库
 	if database != nil {
-		_ = accounts.BatchSaveAccountsToDB(database, accs)
+		if err := accounts.BatchSaveAccountsToDB(database, accs); err != nil {
+			log.Printf("[Bootstrap] 同步账号至持久化数据库失败: %v", err)
+		} else {
+			log.Printf("[Bootstrap] 已成功将 %d 个号池账号同步持久化至数据库", len(accs))
+		}
 	}
 
 	// 初始化 TLS Client（待命账号延迟到激活时创建）

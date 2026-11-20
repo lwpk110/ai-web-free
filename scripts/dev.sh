@@ -40,6 +40,20 @@ echo ">> 启动 Go 后端: http://localhost:${PORT}"
 SERVER_PORT="${PORT}" go run . &
 BACKEND_PID=$!
 
+# 等待后端服务就绪（避免前端 vite proxy 先行发起请求报 ECONNREFUSED）
+echo ">> 等待 Go 后端服务就绪..."
+for i in $(seq 1 60); do
+    if curl -s "http://localhost:${PORT}/admin/api/v1/auth/status" >/dev/null 2>&1; then
+        echo ">> Go 后端服务已就绪！"
+        break
+    fi
+    if ! kill -0 "$BACKEND_PID" 2>/dev/null; then
+        echo "❌ Go 后端启动异常退出"
+        exit 1
+    fi
+    sleep 0.5
+done
+
 # 5. 启动 Vite 前端
 echo ">> 启动 Vite 前端: http://localhost:${WEB_PORT} (代理至 http://localhost:${PORT})"
 cd web && VITE_API_TARGET="http://localhost:${PORT}" npm run dev -- --port "${WEB_PORT}"
