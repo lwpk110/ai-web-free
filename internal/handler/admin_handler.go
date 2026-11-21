@@ -33,6 +33,8 @@ type AdminHandler struct {
 	bulkTaskMu      sync.Mutex
 	currentBulkTask *BulkActionTask
 	bulkCancelCh    chan struct{}
+	clashMu         sync.RWMutex
+	lastClashSync   *proxy.ClashSyncResult
 }
 
 func NewAdminHandler(reg *provider.Registry, proxyPool *proxy.Pool, cfg *config.Config) *AdminHandler {
@@ -370,7 +372,19 @@ func (h *AdminHandler) BulkUpdateAccountProxy(c *gin.Context) {
 			result.OK = true
 			updated++
 			_ = accounts.SaveAccountToDB(db.GetDB(), acct)
-			log.Printf("[account-proxy] updated account=%s proxy_bound=%t", acct.Email, proxyURL != "")
+			curProfile := "home"
+			if h.proxyPool != nil {
+				curProfile = h.proxyPool.ActiveProfile()
+			}
+			stickyKey := strings.ToLower(strings.TrimSpace(acct.Email))
+			if stickyKey == "" {
+				stickyKey = strings.ToLower(strings.TrimSpace(acct.ChatGPTAccountID))
+			}
+			if stickyKey == "" {
+				stickyKey = acct.ID
+			}
+			_ = db.SaveAccountProfileProxy(db.GetDB(), curProfile, stickyKey, proxyURL)
+			log.Printf("[account-proxy] updated account=%s profile=%s proxy_bound=%t", acct.Email, curProfile, proxyURL != "")
 			if auditLog := h.auditLog(); auditLog != nil {
 				note := "account_proxy_set_direct"
 				if proxyURL != "" {
@@ -1081,9 +1095,162 @@ func (h *AdminHandler) ProbeAllAccounts(c *gin.Context) {
 	})
 }
 
-// UpdateProxies 动态更新代理池并校准失效绑定账号。
+func accountStickyKey(acct *accounts.Account) string {
+	if acct == nil {
+		return ""
+	}
+	if k := strings.ToLower(strings.TrimSpace(acct.Email)); k != "" {
+		return k
+	}
+	if k := strings.ToLower(strings.TrimSpace(acct.ChatGPTAccountID)); k != "" {
+		return k
+	}
+	return strings.TrimSpace(acct.ID)
+}
+
+func (h *AdminHandler) activeProfileName() string {
+	if h.proxyPool != nil {
+		return h.proxyPool.ActiveProfile()
+	}
+	if h.cfg != nil && h.cfg.AppProfile != "" {
+		return config.NormalizeProfile(h.cfg.AppProfile)
+	}
+	return "home"
+}
+
+func (h *AdminHandler) envProfileName() string {
+	if h.cfg != nil && h.cfg.AppProfile != "" {
+		return config.NormalizeProfile(h.cfg.AppProfile)
+	}
+	return "home"
+}
+
+func (h *AdminHandler) reloadActiveProfileIntoPool(profile string) int {
+	normProfile := db.NormalizeProfileName(profile)
+	database := db.GetDB()
+	records, _ := db.LoadProxyRecordsByProfile(database, normProfile)
+	urls := make([]string, 0, len(records))
+	metas := make(map[string]proxy.NodeMeta, len(records))
+	for _, r := range records {
+		u := strings.TrimSpace(r.URL)
+		if u == "" {
+			continue
+		}
+		urls = append(urls, u)
+		metas[u] = proxy.NodeMeta{
+			Profile:  r.Profile,
+			NodeName: r.NodeName,
+			Region:   r.Region,
+			Source:   r.Source,
+			Port:     r.Port,
+		}
+	}
+
+	if h.proxyPool != nil {
+		h.proxyPool.SetActiveProfile(normProfile)
+		h.proxyPool.Replace(urls)
+		h.proxyPool.SetNodeMetas(metas)
+	}
+
+	migrated := 0
+	pool := h.accountPool()
+	if pool != nil && h.proxyPool != nil {
+		savedBindings := db.LoadAccountProfileProxies(database, normProfile)
+		newBindings := make(map[string]string)
+		for _, acct := range pool.AllPersistentAccounts() {
+			key := accountStickyKey(acct)
+			var targetProxy string
+			if saved, ok := savedBindings[key]; ok && h.proxyPool.Contains(saved) && h.proxyPool.IsHealthy(saved) {
+				targetProxy = saved
+			} else {
+				targetProxy = h.proxyPool.Allocate()
+				if key != "" && targetProxy != "" {
+					newBindings[key] = targetProxy
+				}
+			}
+			if acct.Proxy != targetProxy {
+				if err := pool.RebindAccountProxy(acct, targetProxy); err == nil {
+					migrated++
+				}
+			}
+		}
+		if len(newBindings) > 0 {
+			_ = db.SaveAccountProfileProxiesBatch(database, normProfile, newBindings)
+		}
+	}
+	return migrated
+}
+
+func (h *AdminHandler) buildClashConfigSummary() gin.H {
+	subConfigured := false
+	subMasked := ""
+	targetProfile := "vps"
+	listenHost := "127.0.0.1"
+	startPort := 20001
+	maxPorts := 40
+	excludeRegex := proxy.DefaultClashExcludeRegex
+	priorityRegions := proxy.DefaultClashPriorityRegions
+	configPath := "/etc/mihomo/config.yaml"
+	mihomoAPI := "http://127.0.0.1:9090"
+
+	if h.cfg != nil {
+		if raw := strings.TrimSpace(h.cfg.ClashSubURL); raw != "" {
+			subConfigured = true
+			if len(raw) > 24 {
+				subMasked = raw[:16] + "..." + raw[len(raw)-6:]
+			} else {
+				subMasked = "***"
+			}
+		}
+		if h.cfg.ClashSubProfile != "" {
+			targetProfile = h.cfg.ClashSubProfile
+		}
+		if h.cfg.ClashMultiportHost != "" {
+			listenHost = h.cfg.ClashMultiportHost
+		}
+		if h.cfg.ClashMultiportStart > 0 {
+			startPort = h.cfg.ClashMultiportStart
+		}
+		if h.cfg.ClashMultiportMax > 0 {
+			maxPorts = h.cfg.ClashMultiportMax
+		}
+		if h.cfg.ClashExcludeRegex != "" {
+			excludeRegex = h.cfg.ClashExcludeRegex
+		}
+		if h.cfg.ClashPriorityRegions != "" {
+			priorityRegions = h.cfg.ClashPriorityRegions
+		}
+		if h.cfg.MihomoConfigPath != "" {
+			configPath = h.cfg.MihomoConfigPath
+		}
+		if h.cfg.MihomoAPIURL != "" {
+			mihomoAPI = h.cfg.MihomoAPIURL
+		}
+	}
+
+	h.clashMu.RLock()
+	lastSync := h.lastClashSync
+	h.clashMu.RUnlock()
+
+	return gin.H{
+		"sub_configured":   subConfigured,
+		"sub_url_masked":   subMasked,
+		"target_profile":   targetProfile,
+		"listen_host":      listenHost,
+		"start_port":       startPort,
+		"max_ports":        maxPorts,
+		"exclude_regex":    excludeRegex,
+		"priority_regions": priorityRegions,
+		"config_path":      configPath,
+		"mihomo_api_url":   mihomoAPI,
+		"last_sync":        lastSync,
+	}
+}
+
+// UpdateProxies 动态更新指定或当前 Profile 的代理池并校准失效绑定账号。
 func (h *AdminHandler) UpdateProxies(c *gin.Context) {
 	var body struct {
+		Profile string   `json:"profile"`
 		RawText string   `json:"raw_text"`
 		Proxies []string `json:"proxies"`
 		Persist bool     `json:"persist"`
@@ -1092,40 +1259,246 @@ func (h *AdminHandler) UpdateProxies(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": err.Error()}})
 		return
 	}
+	activeProf := h.activeProfileName()
+	targetProf := db.NormalizeProfileName(body.Profile)
+	if strings.TrimSpace(body.Profile) == "" {
+		targetProf = activeProf
+	}
+
 	var list []string
-	for _, p := range body.Proxies {
-		if s := strings.TrimSpace(p); s != "" {
-			list = append(list, s)
+	seen := make(map[string]bool)
+	appendClean := func(raw string) {
+		s := strings.TrimSpace(raw)
+		if s == "" || strings.HasPrefix(s, "#") || seen[s] {
+			return
 		}
+		seen[s] = true
+		list = append(list, s)
+	}
+	for _, p := range body.Proxies {
+		appendClean(p)
 	}
 	if body.RawText != "" {
 		for _, line := range strings.Split(body.RawText, "\n") {
-			line = strings.TrimSpace(line)
-			if line != "" && !strings.HasPrefix(line, "#") {
-				list = append(list, line)
+			appendClean(line)
+		}
+	}
+
+	if body.Persist {
+		_ = db.ReplaceProxiesByProfile(db.GetDB(), targetProf, list)
+	}
+
+	migrated := 0
+	if targetProf == activeProf {
+		if h.proxyPool != nil {
+			h.proxyPool.Replace(list)
+			if records, err := db.LoadProxyRecordsByProfile(db.GetDB(), targetProf); err == nil {
+				metas := make(map[string]proxy.NodeMeta, len(records))
+				for _, r := range records {
+					metas[strings.TrimSpace(r.URL)] = proxy.NodeMeta{
+						Profile:  r.Profile,
+						NodeName: r.NodeName,
+						Region:   r.Region,
+						Source:   r.Source,
+						Port:     r.Port,
+					}
+				}
+				h.proxyPool.SetNodeMetas(metas)
+			}
+		}
+		if pool := h.accountPool(); pool != nil && h.proxyPool != nil {
+			migrated = pool.ReconcileProxies(
+				func(u string) bool { return !h.proxyPool.Contains(u) || !h.proxyPool.IsHealthy(u) },
+				func(excl map[string]bool) string { return h.proxyPool.AllocateHealthy(excl) },
+			)
+			if migrated > 0 && body.Persist {
+				updatedBindings := make(map[string]string)
+				for _, acct := range pool.AllPersistentAccounts() {
+					if k := accountStickyKey(acct); k != "" && acct.Proxy != "" {
+						updatedBindings[k] = acct.Proxy
+					}
+				}
+				_ = db.SaveAccountProfileProxiesBatch(db.GetDB(), activeProf, updatedBindings)
 			}
 		}
 	}
-	if h.proxyPool != nil {
-		h.proxyPool.Replace(list)
-	}
-	migrated := 0
-	if pool := h.accountPool(); pool != nil && h.proxyPool != nil {
-		migrated = pool.ReconcileProxies(
-			func(u string) bool { return !h.proxyPool.Contains(u) || !h.proxyPool.IsHealthy(u) },
-			func(excl map[string]bool) string { return h.proxyPool.AllocateHealthy(excl) },
-		)
-	}
-	if body.Persist {
-		_ = db.ReplaceProxiesInDB(db.GetDB(), list)
-	}
+
 	if logBuf := h.auditLog(); logBuf != nil {
-		logBuf.RecordEvent("/admin/api/v1/proxies", "", "", fmt.Sprintf("updated_%d_migrated_%d", len(list), migrated), "")
+		logBuf.RecordEvent("/admin/api/v1/proxies", "", "", fmt.Sprintf("profile_%s_updated_%d_migrated_%d", targetProf, len(list), migrated), "")
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"proxies_count": len(list),
-		"proxies":       list,
-		"migrated":      migrated,
+		"profile":        targetProf,
+		"active_profile": activeProf,
+		"proxies_count":  len(list),
+		"proxies":        list,
+		"migrated":       migrated,
+		"profiles":       db.ListProxyProfiles(db.GetDB()),
+	})
+}
+
+// SwitchProxyProfile 动态切换当前运行时激活的代理 Profile（如 home / office / vps），并自动应用该 Profile 的专属粘性代理绑定。
+func (h *AdminHandler) SwitchProxyProfile(c *gin.Context) {
+	var body struct {
+		Profile string `json:"profile"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil || strings.TrimSpace(body.Profile) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "请提供要切换的目标 profile 名称（如 home / office / vps）"}})
+		return
+	}
+	targetProf := db.NormalizeProfileName(body.Profile)
+	migrated := h.reloadActiveProfileIntoPool(targetProf)
+	var nodes []proxy.NodeStatus
+	if h.proxyPool != nil {
+		nodes = h.proxyPool.Snapshots(h.boundProxyCounts())
+	}
+	if logBuf := h.auditLog(); logBuf != nil {
+		logBuf.RecordEvent("/admin/api/v1/proxies/profile", "", "", fmt.Sprintf("switch_profile_%s_migrated_%d", targetProf, migrated), "")
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"active_profile": targetProf,
+		"env_profile":    h.envProfileName(),
+		"migrated":       migrated,
+		"summary":        buildProxySummary(nodes),
+		"nodes":          nodes,
+		"profiles":       db.ListProxyProfiles(db.GetDB()),
+	})
+}
+
+// SyncClashProxies 拉取或解析 Clash Verge 机场订阅，智能筛选节点并生成 Mihomo 多端口 listeners 入库。
+func (h *AdminHandler) SyncClashProxies(c *gin.Context) {
+	var body struct {
+		SubURL          string `json:"sub_url"`
+		RawSubscription string `json:"raw_subscription"`
+		TargetProfile   string `json:"target_profile"`
+		ListenHost      string `json:"listen_host"`
+		StartPort       int    `json:"start_port"`
+		MaxPorts        int    `json:"max_ports"`
+		ExcludeRegex    string `json:"exclude_regex"`
+		PriorityRegions string `json:"priority_regions"`
+		ConfigPath      string `json:"config_path"`
+		WriteConfig     *bool  `json:"write_config"`
+		ReloadMihomo    *bool  `json:"reload_mihomo"`
+		ActivateProfile *bool  `json:"activate_profile"`
+	}
+	if c.Request.ContentLength > 0 {
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "请求 JSON 格式无效: " + err.Error()}})
+			return
+		}
+	}
+
+	opts := proxy.ClashSyncOptions{
+		SubURL:          strings.TrimSpace(body.SubURL),
+		RawSubscription: body.RawSubscription,
+		TargetProfile:   strings.TrimSpace(body.TargetProfile),
+		ListenHost:      strings.TrimSpace(body.ListenHost),
+		StartPort:       body.StartPort,
+		MaxPorts:        body.MaxPorts,
+		ExcludeRegex:    strings.TrimSpace(body.ExcludeRegex),
+		PriorityRegions: strings.TrimSpace(body.PriorityRegions),
+		ConfigPath:      strings.TrimSpace(body.ConfigPath),
+		WriteConfig:     true,
+		ReloadMihomo:    true,
+	}
+
+	if h.cfg != nil {
+		if opts.SubURL == "" {
+			opts.SubURL = h.cfg.ClashSubURL
+		}
+		if opts.TargetProfile == "" {
+			opts.TargetProfile = h.cfg.ClashSubProfile
+		}
+		if opts.ListenHost == "" {
+			opts.ListenHost = h.cfg.ClashMultiportHost
+		}
+		if opts.StartPort <= 0 {
+			opts.StartPort = h.cfg.ClashMultiportStart
+		}
+		if opts.MaxPorts <= 0 {
+			opts.MaxPorts = h.cfg.ClashMultiportMax
+		}
+		if opts.ExcludeRegex == "" {
+			opts.ExcludeRegex = h.cfg.ClashExcludeRegex
+		}
+		if opts.PriorityRegions == "" {
+			opts.PriorityRegions = h.cfg.ClashPriorityRegions
+		}
+		if opts.ConfigPath == "" {
+			opts.ConfigPath = h.cfg.MihomoConfigPath
+		}
+		opts.MihomoAPIURL = h.cfg.MihomoAPIURL
+		opts.MihomoAPISecret = h.cfg.MihomoAPISecret
+	}
+	if opts.TargetProfile == "" {
+		opts.TargetProfile = "vps"
+	}
+	opts.TargetProfile = db.NormalizeProfileName(opts.TargetProfile)
+	if body.WriteConfig != nil {
+		opts.WriteConfig = *body.WriteConfig
+	}
+	if body.ReloadMihomo != nil {
+		opts.ReloadMihomo = *body.ReloadMihomo
+	}
+
+	// 读取该 Profile 下已有 Clash 节点的端口号，保持同节点名端口稳定不漂移
+	database := db.GetDB()
+	if database != nil {
+		if existing, err := db.LoadProxyRecordsByProfile(database, opts.TargetProfile); err == nil && len(existing) > 0 {
+			portMap := make(map[string]int, len(existing))
+			for _, r := range existing {
+				if r.Source == "clash_sub" && r.NodeName != "" && r.Port > 0 {
+					portMap[r.NodeName] = r.Port
+				}
+			}
+			opts.ExistingPorts = portMap
+		}
+	}
+
+	res, err := proxy.SyncClashSubscription(c.Request.Context(), opts)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": err.Error()}})
+		return
+	}
+
+	// 将生成的端口节点持久化到数据库对应 Profile (如 vps)
+	clashRecords := make([]db.ProxyNodeRecord, 0, len(res.MappedNodes))
+	for _, item := range res.MappedNodes {
+		clashRecords = append(clashRecords, db.ProxyNodeRecord{
+			Profile:  opts.TargetProfile,
+			URL:      item.ProxyURL,
+			NodeName: item.NodeName,
+			Region:   item.Region,
+			Source:   "clash_sub",
+			Port:     item.Port,
+			Protocol: "http",
+			Status:   "active",
+		})
+	}
+	if database != nil {
+		_ = db.ReplaceClashProxiesByProfile(database, opts.TargetProfile, clashRecords)
+	}
+
+	h.clashMu.Lock()
+	h.lastClashSync = res
+	h.clashMu.Unlock()
+
+	shouldActivate := body.ActivateProfile != nil && *body.ActivateProfile
+	activeProf := h.activeProfileName()
+	migrated := 0
+	if shouldActivate || opts.TargetProfile == activeProf {
+		migrated = h.reloadActiveProfileIntoPool(opts.TargetProfile)
+		activeProf = opts.TargetProfile
+	}
+
+	if logBuf := h.auditLog(); logBuf != nil {
+		logBuf.RecordEvent("/admin/api/v1/proxies/clash-sync", "", "", fmt.Sprintf("profile_%s_mapped_%d_ports_%d_%d", opts.TargetProfile, res.MappedCount, res.StartPort, res.EndPort), "")
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"result":         res,
+		"active_profile": activeProf,
+		"migrated":       migrated,
+		"profiles":       db.ListProxyProfiles(database),
 	})
 }
 
@@ -1143,19 +1516,88 @@ func (h *AdminHandler) AuthStatus(c *gin.Context) {
 	})
 }
 
-// ListProxies 返回代理池节点健康矩阵（含每节点绑定账号数与熔断状态）。
+// ListProxies 返回指定或当前激活 Profile 的代理池节点健康矩阵（含每节点绑定账号数、Clash 节点名称与地区标签）。
 func (h *AdminHandler) ListProxies(c *gin.Context) {
+	activeProf := h.activeProfileName()
+	queryProf := strings.TrimSpace(c.Query("profile"))
+	viewProf := activeProf
+	if queryProf != "" {
+		viewProf = db.NormalizeProfileName(queryProf)
+	}
+
+	database := db.GetDB()
+	profiles := db.ListProxyProfiles(database)
+	ensureProfilePresent := func(name string) {
+		if name == "" {
+			return
+		}
+		for _, p := range profiles {
+			if p.Profile == name {
+				return
+			}
+		}
+		profiles = append(profiles, db.ProfileSummary{
+			Profile: name,
+			Label:   name,
+		})
+	}
+	ensureProfilePresent(activeProf)
+	ensureProfilePresent(viewProf)
+	clashCfg := h.buildClashConfigSummary()
+
 	if h.proxyPool == nil {
 		c.JSON(http.StatusOK, gin.H{
-			"summary": buildProxySummary(nil),
-			"nodes":   []proxy.NodeStatus{},
+			"active_profile": activeProf,
+			"env_profile":    h.envProfileName(),
+			"view_profile":   viewProf,
+			"profiles":       profiles,
+			"clash_config":   clashCfg,
+			"summary":        buildProxySummary(nil),
+			"nodes":          []proxy.NodeStatus{},
 		})
 		return
 	}
-	nodes := h.proxyPool.Snapshots(h.boundProxyCounts())
+
+	var nodes []proxy.NodeStatus
+	if viewProf == activeProf {
+		nodes = h.proxyPool.Snapshots(h.boundProxyCounts())
+	} else {
+		// 查看非当前激活 Profile 的数据库持久化节点快照
+		records, _ := db.LoadProxyRecordsByProfile(database, viewProf)
+		savedBindings := db.LoadAccountProfileProxies(database, viewProf)
+		boundByURL := make(map[string]int)
+		for _, pURL := range savedBindings {
+			boundByURL[pURL]++
+		}
+		nodes = make([]proxy.NodeStatus, 0, len(records))
+		for _, r := range records {
+			st := r.Status
+			if st == "" {
+				st = "active"
+			}
+			nodes = append(nodes, proxy.NodeStatus{
+				URL:           r.URL,
+				Profile:       r.Profile,
+				NodeName:      r.NodeName,
+				Region:        r.Region,
+				Source:        r.Source,
+				Port:          r.Port,
+				Status:        st,
+				LatencyMs:     r.LatencyMs,
+				LastError:     r.LastError,
+				BoundAccounts: boundByURL[r.URL],
+			})
+		}
+	}
+
 	c.JSON(http.StatusOK, gin.H{
-		"summary": buildProxySummary(nodes),
-		"nodes":   nodes,
+		"active_profile": activeProf,
+		"env_profile":    h.envProfileName(),
+		"view_profile":   viewProf,
+		"profiles":       profiles,
+		"clash_config":   clashCfg,
+		"summary":        buildProxySummary(nodes),
+		"nodes":          nodes,
 	})
 }
 

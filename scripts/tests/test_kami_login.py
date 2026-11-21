@@ -2,10 +2,13 @@ import base64
 import http.server
 import json
 import os
+import sys
 import tempfile
 import threading
 import unittest
+from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ops"))
 import kami_login
 
 

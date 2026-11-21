@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
 
 TUNNEL_TOKEN="${CF_TUNNEL_TOKEN:-}"
 PORT=0
@@ -15,7 +15,7 @@ ALLOW_EMPTY_AUTH=0
 
 usage() {
     cat <<'EOF'
-用法: ./scripts/cf-tunnel.sh [选项]
+用法: ./scripts/deploy/cf-tunnel.sh [选项]
 
 选项:
   --tunnel-token <TOKEN>  Cloudflare Tunnel Token（传入则使用固定域名模式；省略则使用临时 Quick Tunnel）

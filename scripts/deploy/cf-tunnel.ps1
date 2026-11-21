@@ -273,7 +273,7 @@ function Ensure-BackendBinary {
     }
 }
 
-$RepoRoot = Split-Path -Parent $PSScriptRoot
+$RepoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 Push-Location $RepoRoot
 $startedProcess = $null
 

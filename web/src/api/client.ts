@@ -199,8 +199,60 @@ export interface ProxySummary {
   cooling: number;
 }
 
+export interface ProxyProfileSummary {
+  profile: string;
+  label: string;
+  total: number;
+  clash_count: number;
+}
+
+export interface ClashMappedPort {
+  port: number;
+  proxy_url: string;
+  node_name: string;
+  region: string;
+  protocol: string;
+  server?: string;
+}
+
+export interface ClashSyncResult {
+  target_profile: string;
+  total_parsed: number;
+  filtered_out: number;
+  mapped_count: number;
+  start_port: number;
+  end_port: number;
+  mapped_nodes: ClashMappedPort[];
+  config_path?: string;
+  config_written: boolean;
+  mihomo_reloaded: boolean;
+  reload_method?: string;
+  reload_warning?: string;
+  generated_config?: string;
+  synced_at: string;
+}
+
+export interface ClashConfigSummary {
+  sub_configured: boolean;
+  sub_url_masked?: string;
+  target_profile: string;
+  listen_host: string;
+  start_port: number;
+  max_ports: number;
+  exclude_regex: string;
+  priority_regions: string;
+  config_path: string;
+  mihomo_api_url: string;
+  last_sync?: ClashSyncResult | null;
+}
+
 export interface ProxyNodeStatus {
   url: string;
+  profile?: string;
+  node_name?: string;
+  region?: string;
+  source?: string;
+  port?: number;
   status: "active" | "cooling" | "unknown" | string;
   latency_ms: number;
   consecutive_errors: number;
@@ -940,11 +992,17 @@ export async function exportAccounts(params: {
   return { filename, content, contentType, redacted };
 }
 
-export async function fetchProxies(): Promise<{
+export async function fetchProxies(profile?: string): Promise<{
+  active_profile?: string;
+  env_profile?: string;
+  view_profile?: string;
+  profiles?: ProxyProfileSummary[];
+  clash_config?: ClashConfigSummary;
   summary: ProxySummary;
   nodes: ProxyNodeStatus[];
 }> {
-  const res = await adminFetch("/admin/api/v1/proxies");
+  const qs = profile ? `?profile=${encodeURIComponent(profile)}` : "";
+  const res = await adminFetch(`/admin/api/v1/proxies${qs}`);
   if (!res.ok) throw new Error(`Fetch proxies failed: HTTP ${res.status}`);
   return res.json();
 }
@@ -965,20 +1023,75 @@ export async function probeProxies(): Promise<{
 
 export async function updateProxies(
   proxies: string[],
-  persist = true
+  persist = true,
+  profile?: string
 ): Promise<{
+  profile?: string;
+  active_profile?: string;
   proxies_count: number;
   proxies: string[];
   migrated: number;
+  profiles?: ProxyProfileSummary[];
 }> {
   const res = await adminFetch("/admin/api/v1/proxies", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ proxies, persist }),
+    body: JSON.stringify({ proxies, persist, profile }),
   });
   const data = await res.json();
   if (!res.ok) {
     throw new Error(data?.error?.message || `Update proxies failed: HTTP ${res.status}`);
+  }
+  return data;
+}
+
+export async function switchProxyProfile(profile: string): Promise<{
+  active_profile: string;
+  env_profile: string;
+  migrated: number;
+  summary: ProxySummary;
+  nodes: ProxyNodeStatus[];
+  profiles: ProxyProfileSummary[];
+}> {
+  const res = await adminFetch("/admin/api/v1/proxies/profile", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ profile }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error?.message || `Switch profile failed: HTTP ${res.status}`);
+  }
+  return data;
+}
+
+export async function syncClashProxies(params: {
+  sub_url?: string;
+  raw_subscription?: string;
+  target_profile?: string;
+  listen_host?: string;
+  start_port?: number;
+  max_ports?: number;
+  exclude_regex?: string;
+  priority_regions?: string;
+  config_path?: string;
+  write_config?: boolean;
+  reload_mihomo?: boolean;
+  activate_profile?: boolean;
+}): Promise<{
+  result: ClashSyncResult;
+  active_profile: string;
+  migrated: number;
+  profiles: ProxyProfileSummary[];
+}> {
+  const res = await adminFetch("/admin/api/v1/proxies/clash-sync", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(params),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error?.message || `Clash sync failed: HTTP ${res.status}`);
   }
   return data;
 }

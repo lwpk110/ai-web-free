@@ -47,6 +47,7 @@ func MaterializePostgresToSQLite(pgDB *gorm.DB, localSQLitePath string) error {
 		&AccountRuntimeState{},
 		&PoolAccountRecord{},
 		&ProxyNodeRecord{},
+		&AccountProfileProxyRecord{},
 		&AccountRestrictionRecord{},
 		&CustomVoiceModelRecord{},
 		&ProviderChannelRecord{},
@@ -68,11 +69,16 @@ func MaterializePostgresToSQLite(pgDB *gorm.DB, localSQLitePath string) error {
 		summary["号池账号 (PoolAccountRecord)"] = len(accounts)
 	}
 
-	// 2. ProxyNodeRecord
+	// 2. ProxyNodeRecord & AccountProfileProxyRecord
 	var proxies []ProxyNodeRecord
 	if err := pgDB.Find(&proxies).Error; err == nil && len(proxies) > 0 {
 		_ = sqliteDB.Clauses(clause.OnConflict{UpdateAll: true}).CreateInBatches(proxies, 100).Error
 		summary["代理节点 (ProxyNodeRecord)"] = len(proxies)
+	}
+	var profileProxies []AccountProfileProxyRecord
+	if err := pgDB.Find(&profileProxies).Error; err == nil && len(profileProxies) > 0 {
+		_ = sqliteDB.Clauses(clause.OnConflict{UpdateAll: true}).CreateInBatches(profileProxies, 100).Error
+		summary["Profile 粘性代理绑定 (AccountProfileProxyRecord)"] = len(profileProxies)
 	}
 
 	// 3. AccountRestrictionRecord

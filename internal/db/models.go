@@ -163,16 +163,37 @@ type PoolAccountRecord struct {
 	UpdatedAt          time.Time  `gorm:"index" json:"updated_at"`
 }
 
-// ProxyNodeRecord 代理节点持久化模型（支持出口代理 IP 列表持久化与健康状态持久化）
+// ProxyNodeRecord 代理节点持久化模型（支持按 Runtime Profile 隔离出口代理 IP 列表、Clash 节点元数据与健康状态持久化）
 type ProxyNodeRecord struct {
 	ID        string    `gorm:"primaryKey;size:64" json:"id"`
-	URL       string    `gorm:"size:255;uniqueIndex" json:"url"`
+	Profile   string    `gorm:"size:32;default:'home';index" json:"profile"` // home | office | vps | 自定义
+	URL       string    `gorm:"size:255;index" json:"url"`
+	NodeName  string    `gorm:"size:128" json:"node_name,omitempty"`         // 机场原始节点名称（如 "🇺🇸 美国 01"）
+	Region    string    `gorm:"size:32;index" json:"region,omitempty"`       // US | JP | SG | TW | KR | OTHER
+	Source    string    `gorm:"size:32;default:'manual'" json:"source"`      // manual | clash_sub | env_seed
+	Port      int       `gorm:"default:0" json:"port,omitempty"`             // 多端口映射端口号（如 20001）
 	Protocol  string    `gorm:"size:32" json:"protocol"`
 	LatencyMs int64     `gorm:"default:0" json:"latency_ms"`
 	Status    string    `gorm:"size:32;default:'active';index" json:"status"` // active | cooling | disabled
 	LastError string    `gorm:"type:text" json:"last_error,omitempty"`
 	CreatedAt time.Time `gorm:"index" json:"created_at"`
 	UpdatedAt time.Time `gorm:"index" json:"updated_at"`
+}
+
+// AccountProfileProxyRecord 按 Runtime Profile 隔离持久化账号粘性代理映射，
+// 确保 home / office / vps 等不同运行环境拥有各自独立的粘性出口 IP，切换本地 .env 的 APP_PROFILE 时自动恢复且互不覆盖。
+type AccountProfileProxyRecord struct {
+	ID         string    `gorm:"primaryKey;size:64" json:"id"`
+	Profile    string    `gorm:"size:32;index:idx_acct_profile_key" json:"profile"`
+	AccountKey string    `gorm:"size:128;index:idx_acct_profile_key" json:"account_key"`
+	ProxyURL   string    `gorm:"size:255" json:"proxy_url"`
+	NodeName   string    `gorm:"size:128" json:"node_name,omitempty"`
+	CreatedAt  time.Time `gorm:"index" json:"created_at"`
+	UpdatedAt  time.Time `gorm:"index" json:"updated_at"`
+}
+
+func (AccountProfileProxyRecord) TableName() string {
+	return "account_profile_proxies"
 }
 
 // AccountRestrictionRecord 账号黑名单/手动禁用名单持久化模型

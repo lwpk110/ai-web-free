@@ -1,17 +1,29 @@
 import React, { useEffect, useMemo, useState } from "react";
 import {
   Check,
+  ChevronDown,
+  ChevronUp,
   Copy,
+  FileCode2,
   Globe,
+  Layers,
+  Plus,
   RefreshCw,
   Save,
+  Server,
+  Sparkles,
   Zap,
 } from "lucide-react";
 import {
   fetchProxies,
   probeProxies,
+  switchProxyProfile,
+  syncClashProxies,
   updateProxies,
+  type ClashConfigSummary,
+  type ClashSyncResult,
   type ProxyNodeStatus,
+  type ProxyProfileSummary,
   type ProxySummary,
 } from "../api/client";
 import {
@@ -26,6 +38,27 @@ import {
   type ModelCategory,
 } from "../lib/models";
 
+const PROFILE_PRESET_EXAMPLES: Record<
+  string,
+  { title: string; subtitle: string; example: string }
+> = {
+  home: {
+    title: "家里开发环境 (home)",
+    subtitle: "Windows 本地 Clash Verge 默认端口 127.0.0.1:10809",
+    example: "http://127.0.0.1:10809",
+  },
+  office: {
+    title: "公司办公环境 (office)",
+    subtitle: "局域网共享代理 192.168.2.12:10809",
+    example: "http://192.168.2.12:10809",
+  },
+  vps: {
+    title: "生产 VPS 多端口池 (vps)",
+    subtitle: "Mihomo listeners 多端口映射 127.0.0.1:20001..20040",
+    example: "http://127.0.0.1:20001\nhttp://127.0.0.1:20002\nhttp://127.0.0.1:20003",
+  },
+};
+
 export const NetworkView: React.FC<{
   autoProbeTrigger?: number;
 }> = ({ autoProbeTrigger = 0 }) => {
@@ -34,6 +67,42 @@ export const NetworkView: React.FC<{
     active: 0,
     cooling: 0,
   });
+  const [activeProfile, setActiveProfile] = useState<string>("home");
+  const [envProfile, setEnvProfile] = useState<string>("home");
+  const [viewProfile, setViewProfile] = useState<string>("home");
+  const [profiles, setProfiles] = useState<ProxyProfileSummary[]>([
+    { profile: "home", label: "家里开发环境 (home)", total: 0, clash_count: 0 },
+    { profile: "office", label: "公司办公环境 (office)", total: 0, clash_count: 0 },
+    { profile: "vps", label: "生产 VPS 多端口 (vps)", total: 0, clash_count: 0 },
+  ]);
+  const [clashConfig, setClashConfig] = useState<ClashConfigSummary | null>(null);
+  const [showClashPanel, setShowClashPanel] = useState<boolean>(false);
+  const [subUrlInput, setSubUrlInput] = useState<string>("");
+  const [rawSubInput, setRawSubInput] = useState<string>("");
+  const [clashTargetProfile, setClashTargetProfile] = useState<string>("vps");
+  const [clashListenHost, setClashListenHost] = useState<string>("127.0.0.1");
+  const [clashStartPort, setClashStartPort] = useState<number>(20001);
+  const [clashMaxPorts, setClashMaxPorts] = useState<number>(40);
+  const [clashPriorityRegions, setClashPriorityRegions] = useState<string>(
+    "US,JP,SG,TW,KR,DE,UK,NL,CA,AU"
+  );
+  const [clashExcludeRegex, setClashExcludeRegex] = useState<string>(
+    "(?i)(剩余|流量|到期|官网|重置|群|套餐|网址|失联|维护|测试|CN|中国|HK|香港|MO|澳门|RU|俄罗斯|BY|白俄罗斯|IR|伊朗|KP|朝鲜)"
+  );
+  const [clashReloadMihomo, setClashReloadMihomo] = useState<boolean>(true);
+  const [clashActivateAfterSync, setClashActivateAfterSync] = useState<boolean>(false);
+  const [syncingClash, setSyncingClash] = useState<boolean>(false);
+  const [lastClashResult, setLastClashResult] = useState<ClashSyncResult | null>(
+    null
+  );
+  const [showGeneratedYaml, setShowGeneratedYaml] = useState<boolean>(false);
+  const [copiedYaml, setCopiedYaml] = useState<boolean>(false);
+  const [switchingProfile, setSwitchingProfile] = useState<boolean>(false);
+  const [showCreateProfile, setShowCreateProfile] = useState<boolean>(false);
+  const [newProfileName, setNewProfileName] = useState<string>("");
+  const [newProfileProxy, setNewProfileProxy] = useState<string>("");
+  const [creatingProfile, setCreatingProfile] = useState<boolean>(false);
+
   const [nodes, setNodes] = useState<ProxyNodeStatus[]>([]);
   const [proxyText, setProxyText] = useState("");
   const [probing, setProbing] = useState(false);
@@ -63,9 +132,33 @@ export const NetworkView: React.FC<{
   const [copiedCode, setCopiedCode] = useState(false);
   const [nowMs, setNowMs] = useState(() => Date.now());
 
-  const loadProxies = async () => {
+  const loadProxies = async (targetViewProfile?: string) => {
     try {
-      const res = await fetchProxies();
+      const res = await fetchProxies(targetViewProfile);
+      const actProf = res.active_profile || "home";
+      const vProf = res.view_profile || targetViewProfile || actProf;
+      setActiveProfile(actProf);
+      setEnvProfile(res.env_profile || actProf);
+      setViewProfile(vProf);
+      if (Array.isArray(res.profiles) && res.profiles.length > 0) {
+        setProfiles(res.profiles);
+      }
+      if (res.clash_config) {
+        setClashConfig(res.clash_config);
+        setClashTargetProfile(res.clash_config.target_profile || "vps");
+        setClashListenHost(res.clash_config.listen_host || "127.0.0.1");
+        setClashStartPort(res.clash_config.start_port || 20001);
+        setClashMaxPorts(res.clash_config.max_ports || 40);
+        if (res.clash_config.priority_regions) {
+          setClashPriorityRegions(res.clash_config.priority_regions);
+        }
+        if (res.clash_config.exclude_regex) {
+          setClashExcludeRegex(res.clash_config.exclude_regex);
+        }
+        if (res.clash_config.last_sync) {
+          setLastClashResult(res.clash_config.last_sync);
+        }
+      }
       setSummary(res.summary || { total: 0, active: 0, cooling: 0 });
       setNodes(res.nodes || []);
       setProxyText((res.nodes || []).map((n) => n.url).join("\n"));
@@ -74,6 +167,160 @@ export const NetworkView: React.FC<{
         type: "error",
         text: err?.message || "加载代理列表失败",
       });
+    }
+  };
+
+  const handleSelectViewProfile = async (prof: string) => {
+    setViewProfile(prof);
+    await loadProxies(prof);
+  };
+
+  const handleActivateProfile = async (prof: string) => {
+    setSwitchingProfile(true);
+    setNotice(null);
+    try {
+      const res = await switchProxyProfile(prof);
+      setActiveProfile(res.active_profile);
+      setViewProfile(res.active_profile);
+      setSummary(res.summary || { total: 0, active: 0, cooling: 0 });
+      setNodes(res.nodes || []);
+      setProxyText((res.nodes || []).map((n) => n.url).join("\n"));
+      if (Array.isArray(res.profiles)) {
+        setProfiles(res.profiles);
+      }
+      setNotice({
+        type: "success",
+        text: `已热切换当前运行环境至 Profile [${res.active_profile}]，自动按该环境专属粘性映射重绑 ${res.migrated} 个号池账号`,
+      });
+      window.dispatchEvent(new Event("pool-updated"));
+    } catch (err: any) {
+      setNotice({
+        type: "error",
+        text: `切换运行 Profile 失败: ${err?.message || "未知错误"}`,
+      });
+    } finally {
+      setSwitchingProfile(false);
+    }
+  };
+
+  const handleFillPresetExample = (prof: string) => {
+    const preset = PROFILE_PRESET_EXAMPLES[prof];
+    if (!preset) return;
+    setProxyText(preset.example);
+    setNotice({
+      type: "info",
+      text: `已填入 [${prof}] 环境常用代理示例，点击「保存到 [${prof}] Profile」即可持久化至数据库`,
+    });
+  };
+
+  const handleCreateCustomProfile = async () => {
+    const cleaned = newProfileName.trim().toLowerCase().replace(/[^a-z0-9_-]/g, "");
+    if (!cleaned) {
+      setNotice({
+        type: "error",
+        text: "请输入有效的 Profile 名称（仅支持小写字母、数字、下划线或短横线，例如 laptop、hk-vps）",
+      });
+      return;
+    }
+    const initProxies = newProfileProxy
+      .split("\n")
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    setCreatingProfile(true);
+    setNotice(null);
+    try {
+      if (initProxies.length > 0) {
+        await updateProxies(initProxies, true, cleaned);
+        await loadProxies(cleaned);
+        setNotice({
+          type: "success",
+          text: `已创建 Profile [${cleaned}] 并写入 ${initProxies.length} 条代理节点到数据库`,
+        });
+      } else {
+        setProfiles((prev) =>
+          prev.some((p) => p.profile === cleaned)
+            ? prev
+            : [...prev, { profile: cleaned, label: cleaned, total: 0, clash_count: 0 }]
+        );
+        setViewProfile(cleaned);
+        setNodes([]);
+        setSummary({ total: 0, active: 0, cooling: 0 });
+        setProxyText("");
+        setNotice({
+          type: "info",
+          text: `已新建 Profile [${cleaned}] 视图，请在下方填入代理并点击「保存到 [${cleaned}] Profile」或使用 Clash 订阅同步写入`,
+        });
+      }
+      setNewProfileName("");
+      setNewProfileProxy("");
+      setShowCreateProfile(false);
+    } catch (err: any) {
+      setNotice({
+        type: "error",
+        text: `创建 Profile 失败: ${err?.message || "未知错误"}`,
+      });
+    } finally {
+      setCreatingProfile(false);
+    }
+  };
+
+  const handleSyncClash = async () => {
+    setSyncingClash(true);
+    setNotice({
+      type: "info",
+      text: "正在拉取/解析机场订阅并生成 Mihomo 多端口代理池...",
+    });
+    try {
+      const res = await syncClashProxies({
+        sub_url: subUrlInput.trim() || undefined,
+        raw_subscription: rawSubInput.trim() || undefined,
+        target_profile: clashTargetProfile,
+        listen_host: clashListenHost.trim() || "127.0.0.1",
+        start_port: Number(clashStartPort) || 20001,
+        max_ports: Number(clashMaxPorts) || 40,
+        exclude_regex: clashExcludeRegex.trim(),
+        priority_regions: clashPriorityRegions.trim(),
+        write_config: true,
+        reload_mihomo: clashReloadMihomo,
+        activate_profile: clashActivateAfterSync,
+      });
+      setLastClashResult(res.result);
+      if (Array.isArray(res.profiles)) {
+        setProfiles(res.profiles);
+      }
+      setActiveProfile(res.active_profile);
+      setViewProfile(res.result.target_profile);
+      await loadProxies(res.result.target_profile);
+      window.dispatchEvent(new Event("pool-updated"));
+
+      const warnSuffix = res.result.reload_warning
+        ? `（提示：${res.result.reload_warning}）`
+        : res.result.mihomo_reloaded
+          ? `（已通过 ${res.result.reload_method} 热重载 Mihomo）`
+          : "";
+      setNotice({
+        type: "success",
+        text: `机场订阅转换完成：共解析 ${res.result.total_parsed} 个节点，智能过滤剔除 ${res.result.filtered_out} 个，成功映射 ${res.result.mapped_count} 个多端口节点 (${res.result.start_port}..${res.result.end_port}) 写入 Profile [${res.result.target_profile}] ${warnSuffix}`,
+      });
+    } catch (err: any) {
+      setNotice({
+        type: "error",
+        text: `机场订阅同步失败: ${err?.message || "未知错误"}`,
+      });
+    } finally {
+      setSyncingClash(false);
+    }
+  };
+
+  const handleCopyYaml = async () => {
+    if (!lastClashResult?.generated_config) return;
+    try {
+      await navigator.clipboard.writeText(lastClashResult.generated_config);
+      setCopiedYaml(true);
+      window.setTimeout(() => setCopiedYaml(false), 1600);
+    } catch {
+      // ignore
     }
   };
 
@@ -115,12 +362,14 @@ export const NetworkView: React.FC<{
     setProbing(true);
     setNotice({
       type: "info",
-      text: "正在并发探测所有代理节点连通性与延迟...",
+      text: `正在并发探测当前激活 Profile [${activeProfile}] 下所有代理节点连通性与延迟...`,
     });
     try {
       const res = await probeProxies();
       setSummary(res.summary || { total: 0, active: 0, cooling: 0 });
-      setNodes(res.nodes || []);
+      if (viewProfile === activeProfile) {
+        setNodes(res.nodes || []);
+      }
       setNotice({
         type: (res.summary?.cooling ?? 0) > 0 ? "info" : "success",
         text: `探测完成：总计 ${res.summary?.total ?? 0} 个，可用 ${res.summary?.active ?? 0} 个，熔断冷却 ${res.summary?.cooling ?? 0} 个`,
@@ -149,12 +398,16 @@ export const NetworkView: React.FC<{
         .split("\n")
         .map((s) => s.trim())
         .filter(Boolean);
-      const res = await updateProxies(list, true);
+      const res = await updateProxies(list, true, viewProfile);
       setNotice({
         type: "success",
-        text: `已保存并重载 ${res.proxies_count} 条代理（自动校准迁移 ${res.migrated} 个绑定账号）`,
+        text: `已保存 ${res.proxies_count} 条代理至数据库 Profile [${viewProfile}]${
+          viewProfile === activeProfile
+            ? `（已热重载内存池并校准迁移 ${res.migrated} 个账号）`
+            : "（切换至该 Profile 时将自动生效）"
+        }`,
       });
-      await loadProxies();
+      await loadProxies(viewProfile);
       window.dispatchEvent(new Event("pool-updated"));
     } catch (err: any) {
       setNotice({
@@ -265,23 +518,37 @@ export const NetworkView: React.FC<{
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="text-xl font-semibold tracking-tight">
-            代理健康矩阵与模型目录
+            多环境 Profile 代理矩阵与模型目录
           </h1>
           <p className="text-xs z-text-muted mt-1">
-            粘性出站代理探测与熔断校准；右侧通过{" "}
-            <code className="font-mono-num">/v1/models</code>{" "}
-            真实聚合上游对话、生图与语音全部可用模型。
+            基于本地 <code className="font-mono-num">.env (APP_PROFILE={envProfile})</code>{" "}
+            隔离家里 / 公司 / 生产 VPS 的代理池与账号粘性绑定，支持 Clash Verge 机场订阅一键转 Mihomo 多端口代理池。
           </p>
         </div>
-        <button
-          type="button"
-          onClick={handleProbeAll}
-          disabled={probing}
-          className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl z-primary-btn text-xs font-medium cursor-pointer"
-        >
-          <Zap size={13} />
-          <span>{probing ? "探测测活中..." : "并发探活全部代理"}</span>
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setShowClashPanel((v) => !v)}
+            className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl border z-border z-surface z-ghost-btn text-xs font-medium cursor-pointer"
+          >
+            <Sparkles size={13} />
+            <span>Clash 机场订阅转多端口</span>
+            {showClashPanel ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+          </button>
+          <button
+            type="button"
+            onClick={handleProbeAll}
+            disabled={probing}
+            className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl z-primary-btn text-xs font-medium cursor-pointer"
+          >
+            <Zap size={13} />
+            <span>
+              {probing
+                ? "探测测活中..."
+                : `并发探活当前环境 (${activeProfile})`}
+            </span>
+          </button>
+        </div>
       </div>
 
       {notice && (
@@ -292,6 +559,370 @@ export const NetworkView: React.FC<{
         />
       )}
 
+      {/* Runtime Profile Switcher Bar */}
+      <div className="p-card rounded-2xl p-3.5 space-y-3 text-xs">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <Layers size={14} />
+            <span className="font-semibold text-sm">
+              运行时环境 Profile 代理隔离库
+            </span>
+            <span className="px-2 py-0.5 rounded-full border z-pill-success font-mono-num">
+              当前激活: {activeProfile}
+            </span>
+            <span className="px-2 py-0.5 rounded-full border z-pill-info font-mono-num">
+              .env 默认: APP_PROFILE={envProfile}
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            {viewProfile !== activeProfile && (
+              <button
+                type="button"
+                disabled={switchingProfile}
+                onClick={() => handleActivateProfile(viewProfile)}
+                className="inline-flex items-center gap-1.5 px-3 py-1 rounded-xl z-primary-btn font-medium cursor-pointer"
+              >
+                <Server size={12} />
+                <span>
+                  {switchingProfile
+                    ? "正在热切换..."
+                    : `将 [${viewProfile}] 设为当前运行环境`}
+                </span>
+              </button>
+            )}
+            {PROFILE_PRESET_EXAMPLES[viewProfile] && (
+              <button
+                type="button"
+                onClick={() => handleFillPresetExample(viewProfile)}
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-xl border z-border z-surface z-ghost-btn cursor-pointer"
+              >
+                <span>填入 {viewProfile} 默认代理模板</span>
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setShowCreateProfile((v) => !v)}
+              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-xl border z-border z-surface z-ghost-btn font-medium cursor-pointer"
+            >
+              <Plus size={12} />
+              <span>新建 Profile</span>
+            </button>
+          </div>
+        </div>
+
+        {showCreateProfile && (
+          <div
+            className="p-3 rounded-xl space-y-2.5"
+            style={{
+              background: "var(--bg-input)",
+              border: "1px solid var(--hairline)",
+            }}
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="font-semibold">
+                创建自定义 Runtime Profile（与本地 .env 的 APP_PROFILE 对应）
+              </span>
+              <span className="z-text-muted">
+                名称仅支持 a-z、0-9、-、_，例如 laptop / staging / hk_vps
+              </span>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5">
+              <input
+                type="text"
+                value={newProfileName}
+                onChange={(e) => setNewProfileName(e.target.value)}
+                placeholder="Profile 名称（如 laptop）"
+                className="px-3 py-1.5 rounded-xl p-input font-mono-num"
+              />
+              <input
+                type="text"
+                value={newProfileProxy}
+                onChange={(e) => setNewProfileProxy(e.target.value)}
+                placeholder="可选初始代理（如 http://127.0.0.1:7890，留空稍后编辑）"
+                className="md:col-span-2 px-3 py-1.5 rounded-xl p-input font-mono-num"
+              />
+            </div>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setShowCreateProfile(false)}
+                className="px-3 py-1 rounded-xl border z-border z-surface z-ghost-btn cursor-pointer"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                disabled={creatingProfile}
+                onClick={handleCreateCustomProfile}
+                className="inline-flex items-center gap-1 px-3 py-1 rounded-xl z-primary-btn font-medium cursor-pointer"
+              >
+                <Plus size={12} />
+                <span>{creatingProfile ? "创建中..." : "创建并切换视图"}</span>
+              </button>
+            </div>
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+          {profiles.map((item) => {
+            const isSelected = viewProfile === item.profile;
+            const isActive = activeProfile === item.profile;
+            const presetMeta = PROFILE_PRESET_EXAMPLES[item.profile];
+            return (
+              <div
+                key={item.profile}
+                onClick={() => handleSelectViewProfile(item.profile)}
+                className={`p-3 rounded-xl cursor-pointer transition-all flex flex-col justify-between gap-1.5 ${
+                  isSelected
+                    ? "ring-2 ring-zinc-900 dark:ring-zinc-200"
+                    : "z-row-hover"
+                }`}
+                style={{
+                  background: "var(--bg-input)",
+                  border: "1px solid var(--hairline)",
+                }}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-1.5 font-semibold">
+                    <span
+                      className={
+                        isActive ? "status-dot-green" : "status-dot-amber"
+                      }
+                    />
+                    <span>{item.label}</span>
+                  </div>
+                  <div className="flex items-center gap-1">
+                    {isActive && (
+                      <span className="px-2 py-0.5 rounded-md border z-pill-success font-mono-num text-[11px]">
+                        生效中
+                      </span>
+                    )}
+                    <span className="px-2 py-0.5 rounded-md border z-border font-mono-num text-[11px]">
+                      {item.total} 节点
+                    </span>
+                  </div>
+                </div>
+                <div className="z-text-muted text-[11px] flex items-center justify-between">
+                  <span className="truncate">
+                    {presetMeta?.subtitle || `Profile: ${item.profile}`}
+                  </span>
+                  {item.clash_count > 0 && (
+                    <span className="font-mono-num shrink-0 ml-1">
+                      Clash多端口: {item.clash_count}
+                    </span>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Clash Verge Subscription to Multi-Port Generator Panel */}
+      {showClashPanel && (
+        <div className="p-card rounded-2xl p-4 space-y-3.5 text-xs">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <h2 className="text-sm font-semibold flex items-center gap-1.5">
+                <Sparkles size={14} />
+                <span>
+                  Clash Verge 机场订阅转 Mihomo 多端口代理池（VPS 翻墙与多出口防风控）
+                </span>
+              </h2>
+              <p className="z-text-muted mt-0.5">
+                自动拉取机场订阅、剔除「剩余流量/到期/CN/HK/RU」等伪节点与高风控地区，按{" "}
+                <code className="font-mono-num">US &gt; JP &gt; SG &gt; TW &gt; KR</code>{" "}
+                优先级将每个节点映射为独立本地端口（如{" "}
+                <code className="font-mono-num">127.0.0.1:20001..20040</code>）并写入数据库。
+              </p>
+            </div>
+            {clashConfig?.sub_configured && (
+              <span className="px-2.5 py-1 rounded-full border z-pill-success font-mono-num">
+                .env 已配置订阅 ({clashConfig.sub_url_masked})
+              </span>
+            )}
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+            <div className="md:col-span-2 space-y-1">
+              <label className="font-medium z-text-sec block">
+                机场 Clash / Mihomo 订阅链接（留空则使用服务器 .env 的 CLASH_SUB_URL）
+              </label>
+              <input
+                type="url"
+                value={subUrlInput}
+                onChange={(e) => setSubUrlInput(e.target.value)}
+                placeholder={
+                  clashConfig?.sub_configured
+                    ? `已配置默认订阅 ${clashConfig.sub_url_masked}（可留空直接同步，或输入新链接覆盖）`
+                    : "https://your-airport.example.com/api/v1/client/subscribe?token=..."
+                }
+                className="w-full px-3 py-1.5 rounded-xl p-input font-mono-num"
+              />
+            </div>
+
+            <div className="space-y-1">
+              <label className="font-medium z-text-sec block">
+                写入目标 Profile
+              </label>
+              <select
+                value={clashTargetProfile}
+                onChange={(e) => setClashTargetProfile(e.target.value)}
+                className="w-full px-3 py-1.5 rounded-xl p-input font-mono-num"
+              >
+                {profiles.map((p) => (
+                  <option key={p.profile} value={p.profile}>
+                    {p.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2">
+              <div className="space-y-1">
+                <label className="font-medium z-text-sec block">起始端口</label>
+                <input
+                  type="number"
+                  value={clashStartPort}
+                  onChange={(e) =>
+                    setClashStartPort(Number(e.target.value) || 20001)
+                  }
+                  className="w-full px-3 py-1.5 rounded-xl p-input font-mono-num"
+                />
+              </div>
+              <div className="space-y-1">
+                <label className="font-medium z-text-sec block">最大节点数</label>
+                <input
+                  type="number"
+                  value={clashMaxPorts}
+                  onChange={(e) =>
+                    setClashMaxPorts(Number(e.target.value) || 40)
+                  }
+                  className="w-full px-3 py-1.5 rounded-xl p-input font-mono-num"
+                />
+              </div>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <div className="space-y-1">
+              <label className="font-medium z-text-sec block">
+                地区优先级排序（逗号分隔）
+              </label>
+              <input
+                type="text"
+                value={clashPriorityRegions}
+                onChange={(e) => setClashPriorityRegions(e.target.value)}
+                className="w-full px-3 py-1.5 rounded-xl p-input font-mono-num"
+              />
+            </div>
+            <div className="md:col-span-2 space-y-1">
+              <label className="font-medium z-text-sec block">
+                自动剔除伪节点与高风控地区正则（CLASH_EXCLUDE_REGEX）
+              </label>
+              <input
+                type="text"
+                value={clashExcludeRegex}
+                onChange={(e) => setClashExcludeRegex(e.target.value)}
+                className="w-full px-3 py-1.5 rounded-xl p-input font-mono-num"
+              />
+            </div>
+          </div>
+
+          <details className="rounded-xl p-2.5 border z-border">
+            <summary className="cursor-pointer font-medium z-text-sec">
+              可选：直接粘贴 Clash YAML 或 Base64 订阅内容（离线转换/无需服务器直连机场订阅域名）
+            </summary>
+            <textarea
+              rows={3}
+              value={rawSubInput}
+              onChange={(e) => setRawSubInput(e.target.value)}
+              placeholder="在此粘贴 Clash YAML (含 proxies:) 或 Base64 节点列表（留空则通过上方订阅 URL 拉取）"
+              className="w-full mt-2 p-2.5 rounded-xl p-code-box font-mono-num resize-y"
+            />
+          </details>
+
+          <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
+            <div className="flex flex-wrap items-center gap-4">
+              <label className="inline-flex items-center gap-1.5 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={clashReloadMihomo}
+                  onChange={(e) => setClashReloadMihomo(e.target.checked)}
+                />
+                <span>
+                  生成 <code className="font-mono-num">/etc/mihomo/config.yaml</code> 并自动热重载本机 Mihomo
+                </span>
+              </label>
+              <label className="inline-flex items-center gap-1.5 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={clashActivateAfterSync}
+                  onChange={(e) => setClashActivateAfterSync(e.target.checked)}
+                />
+                <span>同步后立即将目标 Profile 设为当前运行环境</span>
+              </label>
+            </div>
+
+            <div className="flex items-center gap-2">
+              {lastClashResult?.generated_config && (
+                <button
+                  type="button"
+                  onClick={() => setShowGeneratedYaml((v) => !v)}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border z-border z-surface z-ghost-btn font-medium cursor-pointer"
+                >
+                  <FileCode2 size={13} />
+                  <span>
+                    {showGeneratedYaml
+                      ? "隐藏 Mihomo YAML"
+                      : "预览生成的 Mihomo YAML"}
+                  </span>
+                </button>
+              )}
+              <button
+                type="button"
+                disabled={syncingClash}
+                onClick={handleSyncClash}
+                className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-xl z-primary-btn font-medium cursor-pointer"
+              >
+                <RefreshCw
+                  size={13}
+                  className={syncingClash ? "animate-spin" : ""}
+                />
+                <span>
+                  {syncingClash
+                    ? "正在转换并写入数据库..."
+                    : "一键拉取订阅 & 生成多端口入库"}
+                </span>
+              </button>
+            </div>
+          </div>
+
+          {showGeneratedYaml && lastClashResult?.generated_config && (
+            <div className="rounded-xl overflow-hidden p-code-box">
+              <div className="px-3 py-2 border-b z-border flex items-center justify-between">
+                <span className="font-mono-num z-text-muted">
+                  {lastClashResult.config_path || "/etc/mihomo/config.yaml"} · 端口{" "}
+                  {lastClashResult.start_port}..{lastClashResult.end_port} (
+                  {lastClashResult.mapped_count} 节点)
+                </span>
+                <button
+                  type="button"
+                  onClick={handleCopyYaml}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border z-border z-surface z-ghost-btn cursor-pointer"
+                >
+                  {copiedYaml ? <Check size={12} /> : <Copy size={12} />}
+                  <span>{copiedYaml ? "已复制" : "复制 YAML"}</span>
+                </button>
+              </div>
+              <pre className="p-3 font-mono-num text-xs max-h-60 overflow-auto m-0">
+                {lastClashResult.generated_config}
+              </pre>
+            </div>
+          )}
+        </div>
+      )}
+
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         {/* Left: Outbound Proxy Pool */}
         <div className="p-card rounded-2xl p-4 space-y-4 text-xs flex flex-col">
@@ -299,14 +930,19 @@ export const NetworkView: React.FC<{
             <h2 className="text-sm font-semibold flex items-center gap-1.5">
               <Globe size={14} />
               <span>
-                出站代理池 ({summary.active}/{summary.total} 健康
+                Profile [{viewProfile}] 代理池 ({summary.active}/{summary.total}{" "}
+                健康
                 {summary.cooling > 0 ? ` · ${summary.cooling} 冷却` : ""})
               </span>
             </h2>
-            <span className="z-text-muted">连续错误 ≥ 3 次自动熔断 5m</span>
+            <span className="z-text-muted">
+              {viewProfile === activeProfile
+                ? "当前正在生效 · 连续错误 ≥ 3 次自动熔断 5m"
+                : "预览其他环境配置 · 可编辑保存或点击上方切换生效"}
+            </span>
           </div>
 
-          <div className="space-y-2">
+          <div className="space-y-2 max-h-96 overflow-y-auto pr-1">
             {nodes.length === 0 && (
               <div
                 className="p-4 rounded-xl text-center z-text-muted"
@@ -315,7 +951,8 @@ export const NetworkView: React.FC<{
                   border: "1px solid var(--hairline)",
                 }}
               >
-                当前未配置代理，系统将按直连方式请求上游（可在下方添加代理列表并保存）。
+                当前 Profile [{viewProfile}] 尚未配置代理节点（可在下方填入代理并保存，或使用上方「填入{" "}
+                {viewProfile} 默认代理模板」/「Clash 订阅转多端口」一键入库）。
               </div>
             )}
             {nodes.map((node) => {
@@ -326,7 +963,7 @@ export const NetworkView: React.FC<{
               const healthy = node.status !== "cooling";
               return (
                 <div
-                  key={node.url}
+                  key={`${node.profile || viewProfile}-${node.url}`}
                   className="p-3 rounded-xl space-y-1.5"
                   style={{
                     background: "var(--bg-input)",
@@ -334,7 +971,7 @@ export const NetworkView: React.FC<{
                   }}
                 >
                   <div className="flex items-center justify-between gap-2">
-                    <div className="flex items-center gap-2 min-w-0">
+                    <div className="flex items-center gap-2 min-w-0 flex-wrap">
                       <span
                         className={
                           healthy ? "status-dot-green" : "status-dot-amber"
@@ -343,6 +980,19 @@ export const NetworkView: React.FC<{
                       <span className="font-mono-num font-medium truncate">
                         {node.url}
                       </span>
+                      {node.region && (
+                        <span className="px-1.5 py-0.5 rounded-md border z-pill-info font-mono-num text-[11px]">
+                          {node.region}
+                        </span>
+                      )}
+                      {node.node_name && (
+                        <span
+                          className="px-2 py-0.5 rounded-md border z-border truncate max-w-[220px]"
+                          title={node.node_name}
+                        >
+                          {node.node_name}
+                        </span>
+                      )}
                     </div>
                     <div className="flex items-center gap-2 shrink-0">
                       {node.latency_ms > 0 && (
@@ -359,9 +1009,13 @@ export const NetworkView: React.FC<{
                     </div>
                   </div>
                   <div className="flex items-center justify-between z-text-muted font-mono-num">
-                    <span>粘性绑定：{node.bound_accounts} 个账号</span>
                     <span>
-                      连续失败：{node.consecutive_errors} · 累计：{node.total_failures}
+                      粘性绑定：{node.bound_accounts} 个账号
+                      {node.source === "clash_sub" ? " · 来源: Clash 多端口" : ""}
+                    </span>
+                    <span>
+                      连续失败：{node.consecutive_errors} · 累计：
+                      {node.total_failures}
                     </span>
                   </div>
                   {node.last_error && (
@@ -380,14 +1034,16 @@ export const NetworkView: React.FC<{
 
           <div className="space-y-2 mt-auto pt-2 border-t z-border">
             <label className="font-medium z-text-sec block">
-              编辑代理列表（每行一条 http:// 或 socks5://，保存自动持久化
-              proxies.txt 并校准绑定）
+              编辑 Profile [{viewProfile}] 代理列表（每行一条 http:// 或 socks5://，持久化写入数据库并按环境独立保存）
             </label>
             <textarea
               rows={4}
               value={proxyText}
               onChange={(e) => setProxyText(e.target.value)}
-              placeholder={"http://127.0.0.1:7890\nsocks5://127.0.0.1:10808"}
+              placeholder={
+                PROFILE_PRESET_EXAMPLES[viewProfile]?.example ||
+                "http://127.0.0.1:10809\nsocks5://127.0.0.1:10808"
+              }
               className="w-full p-3 rounded-xl p-code-box font-mono-num resize-y focus:outline-none"
             />
             <div className="flex justify-end">
@@ -398,7 +1054,11 @@ export const NetworkView: React.FC<{
                 className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl border z-border z-surface z-ghost-btn font-medium cursor-pointer"
               >
                 <Save size={13} />
-                <span>{saving ? "保存校准中..." : "保存并校准绑定"}</span>
+                <span>
+                  {saving
+                    ? "保存校准中..."
+                    : `保存到 [${viewProfile}] Profile 并校准`}
+                </span>
               </button>
             </div>
           </div>

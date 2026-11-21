@@ -3,13 +3,13 @@ set -e
 
 PORT="${PORT:-18080}"
 WEB_PORT="${WEB_PORT:-5173}"
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 cd "$ROOT_DIR"
 
 # 1. 确保释放端口与历史残留进程
-if [ -f "$ROOT_DIR/scripts/stop.sh" ]; then
-    bash "$ROOT_DIR/scripts/stop.sh"
+if [ -f "$ROOT_DIR/scripts/dev/stop.sh" ]; then
+    bash "$ROOT_DIR/scripts/dev/stop.sh"
 fi
 
 # 2. 检查并安装前端依赖
@@ -28,8 +28,8 @@ cleanup() {
         kill -9 "$BACKEND_PID" 2>/dev/null || true
     fi
     # 再次清理端口，确保子进程彻底退出
-    if [ -f "$ROOT_DIR/scripts/stop.sh" ]; then
-        bash "$ROOT_DIR/scripts/stop.sh" >/dev/null 2>&1 || true
+    if [ -f "$ROOT_DIR/scripts/dev/stop.sh" ]; then
+        bash "$ROOT_DIR/scripts/dev/stop.sh" >/dev/null 2>&1 || true
     fi
     echo ">> Dev 服务已停止"
 }

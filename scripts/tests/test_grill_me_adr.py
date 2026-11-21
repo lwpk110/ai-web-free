@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 HOOK_MODULE_PATH = REPO_ROOT / ".agents" / "hooks" / "grill_me_adr.py"
 
 spec = importlib.util.spec_from_file_location("grill_me_adr", HOOK_MODULE_PATH)

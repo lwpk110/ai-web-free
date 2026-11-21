@@ -49,11 +49,16 @@ func AutoMigrateSQLiteToPostgres(localSQLitePath string, targetPG *gorm.DB) erro
 		migratedSummary["号池账号 (PoolAccountRecord)"] = len(poolAccounts)
 	}
 
-	// 2. 迁移代理节点 (ProxyNodeRecord)
+	// 2. 迁移代理节点 (ProxyNodeRecord) 与多环境粘性代理映射 (AccountProfileProxyRecord)
 	var proxyNodes []ProxyNodeRecord
 	if err := srcDB.Find(&proxyNodes).Error; err == nil && len(proxyNodes) > 0 {
 		_ = targetPG.Clauses(clause.OnConflict{UpdateAll: true}).CreateInBatches(proxyNodes, 100).Error
 		migratedSummary["代理节点 (ProxyNodeRecord)"] = len(proxyNodes)
+	}
+	var profileProxies []AccountProfileProxyRecord
+	if err := srcDB.Find(&profileProxies).Error; err == nil && len(profileProxies) > 0 {
+		_ = targetPG.Clauses(clause.OnConflict{UpdateAll: true}).CreateInBatches(profileProxies, 100).Error
+		migratedSummary["Profile 粘性代理绑定 (AccountProfileProxyRecord)"] = len(profileProxies)
 	}
 
 	// 3. 迁移账号限制记录 (AccountRestrictionRecord)

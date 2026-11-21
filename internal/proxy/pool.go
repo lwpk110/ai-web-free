@@ -22,9 +22,23 @@ const (
 	defaultCooldown      = 5 * time.Minute
 )
 
+// NodeMeta 描述代理节点的 Profile 归属与机场节点元数据。
+type NodeMeta struct {
+	Profile  string `json:"profile,omitempty"`
+	NodeName string `json:"node_name,omitempty"`
+	Region   string `json:"region,omitempty"`
+	Source   string `json:"source,omitempty"`
+	Port     int    `json:"port,omitempty"`
+}
+
 // NodeStatus 描述单个出口代理节点的实时健康状态与延迟统计。
 type NodeStatus struct {
 	URL               string `json:"url"`
+	Profile           string `json:"profile,omitempty"`
+	NodeName          string `json:"node_name,omitempty"`
+	Region            string `json:"region,omitempty"`
+	Source            string `json:"source,omitempty"`
+	Port              int    `json:"port,omitempty"`
 	Status            string `json:"status"` // "active" | "cooling"
 	LatencyMs         int64  `json:"latency_ms"`
 	ConsecutiveErrors int    `json:"consecutive_errors"`
@@ -36,6 +50,7 @@ type NodeStatus struct {
 }
 
 type nodeState struct {
+	meta              NodeMeta
 	status            string
 	latencyMs         int64
 	consecutiveErrors int
@@ -48,6 +63,7 @@ type nodeState struct {
 // Pool 管理代理 IP 的分配、健康状态机与容灾切换。
 type Pool struct {
 	mu            sync.Mutex
+	activeProfile string
 	cursor        int
 	ipv4List      []string
 	nodes         map[string]*nodeState
@@ -60,6 +76,7 @@ func NewPool(ipv4Proxies []string) *Pool {
 		ipv4Proxies = []string{}
 	}
 	p := &Pool{
+		activeProfile: "home",
 		ipv4List:      make([]string, 0, len(ipv4Proxies)),
 		nodes:         make(map[string]*nodeState),
 		failThreshold: defaultFailThreshold,
@@ -76,6 +93,44 @@ func NewPool(ipv4Proxies []string) *Pool {
 		}
 	}
 	return p
+}
+
+// ActiveProfile 返回当前代理池生效的 Runtime Profile 名称。
+func (p *Pool) ActiveProfile() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.activeProfile == "" {
+		return "home"
+	}
+	return p.activeProfile
+}
+
+// SetActiveProfile 设置当前代理池生效的 Runtime Profile。
+func (p *Pool) SetActiveProfile(profile string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	clean := strings.ToLower(strings.TrimSpace(profile))
+	if clean == "" {
+		clean = "home"
+	}
+	p.activeProfile = clean
+}
+
+// SetNodeMetas 批量注入代理节点的元数据（Profile、机场节点名、地区、端口号）。
+func (p *Pool) SetNodeMetas(metas map[string]NodeMeta) {
+	if len(metas) == 0 {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for rawURL, meta := range metas {
+		u := strings.TrimSpace(rawURL)
+		if u == "" {
+			continue
+		}
+		st := p.ensureNodeLocked(u)
+		st.meta = meta
+	}
 }
 
 // Allocate 返回一个代理 IP，优先选择健康节点按 round-robin 轮询。
@@ -243,8 +298,17 @@ func (p *Pool) Snapshots(boundCounts map[string]int) []NodeStatus {
 	out := make([]NodeStatus, 0, len(p.ipv4List))
 	for _, u := range p.ipv4List {
 		st := p.ensureNodeLocked(u)
+		prof := st.meta.Profile
+		if prof == "" {
+			prof = p.activeProfile
+		}
 		item := NodeStatus{
 			URL:               u,
+			Profile:           prof,
+			NodeName:          st.meta.NodeName,
+			Region:            st.meta.Region,
+			Source:            st.meta.Source,
+			Port:              st.meta.Port,
 			Status:            st.status,
 			LatencyMs:         st.latencyMs,
 			ConsecutiveErrors: st.consecutiveErrors,

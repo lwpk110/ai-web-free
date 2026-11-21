@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 PORT="${PORT:-18080}"
 WEB_PORT="${WEB_PORT:-5173}"
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 # 1. 优先通过端口查找并杀死占用进程 (Linux & macOS 通用)
 PORTS="${PORT} ${WEB_PORT} 5174"

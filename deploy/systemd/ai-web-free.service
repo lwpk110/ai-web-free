@@ -1,0 +1,20 @@
+[Unit]
+Description=AI-Web-Free OpenAI Compatible Reverse Gateway & Pool Console
+After=network-online.target mihomo.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/ai-web-free
+EnvironmentFile=-/opt/ai-web-free/.env
+ExecStart=/opt/ai-web-free/ai-web-free
+Restart=always
+RestartSec=3
+LimitNOFILE=65535
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ai-web-free
+
+[Install]
+WantedBy=multi-user.target

@@ -4,7 +4,7 @@
 )
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$rootDir = Split-Path -Parent $scriptDir
+$rootDir = Split-Path -Parent (Split-Path -Parent $scriptDir)
 Set-Location $rootDir
 
 # 1. 停止残留进程与端口占用

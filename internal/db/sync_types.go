@@ -393,6 +393,7 @@ func DefaultSyncTables() []SyncTableSpec {
 		NewTypedSyncTable[AccountRuntimeState](),
 		NewTypedSyncTable[PoolAccountRecord](),
 		NewTypedSyncTable[ProxyNodeRecord](),
+		NewTypedSyncTable[AccountProfileProxyRecord](),
 		NewTypedSyncTable[AccountRestrictionRecord](),
 		NewTypedSyncTable[CustomVoiceModelRecord](),
 		NewTypedSyncTable[ProviderChannelRecord](),

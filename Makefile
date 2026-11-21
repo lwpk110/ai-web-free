@@ -68,16 +68,16 @@ dev-frontend: ## 仅启动 Vite 前端热更新 (默认 WEB_PORT=5173，代理�
 
 dev: ## 本地联调模式：自动停止已有进程，并同时启动 Go 后端与 Vite 前端热更新 (默认 PORT=18080, WEB_PORT=5173)
 ifeq ($(OS),Windows_NT)
-	@powershell.exe -ExecutionPolicy Bypass -File scripts/dev.ps1 -Port $(PORT) -WebPort $(WEB_PORT)
+	@powershell.exe -ExecutionPolicy Bypass -File scripts/dev/dev.ps1 -Port $(PORT) -WebPort $(WEB_PORT)
 else
-	@PORT=$(PORT) WEB_PORT=$(WEB_PORT) bash scripts/dev.sh
+	@PORT=$(PORT) WEB_PORT=$(WEB_PORT) bash scripts/dev/dev.sh
 endif
 
 stop: ## 停止本项目的本地运行进程
 ifeq ($(OS),Windows_NT)
-	@powershell.exe -ExecutionPolicy Bypass -File scripts/stop.ps1 -Port $(PORT) -WebPort $(WEB_PORT)
+	@powershell.exe -ExecutionPolicy Bypass -File scripts/dev/stop.ps1 -Port $(PORT) -WebPort $(WEB_PORT)
 else
-	@PORT=$(PORT) WEB_PORT=$(WEB_PORT) bash scripts/stop.sh
+	@PORT=$(PORT) WEB_PORT=$(WEB_PORT) bash scripts/dev/stop.sh
 endif
 
 clean: ## 清理编译产物与临时日志
@@ -88,10 +88,10 @@ else
 endif
 
 sync-push: ## 备份 SQLite 数据库、.env 与多媒体缓存全量同步到七牛云
-	@$(BASH_EXE) -c 'go run scripts/sync_qiniu.go push'
+	@$(BASH_EXE) -c 'go run scripts/ops/sync_qiniu.go push'
 
 sync-pull: ## 跨机一键恢复：从七牛云全量拉取最新 SQLite 数据库、.env 与全部关联多媒体物料
-	@$(BASH_EXE) -c 'go run scripts/sync_qiniu.go pull'
+	@$(BASH_EXE) -c 'go run scripts/ops/sync_qiniu.go pull'
 
 backup: sync-push ## 别名：一键全量备份到云存储（数据库、.env 与多媒体物料）
 restore: sync-pull ## 别名：一键全量恢复（SQLite 数据库与关联物料一体化恢复）

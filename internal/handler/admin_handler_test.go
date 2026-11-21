@@ -15,6 +15,7 @@ import (
 	"ai-web-free/internal/audit"
 	"ai-web-free/internal/chatgpt"
 	"ai-web-free/internal/config"
+	"ai-web-free/internal/db"
 	"ai-web-free/internal/opslog"
 	"ai-web-free/internal/promptplaza"
 	"ai-web-free/internal/provider"
@@ -1096,4 +1097,88 @@ func TestAdminBatchCancelQueueEndpoint(t *testing.T) {
 	}
 
 	close(release)
+}
+
+func TestAdminProxyProfilesAndClashSyncEndpoints(t *testing.T) {
+	database, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	t.Cleanup(func() {
+		db.SetDB(nil)
+	})
+	_ = database
+
+	router, pool, proxyPool, _ := setupTestAdminRouter(t, "", []string{"http://127.0.0.1:10809"})
+	_ = db.ReplaceProxiesByProfile(database, "home", []string{"http://127.0.0.1:10809"})
+
+	// 1. 保存 office 环境专属代理 (192.168.2.12:10809)
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/admin/api/v1/proxies",
+		strings.NewReader(`{"profile":"office","proxies":["http://192.168.2.12:10809"],"persist":true}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("save office proxies failed: %d %s", w.Code, w.Body.String())
+	}
+
+	// 当前激活仍是 home，所以账号仍绑定 home 代理
+	acct := pool.GetByID("acc-admin-1")
+	if acct.Proxy != "http://127.0.0.1:10809" {
+		t.Fatalf("expected account still bound to home proxy, got %q", acct.Proxy)
+	}
+
+	// 2. 热切换当前激活 Profile 至 office，账号应自动迁移至 192.168.2.12:10809
+	req = httptest.NewRequest(
+		http.MethodPost,
+		"/admin/api/v1/proxies/profile",
+		strings.NewReader(`{"profile":"office"}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("switch profile to office failed: %d %s", w.Code, w.Body.String())
+	}
+	if proxyPool.ActiveProfile() != "office" || acct.Proxy != "http://192.168.2.12:10809" {
+		t.Fatalf("expected activeProfile=office and account bound to office proxy, got profile=%s proxy=%s", proxyPool.ActiveProfile(), acct.Proxy)
+	}
+
+	// 3. 调用 clash-sync 将 Clash 订阅转换为 vps 多端口 (20001..20002) 并立即激活 vps Profile
+	clashPayload := map[string]any{
+		"raw_subscription": "proxies:\n  - { name: '🇭🇰 香港 01', type: ss, server: hk.example.com, port: 443, cipher: aes-128-gcm, password: 'p' }\n  - { name: '🇺🇸 美国 01', type: ss, server: us.example.com, port: 443, cipher: aes-128-gcm, password: 'p' }\n  - { name: '🇯🇵 日本 01', type: ss, server: jp.example.com, port: 443, cipher: aes-128-gcm, password: 'p' }\n",
+		"target_profile":   "vps",
+		"start_port":       20001,
+		"max_ports":        10,
+		"write_config":     false,
+		"reload_mihomo":    false,
+		"activate_profile": true,
+	}
+	bodyBytes, _ := json.Marshal(clashPayload)
+	req = httptest.NewRequest(http.MethodPost, "/admin/api/v1/proxies/clash-sync", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("clash-sync failed: %d %s", w.Code, w.Body.String())
+	}
+	if proxyPool.ActiveProfile() != "vps" || (acct.Proxy != "http://127.0.0.1:20001" && acct.Proxy != "http://127.0.0.1:20002") {
+		t.Fatalf("expected vps profile active and account bound to 20001/20002, got profile=%s proxy=%s", proxyPool.ActiveProfile(), acct.Proxy)
+	}
+
+	// 4. 切回 office 时，应自动恢复 office 的粘性代理 192.168.2.12:10809
+	req = httptest.NewRequest(
+		http.MethodPost,
+		"/admin/api/v1/proxies/profile",
+		strings.NewReader(`{"profile":"office"}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK || acct.Proxy != "http://192.168.2.12:10809" {
+		t.Fatalf("expected office sticky proxy restored on switch back, got code=%d proxy=%s", w.Code, acct.Proxy)
+	}
 }
