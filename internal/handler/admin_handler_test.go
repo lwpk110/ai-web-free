@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -1180,5 +1182,139 @@ func TestAdminProxyProfilesAndClashSyncEndpoints(t *testing.T) {
 	router.ServeHTTP(w, req)
 	if w.Code != http.StatusOK || acct.Proxy != "http://192.168.2.12:10809" {
 		t.Fatalf("expected office sticky proxy restored on switch back, got code=%d proxy=%s", w.Code, acct.Proxy)
+	}
+}
+
+func TestAdminSystemSettingsLifecycleAndHotReload(t *testing.T) {
+	prevDB := db.GetDB()
+	t.Setenv("SILICONFLOW_API_KEY", "")
+	t.Setenv("POOL_CHATGPT_FREE_ACTIVE_TARGET", "")
+	t.Setenv("PROXY_URL", "")
+	config.RefreshInitialEnvSnapshot()
+
+	dbPath := filepath.Join(t.TempDir(), "settings_handler.db")
+	testDB, err := db.InitDB(dbPath)
+	if err != nil {
+		t.Fatalf("init sqlite db failed: %v", err)
+	}
+	t.Cleanup(func() {
+		if sqlDB, err := testDB.DB(); err == nil {
+			_ = sqlDB.Close()
+		}
+		db.SetDB(prevDB)
+		config.RefreshInitialEnvSnapshot()
+	})
+
+	router, _, proxyPool, _ := setupTestAdminRouter(t, "", []string{"http://127.0.0.1:8888"})
+	proxyPool.SetActiveProfile("vps")
+
+	// 1. GET /admin/api/v1/settings?scope=global
+	req := httptest.NewRequest(http.MethodGet, "/admin/api/v1/settings?scope=global", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET settings expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var initialResp struct {
+		Scope         string              `json:"scope"`
+		ActiveProfile string              `json:"active_profile"`
+		Items         []SystemSettingView `json:"items"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &initialResp); err != nil {
+		t.Fatalf("unmarshal initial settings response: %v", err)
+	}
+	if initialResp.Scope != "global" || len(initialResp.Items) < 20 {
+		t.Fatalf("unexpected initial settings payload: scope=%s items=%d", initialResp.Scope, len(initialResp.Items))
+	}
+
+	// 2. PUT /admin/api/v1/settings 保存全局密钥与热池目标，并在 vps Scope 覆盖 PROXY_URL
+	putGlobalBody := `{"scope":"global","values":{"SILICONFLOW_API_KEY":"sk-sf-live-1234567890","POOL_CHATGPT_FREE_ACTIVE_TARGET":"6"}}`
+	req = httptest.NewRequest(http.MethodPut, "/admin/api/v1/settings", strings.NewReader(putGlobalBody))
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("PUT global settings expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	putVpsBody := `{"scope":"vps","values":{"PROXY_URL":"http://127.0.0.1:20099"}}`
+	req = httptest.NewRequest(http.MethodPut, "/admin/api/v1/settings", strings.NewReader(putVpsBody))
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("PUT vps settings expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// 3. 验证列表脱敏与热重载 (os.Getenv & proxyPool)
+	req = httptest.NewRequest(http.MethodGet, "/admin/api/v1/settings?scope=vps", nil)
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET vps settings failed: %d", w.Code)
+	}
+	var afterResp struct {
+		Items []SystemSettingView `json:"items"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &afterResp); err != nil {
+		t.Fatalf("unmarshal after settings: %v", err)
+	}
+	byKey := make(map[string]SystemSettingView, len(afterResp.Items))
+	for _, it := range afterResp.Items {
+		byKey[it.Key] = it
+	}
+	if got := byKey["SILICONFLOW_API_KEY"].EffectiveValue; !strings.Contains(got, "••••") || got == "sk-sf-live-1234567890" {
+		t.Fatalf("expected masked SILICONFLOW_API_KEY in list response, got %q", got)
+	}
+	if os.Getenv("POOL_CHATGPT_FREE_ACTIVE_TARGET") != "6" {
+		t.Fatalf("expected POOL_CHATGPT_FREE_ACTIVE_TARGET hot-reloaded to 6, got %q", os.Getenv("POOL_CHATGPT_FREE_ACTIVE_TARGET"))
+	}
+	if !proxyPool.Contains("http://127.0.0.1:20099") {
+		t.Fatalf("expected proxyPool to contain hot-reloaded vps PROXY_URL")
+	}
+
+	// 4. Reveal 取回明文 + 传入脱敏值不应覆写真实密钥
+	req = httptest.NewRequest(http.MethodPost, "/admin/api/v1/settings/reveal", strings.NewReader(`{"scope":"global","key":"SILICONFLOW_API_KEY"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("reveal expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var revealResp struct {
+		Value string `json:"value"`
+		Found bool   `json:"found"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &revealResp)
+	if !revealResp.Found || revealResp.Value != "sk-sf-live-1234567890" {
+		t.Fatalf("expected revealed plaintext, got %+v", revealResp)
+	}
+
+	maskedPut := `{"scope":"global","values":{"SILICONFLOW_API_KEY":"` + byKey["SILICONFLOW_API_KEY"].EffectiveValue + `"}}`
+	req = httptest.NewRequest(http.MethodPut, "/admin/api/v1/settings", strings.NewReader(maskedPut))
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("masked put expected 200, got %d", w.Code)
+	}
+	req = httptest.NewRequest(http.MethodPost, "/admin/api/v1/settings/reveal", strings.NewReader(`{"scope":"global","key":"SILICONFLOW_API_KEY"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	_ = json.Unmarshal(w.Body.Bytes(), &revealResp)
+	if revealResp.Value != "sk-sf-live-1234567890" {
+		t.Fatalf("masked put must not overwrite stored plaintext, got %q", revealResp.Value)
+	}
+
+	// 5. DELETE vps override 回退
+	req = httptest.NewRequest(http.MethodDelete, "/admin/api/v1/settings?scope=vps&key=PROXY_URL", nil)
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("DELETE override expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if os.Getenv("PROXY_URL") != "" {
+		t.Fatalf("expected PROXY_URL reverted to empty after deleting override, got %q", os.Getenv("PROXY_URL"))
 	}
 }

@@ -127,11 +127,16 @@ func AutoMigrateSQLiteToPostgres(localSQLitePath string, targetPG *gorm.DB) erro
 		migratedSummary["第三方渠道账号 (ProviderAccountRecord)"] = len(providerAccounts)
 	}
 
-	// 11. 迁移凭据格式模式 (CredentialFormatPatternRecord)
+	// 11. 迁移凭据格式模式 (CredentialFormatPatternRecord) 与系统配置 (SystemSettingRecord)
 	var patterns []CredentialFormatPatternRecord
 	if err := srcDB.Find(&patterns).Error; err == nil && len(patterns) > 0 {
 		_ = targetPG.Clauses(clause.OnConflict{UpdateAll: true}).CreateInBatches(patterns, 100).Error
 		migratedSummary["凭据解析规则 (CredentialFormatPatternRecord)"] = len(patterns)
+	}
+	var sysSettings []SystemSettingRecord
+	if err := srcDB.Find(&sysSettings).Error; err == nil && len(sysSettings) > 0 {
+		_ = targetPG.Clauses(clause.OnConflict{UpdateAll: true}).CreateInBatches(sysSettings, 100).Error
+		migratedSummary["系统配置 (SystemSettingRecord)"] = len(sysSettings)
 	}
 
 	log.Printf("[DB Migration] ✅ 成功将本地 SQLite 历史数据全量灌入云端 PostgreSQL！迁移清单:")

@@ -1,0 +1,6 @@
+import{c as t}from"./GenerativeWorkbench-DfyWC4nD.js";import"./react-vendor-BBvRZFXu.js";import"./index-BBIbrboC.js";import"./storage-D9-8tgIh.js";import"./MarkdownContent-DfklzC8K.js";import"./mediaUrl-BdB9HA1J.js";import"./triangle-alert-BWPtonyu.js";import"./external-link-DtRluGpd.js";import"./maximize-2-DQF1GAsd.js";import"./zoom-out-Dv_z_vWr.js";import"./d3-interpolate-CzWHa-yA.js";import"./dramaCanvasBridge-QRh8JVLo.js";import"./play-vI8KJvke.js";import"./models-CUxPEVhZ.js";import"./activity-Cd565uJ8.js";import"./refresh-cw-6Izs-gRy.js";import"./shield-alert-pbMj3KAh.js";import"./trash-2-CLjvsgNA.js";import"./plus-DPpjH6QP.js";import"./upload-BiEi4162.js";import"./rotate-ccw-DT7UgCrL.js";import"./layers-YkcGM0aP.js";import"./square-BQ57H0iW.js";import"./chevron-down-CZh5Wrsz.js";import"./clapperboard-Cj0jOwMc.js";import"./file-text-WMUE-r5A.js";/**
+ * @license lucide-react v0.562.0 - ISC
+ *
+ * This source code is licensed under the ISC license.
+ * See the LICENSE file in the root directory of this source tree.
+ */const i=[["path",{d:"M12 2c1 3 2.5 3.5 3.5 4.5A5 5 0 0 1 17 10a5 5 0 1 1-10 0c0-.3 0-.6.1-.9a2 2 0 1 0 3.3-2C8 4.5 11 2 12 2Z",key:"1ir223"}],["path",{d:"m5 22 14-4",key:"1brv4h"}],["path",{d:"m5 18 14 4",key:"lgyyje"}]],K=t("flame-kindling",i);export{i as __iconNode,K as default};

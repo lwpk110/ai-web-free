@@ -100,7 +100,12 @@ export const NetworkView: React.FC<{
   const [switchingProfile, setSwitchingProfile] = useState<boolean>(false);
   const [showCreateProfile, setShowCreateProfile] = useState<boolean>(false);
   const [newProfileName, setNewProfileName] = useState<string>("");
+  const [newProfileMode, setNewProfileMode] = useState<"manual" | "clash">("manual");
   const [newProfileProxy, setNewProfileProxy] = useState<string>("");
+  const [newProfileClashSubUrl, setNewProfileClashSubUrl] = useState<string>("");
+  const [newProfileClashStartPort, setNewProfileClashStartPort] = useState<number>(20001);
+  const [newProfileClashMaxPorts, setNewProfileClashMaxPorts] = useState<number>(40);
+  const [newProfileClashReload, setNewProfileClashReload] = useState<boolean>(true);
   const [creatingProfile, setCreatingProfile] = useState<boolean>(false);
 
   const [nodes, setNodes] = useState<ProxyNodeStatus[]>([]);
@@ -222,38 +227,70 @@ export const NetworkView: React.FC<{
       });
       return;
     }
-    const initProxies = newProfileProxy
-      .split("\n")
-      .map((s) => s.trim())
-      .filter(Boolean);
 
     setCreatingProfile(true);
     setNotice(null);
     try {
-      if (initProxies.length > 0) {
-        await updateProxies(initProxies, true, cleaned);
+      if (newProfileMode === "clash") {
+        const subUrl = newProfileClashSubUrl.trim();
+        if (!subUrl) {
+          setNotice({
+            type: "error",
+            text: "已选择「Clash 机场订阅转多端口」模式，请填写机场订阅链接",
+          });
+          setCreatingProfile(false);
+          return;
+        }
+        const res = await syncClashProxies({
+          sub_url: subUrl,
+          target_profile: cleaned,
+          listen_host: clashListenHost.trim() || "127.0.0.1",
+          start_port: Number(newProfileClashStartPort) || 20001,
+          max_ports: Number(newProfileClashMaxPorts) || 40,
+          exclude_regex: clashExcludeRegex.trim(),
+          priority_regions: clashPriorityRegions.trim(),
+          write_config: true,
+          reload_mihomo: newProfileClashReload,
+          activate_profile: false,
+        });
+        setLastClashResult(res.result);
         await loadProxies(cleaned);
         setNotice({
           type: "success",
-          text: `已创建 Profile [${cleaned}] 并写入 ${initProxies.length} 条代理节点到数据库`,
+          text: `已创建 Profile [${cleaned}] 并同步 ${res.result.mapped_count} 个 Clash 多端口节点 (${res.result.start_port}..${res.result.end_port})`,
         });
       } else {
-        setProfiles((prev) =>
-          prev.some((p) => p.profile === cleaned)
-            ? prev
-            : [...prev, { profile: cleaned, label: cleaned, total: 0, clash_count: 0 }]
-        );
-        setViewProfile(cleaned);
-        setNodes([]);
-        setSummary({ total: 0, active: 0, cooling: 0 });
-        setProxyText("");
-        setNotice({
-          type: "info",
-          text: `已新建 Profile [${cleaned}] 视图，请在下方填入代理并点击「保存到 [${cleaned}] Profile」或使用 Clash 订阅同步写入`,
-        });
+        const initProxies = newProfileProxy
+          .split("\n")
+          .map((s) => s.trim())
+          .filter(Boolean);
+        if (initProxies.length > 0) {
+          await updateProxies(initProxies, true, cleaned);
+          await loadProxies(cleaned);
+          setNotice({
+            type: "success",
+            text: `已创建 Profile [${cleaned}] 并写入 ${initProxies.length} 条代理节点到数据库`,
+          });
+        } else {
+          setProfiles((prev) =>
+            prev.some((p) => p.profile === cleaned)
+              ? prev
+              : [...prev, { profile: cleaned, label: cleaned, total: 0, clash_count: 0 }]
+          );
+          setViewProfile(cleaned);
+          setNodes([]);
+          setSummary({ total: 0, active: 0, cooling: 0 });
+          setProxyText("");
+          setNotice({
+            type: "info",
+            text: `已新建 Profile [${cleaned}] 视图，请在下方填入代理并点击「保存到 [${cleaned}] Profile」或使用 Clash 订阅同步写入`,
+          });
+        }
       }
       setNewProfileName("");
       setNewProfileProxy("");
+      setNewProfileClashSubUrl("");
+      setNewProfileMode("manual");
       setShowCreateProfile(false);
     } catch (err: any) {
       setNotice({
@@ -627,21 +664,91 @@ export const NetworkView: React.FC<{
               </span>
             </div>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5">
-              <input
-                type="text"
-                value={newProfileName}
-                onChange={(e) => setNewProfileName(e.target.value)}
-                placeholder="Profile 名称（如 laptop）"
-                className="px-3 py-1.5 rounded-xl p-input font-mono-num"
-              />
-              <input
-                type="text"
-                value={newProfileProxy}
-                onChange={(e) => setNewProfileProxy(e.target.value)}
-                placeholder="可选初始代理（如 http://127.0.0.1:7890，留空稍后编辑）"
-                className="md:col-span-2 px-3 py-1.5 rounded-xl p-input font-mono-num"
-              />
+              <div className="space-y-1">
+                <label className="z-text-sec block">Profile 名称</label>
+                <input
+                  type="text"
+                  value={newProfileName}
+                  onChange={(e) => setNewProfileName(e.target.value)}
+                  placeholder="例如 laptop / hk_vps"
+                  className="w-full px-3 py-1.5 rounded-xl p-input font-mono-num"
+                />
+              </div>
+              <div className="space-y-1">
+                <label className="z-text-sec block">代理初始化方式</label>
+                <select
+                  value={newProfileMode}
+                  onChange={(e) =>
+                    setNewProfileMode(e.target.value as "manual" | "clash")
+                  }
+                  className="w-full px-3 py-1.5 rounded-xl p-input font-mono-num"
+                >
+                  <option value="manual">手动固定代理 (如 127.0.0.1:10809)</option>
+                  <option value="clash">Clash 机场订阅转多端口</option>
+                </select>
+              </div>
+              {newProfileMode === "manual" ? (
+                <div className="space-y-1">
+                  <label className="z-text-sec block">可选初始代理</label>
+                  <input
+                    type="text"
+                    value={newProfileProxy}
+                    onChange={(e) => setNewProfileProxy(e.target.value)}
+                    placeholder="http://127.0.0.1:7890（留空稍后编辑）"
+                    className="w-full px-3 py-1.5 rounded-xl p-input font-mono-num"
+                  />
+                </div>
+              ) : (
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="space-y-1">
+                    <label className="z-text-sec block">起始端口</label>
+                    <input
+                      type="number"
+                      value={newProfileClashStartPort}
+                      onChange={(e) =>
+                        setNewProfileClashStartPort(Number(e.target.value) || 20001)
+                      }
+                      className="w-full px-3 py-1.5 rounded-xl p-input font-mono-num"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="z-text-sec block">最大节点数</label>
+                    <input
+                      type="number"
+                      value={newProfileClashMaxPorts}
+                      onChange={(e) =>
+                        setNewProfileClashMaxPorts(Number(e.target.value) || 40)
+                      }
+                      className="w-full px-3 py-1.5 rounded-xl p-input font-mono-num"
+                    />
+                  </div>
+                </div>
+              )}
             </div>
+            {newProfileMode === "clash" && (
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5 items-end">
+                <div className="md:col-span-2 space-y-1">
+                  <label className="z-text-sec block">
+                    机场 Clash 订阅链接 (CLASH_SUB_URL)
+                  </label>
+                  <input
+                    type="url"
+                    value={newProfileClashSubUrl}
+                    onChange={(e) => setNewProfileClashSubUrl(e.target.value)}
+                    placeholder="https://your-airport.example.com/api/v1/client/subscribe?token=..."
+                    className="w-full px-3 py-1.5 rounded-xl p-input font-mono-num"
+                  />
+                </div>
+                <label className="inline-flex items-center gap-1.5 pb-1.5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={newProfileClashReload}
+                    onChange={(e) => setNewProfileClashReload(e.target.checked)}
+                  />
+                  <span>生成配置并热重载 Mihomo</span>
+                </label>
+              </div>
+            )}
             <div className="flex justify-end gap-2">
               <button
                 type="button"

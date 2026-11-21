@@ -1,6 +1,30 @@
 # AI Web Free
 
-AI Web Free converts the ChatGPT Web backend into an OpenAI-style API, supporting chat, Responses, file-based Q&A, image generation, image variations, speech-to-text, text-to-speech, model listings, and obtaining a valid ChatGPT `access_token` via `refresh_token` / `session_token`.
+AI Web Free is a self-hosted, OpenAI-compatible multi-provider gateway and AI workbench. It brings chat and multimodal APIs together with account-pool operations, proxy scheduling, and tools for image, voice, and video creation.
+
+## Highlights
+
+- **One familiar API across multiple capabilities**: OpenAI-style Chat Completions, Responses, Tool Calling, file Q&A, image generation and editing, speech synthesis, and transcription. Exact capabilities depend on the configured provider and accounts.
+- **Account-pool scheduling for long-running use**: Multiple credential sources, account deduplication, health checks, tiered cooldowns, token renewal, sticky proxies, and per-account TLS fingerprints. Request failover completes before response headers or the first SSE event are written.
+- **Gateway operations in one console**: Inspect providers and account pools, proxies and model catalogs, gateway keys, request audit trails, and background task status without stitching together separate scripts.
+- **An integrated creation workbench**: Includes a Copilot with scoped OpenUI dashboards, plus image, TTS, video, and short-drama studios. The drama canvas can orchestrate script, storyboard, audio, and video tasks.
+- **Simple deployment**: The React console and system prompt are embedded in a zero-CGO Go binary. The target host does not need Node.js, npm, or Nginx.
+
+## Screenshots
+
+These screenshots come from a local demo instance and contain no real accounts or tokens. The console brings gateway health, multimodal creation, and visual workflows together.
+
+**Gateway overview**: Inspect account pools, request success, proxies, and background health in one place.
+
+![Gateway overview showing pool health, request success, proxies, and background health](docs/screenshots/overview.png)
+
+**Image studio**: Select models, browse the prompt catalog, and manage generated works.
+
+![Image studio showing model selection, prompt catalog, and example works](docs/screenshots/image-studio.png)
+
+**Short-drama canvas**: Orchestrate scripts, storyboards, audio, and video tasks in a visual workflow.
+
+![Short-drama studio with a visual workflow for scripts, storyboards, audio, and video](docs/screenshots/drama-studio.png)
 
 ## API Documentation
 

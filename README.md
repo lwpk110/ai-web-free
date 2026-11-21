@@ -2,7 +2,31 @@
 
 [English README](README_EN.md)
 
-AI Web Free 将 ChatGPT Web 后端能力转换为类 OpenAI API，支持聊天、Responses、文件问答、图片生成、图片变体、语音转文字、文字转语音、模型列表，以及通过 `refresh_token` / `session_token` 获取可用的 ChatGPT `access_token`。
+AI Web Free 是一个可自托管的 OpenAI 兼容多供应商网关与 AI 工作台：统一接入聊天、Responses 和多模态能力，并提供账号池运维、代理调度与图像、语音、视频创作工具。
+
+## 项目亮点
+
+- **一个熟悉的 API 接入多种能力**：提供 Chat Completions、Responses、Tool Calling、文件问答、图像生成与编辑、语音合成和转写等 OpenAI 风格接口；具体能力由供应商和账号配置决定。
+- **面向长期运行的账号池调度**：支持多来源凭据、账号去重、健康检查、分层冷却、Token 续期、粘性代理与独立 TLS 指纹；请求级 Failover 在响应头或 SSE 首包写出前完成。
+- **网关和运维集中在一个控制台**：可查看供应商与账号池、代理及模型目录、网关密钥、链路审计和后台任务状态，减少分散脚本带来的日常维护成本。
+- **从调用到创作的一体化工作台**：内置 Copilot 与隔离的 OpenUI 交互看板，以及图像、TTS、视频和短剧创作工坊；短剧画布可编排剧本、分镜、音频与视频任务。
+- **轻量交付**：React 管理台和系统提示词嵌入零 CGO 的 Go 单二进制，部署目标无需安装 Node.js、npm 或 Nginx。
+
+## 界面截图
+
+以下截图来自本地演示环境，未使用真实账号或 Token。管理台可按需查看网关健康度、多模态创作和可视化工作流。
+
+**网关总览**：集中查看号池、请求成功率、代理与后台健康状态。
+
+![网关总览：号池、请求成功率、代理与后台健康状态](docs/screenshots/overview.png)
+
+**图像创作工坊**：模型选择、提示词广场与作品管理。
+
+![图像创作工坊：模型选择、提示词广场与作品卡片](docs/screenshots/image-studio.png)
+
+**短剧无限画布**：用可视化工作流编排剧本、分镜、音频和视频任务。
+
+![短剧创作工坊：可视化编排剧本、分镜、音频和视频任务](docs/screenshots/drama-studio.png)
 
 ## 接口文档
 

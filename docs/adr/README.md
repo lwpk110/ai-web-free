@@ -24,3 +24,4 @@
 | ADR-0016 | 现在由于出现开发偏差，现在免费的集成云数据库，首选pg 有哪些稳定可靠的可以选 | Accepted | 2026-11-19 | [ADR-0016-20261119-现在由于出现开发偏差-现在免费的集成云数据库-首选pg-有哪些稳定可靠的.md](./ADR-0016-20261119-现在由于出现开发偏差-现在免费的集成云数据库-首选pg-有哪些稳定可靠的.md) |
 | ADR-0017 | 基于 DeepSeek Harness (dsh) 插件体系模块化重构内置 Agent 架构 | Proposed | 2026-11-19 | [ADR-0017-20261119-基于-deepseek-harness-dsh-插件体系模块化重构内置-agent-架构.md](./ADR-0017-20261119-基于-deepseek-harness-dsh-插件体系模块化重构内置-agent-架构.md) |
 | ADR-0018 | CI/CD 自动发布、多环境 Profile 代理池与 Clash/Mihomo 多端口网关架构 | Accepted | 2026-11-21 | [ADR-0018-20261121-cicd-自动发布-多环境-profile-代理池与-clash-mihomo-多端口网关架构.md](./ADR-0018-20261121-cicd-自动发布-多环境-profile-代理池与-clash-mihomo-多端口网关架构.md) |
+| ADR-0019 | 系统配置中心模块与极简引导 `.env` 架构 | Accepted | 2026-11-22 | [ADR-0019-20261122-系统配置中心模块与极简引导-env-架构.md](./ADR-0019-20261122-系统配置中心模块与极简引导-env-架构.md) |

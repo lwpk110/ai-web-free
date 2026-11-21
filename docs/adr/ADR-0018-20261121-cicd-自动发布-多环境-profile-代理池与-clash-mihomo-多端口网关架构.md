@@ -122,7 +122,7 @@
 1. **Git 分支保护与 GitHub Actions CD 流水线**
    - 新增 `.github/workflows/deploy.yml`：当 PR 合入 `main`（或手动 `workflow_dispatch`）时，自动完成前端 `npm run build`、Go 单测、`CGO_ENABLED=0` 静态编译 `linux/amd64` 二进制；通过 SSH/SCP 将二进制、`deploy/systemd/ai-web-free.service`、`deploy/systemd/mihomo.service`、`scripts/setup_vps.sh` 上传至 VPS，并用 GitHub Secret `VPS_ENV_CONTENT` 全量覆写 `/opt/ai-web-free/.env`，执行滚动重启与 `/admin/api/v1/auth/status` 健康检查（失败自动回滚 `ai-web-free.bak`）。
    - 新增 `scripts/setup_github_branch_protection.sh`：一键通过 GitHub CLI (`gh api`) 设置 `main` 分支保护（禁止直推、强制 PR 与 `test-and-build` CI 检查通过）。
-   - 新增 `scripts/setup_vps.sh` 与 `deploy/systemd/*.service`：在阿里云 VPS 上自动安装/校验 `mihomo`（Clash Meta 内核）与 `ai-web-free` systemd 服务。
+   - 新增 `scripts/deploy/setup_vps.sh` 与 `deploy/systemd/*.service`：在阿里云 VPS 上自动安装/校验 `mihomo`（Clash Meta 内核）与 `ai-web-free` systemd 服务；支持通过 `--cf-token` 参数或 `.env` 中的 `CF_TUNNEL_TOKEN`（默认 `CF_TUNNEL_PROTOCOL=http2`）自动安装并托管 `cloudflared.service` 域名穿透。
 
 2. **多环境 Runtime Profile 与数据库代理隔离**
    - `internal/config/config.go` & `env.template`：新增 `APP_PROFILE`（默认 `home`）及 Clash 订阅转换相关环境变量（`CLASH_SUB_URL`、`CLASH_MULTIPORT_START=20001`、`CLASH_MULTIPORT_MAX=40` 等）。
@@ -137,7 +137,7 @@
 
 4. **管理台 API 与前端 `#/proxies` 页面升级**
    - 后端新增 `POST /admin/api/v1/proxies/profile`（热切换当前运行 Profile）、`POST /admin/api/v1/proxies/clash-sync`（一键拉取订阅生成多端口并入库），扩展 `GET/POST /admin/api/v1/proxies` 支持按 `profile` 查看与编辑。
-   - 前端 `#/proxies` 页面增加顶部 Profile 切换栏（`home` / `office` / `vps` 及「+ 新建 Profile」自定义创建）、Clash 订阅转多端口配置卡片及节点名称/地区/端口列展示。
+   - 前端 `#/proxies` 页面增加顶部 Profile 切换栏（`home` / `office` / `vps` 及「+ 新建 Profile」自定义创建，支持直接配置手动代理或 Clash 机场订阅转多端口字段）、Clash 订阅转多端口配置卡片及节点名称/地区/端口列展示。
 
 5. **本地开发机实测 Clash 多端口方案（已归档）**
    - 本地 `.env` 设置 `MIHOMO_CONFIG_PATH=data/mihomo_test.yaml` 后在 `#/proxies` 触发生成配置；

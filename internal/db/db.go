@@ -152,6 +152,7 @@ func CoreModels() []any {
 		&DramaRunRecord{},
 		&FreebieDeal{},
 		&BatchActionTaskRecord{},
+		&SystemSettingRecord{},
 	}
 }
 

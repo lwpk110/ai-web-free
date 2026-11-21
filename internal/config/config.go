@@ -44,16 +44,8 @@ type Config struct {
 	DBSyncBatchSize          int
 	DBSyncTimeout            time.Duration
 	StorageDir               string
-	S3Endpoint               string
-	S3Bucket                 string
-	S3AccessKey              string
-	S3SecretKey              string
-	S3Region                 string
-	S3PublicURL              string
 	SiliconFlowAPIKey        string
 	DashScopeAPIKey          string
-	GrokBaseURL              string
-	GrokAccountsFile         string
 	GrokSSOCookies           string
 	GrokCredentialLLMEnabled bool
 	GrokCredentialLLMModel   string
@@ -118,16 +110,8 @@ func Load() Config {
 		DBSyncBatchSize:          getIntEnv("DB_SYNC_BATCH_SIZE", 100),
 		DBSyncTimeout:            getDurationEnv("DB_SYNC_TIMEOUT", 30*time.Second),
 		StorageDir:               getEnv("STORAGE_DIR", "data/storage"),
-		S3Endpoint:               os.Getenv("S3_ENDPOINT"),
-		S3Bucket:                 os.Getenv("S3_BUCKET"),
-		S3AccessKey:              os.Getenv("S3_ACCESS_KEY"),
-		S3SecretKey:              os.Getenv("S3_SECRET_KEY"),
-		S3Region:                 getEnv("S3_REGION", "auto"),
-		S3PublicURL:              os.Getenv("S3_PUBLIC_URL"),
 		SiliconFlowAPIKey:        os.Getenv("SILICONFLOW_API_KEY"),
 		DashScopeAPIKey:          os.Getenv("DASHSCOPE_API_KEY"),
-		GrokBaseURL:              getEnv("GROK_BASE_URL", "https://grok.com"),
-		GrokAccountsFile:         getEnv("GROK_ACCOUNTS_FILE", "grok_accounts.txt"),
 		GrokSSOCookies:           os.Getenv("GROK_SSO_COOKIES"),
 		GrokCredentialLLMEnabled: getBoolEnv("GROK_CREDENTIAL_LLM_ENABLED", false),
 		GrokCredentialLLMModel:   getEnv("GROK_CREDENTIAL_LLM_MODEL", "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"),

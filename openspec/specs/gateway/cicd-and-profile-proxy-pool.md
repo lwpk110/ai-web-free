@@ -87,6 +87,7 @@ flowchart TB
   4. **打包部署载荷**：包含 `dist/ai-web-free`、`deploy/systemd/ai-web-free.service`、`deploy/systemd/mihomo.service`、`scripts/setup_vps.sh`。
   5. **远端原子发布与健康校验**：
      - 若 VPS 尚未初始化 `/opt/ai-web-free` 或 `mihomo`，自动运行 `setup_vps.sh` 完成目录创建、Mihomo 二进制安装与 systemd 注册。
+     - 若 `.env` 中配置了 `CF_TUNNEL_TOKEN`（或手动执行 `setup_vps.sh --cf-token <TOKEN> --cf-protocol http2`），`setup_vps.sh` 会自动下载 `cloudflared` 并注册启动 `cloudflared.service`（默认 `--protocol http2` 优化国内链路稳定性），实现免开公网端口的 HTTPS 域名穿透。
      - 将 `VPS_ENV_CONTENT` 全量覆写到 `/opt/ai-web-free/.env`（`chmod 600`），同步更新 `/etc/systemd/system/ai-web-free.service` 并 `systemctl daemon-reload`。
      - 备份当前线上二进制 `/opt/ai-web-free/ai-web-free` -> `/opt/ai-web-free/ai-web-free.bak`。
      - 原子替换新二进制并执行 `systemctl restart ai-web-free`。
@@ -298,7 +299,7 @@ listeners:
 在 `web/src/` 代理池治理视图中：
 1. **顶部 Runtime Profile 切换栏**：
    - 直观展示当前激活环境徽章（如 `当前激活: home (本地 .env)`），提供 `home (家里)`、`office (公司)`、`vps (生产多端口)` 快捷切换 Tabs 与「设为当前运行 Profile」按钮。
-   - 支持一键初始化 `home (127.0.0.1:10809)` / `office (192.168.2.12:10809)` 预设模板。
+   - 支持一键初始化 `home (127.0.0.1:10809)` / `office (192.168.2.12:10809)` 预设模板，并提供 **「+ 新建 Profile」** 面板（支持选择「手动固定代理」或「Clash 机场订阅转多端口」，直接填写订阅 URL、起始端口、最大节点数及是否热重载 Mihomo）。
 2. **Clash Verge 机场订阅多端口转换面板**：
    - 可折叠/抽屉卡片，支持配置/预览订阅 URL、起始端口（`20001`）、最大节点数（`40`）、排除地区正则与优先地区；
    - 提供「一键拉取订阅 & 生成多端口入库」与「导出/预览 Mihomo `config.yaml`」按钮。

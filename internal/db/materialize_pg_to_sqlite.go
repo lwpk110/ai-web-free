@@ -56,6 +56,7 @@ func MaterializePostgresToSQLite(pgDB *gorm.DB, localSQLitePath string) error {
 		&ProviderAccountRecord{},
 		&DramaProjectRecord{},
 		&DramaRunRecord{},
+		&SystemSettingRecord{},
 	); err != nil {
 		return fmt.Errorf("本地 SQLite AutoMigrate 失败: %w", err)
 	}
@@ -147,11 +148,16 @@ func MaterializePostgresToSQLite(pgDB *gorm.DB, localSQLitePath string) error {
 		summary["渠道账号 (ProviderAccountRecord)"] = len(provAccounts)
 	}
 
-	// 11. CredentialFormatPatternRecord
+	// 11. CredentialFormatPatternRecord & SystemSettingRecord
 	var patterns []CredentialFormatPatternRecord
 	if err := pgDB.Find(&patterns).Error; err == nil && len(patterns) > 0 {
 		_ = sqliteDB.Clauses(clause.OnConflict{UpdateAll: true}).CreateInBatches(patterns, 100).Error
 		summary["凭据规则 (CredentialFormatPatternRecord)"] = len(patterns)
+	}
+	var sysSettings []SystemSettingRecord
+	if err := pgDB.Find(&sysSettings).Error; err == nil && len(sysSettings) > 0 {
+		_ = sqliteDB.Clauses(clause.OnConflict{UpdateAll: true}).CreateInBatches(sysSettings, 100).Error
+		summary["系统配置 (SystemSettingRecord)"] = len(sysSettings)
 	}
 
 	log.Printf("[DB Materialize] ✅ 成功将云端 PostgreSQL 数据全量物化同步至本地 SQLite (%s)！物化清单:", localSQLitePath)

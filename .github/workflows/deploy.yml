@@ -130,11 +130,34 @@ jobs:
           cp -f "${STAGE_DIR}/scripts/deploy/setup_vps.sh" "${APP_DIR}/scripts/deploy/setup_vps.sh"
           chmod +x "${APP_DIR}/scripts/deploy/setup_vps.sh"
 
-          # 全量覆盖 .env 配置文件（来自 GitHub Secret VPS_ENV_CONTENT）
+          # 智能合并 .env 配置文件（支持极简引导层 VPS_ENV_CONTENT，保留已有本地配置并更新同名键）
           if [ -f /tmp/ai-web-free.env.new ]; then
-            mv -f /tmp/ai-web-free.env.new "${APP_DIR}/.env"
+            if [ -f "${APP_DIR}/.env" ]; then
+              awk '
+                FNR==NR {
+                  if ($0 ~ /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=/) {
+                    k=$0; sub(/^[[:space:]]*/, "", k); sub(/=.*/, "", k);
+                    new_keys[k]=1;
+                  }
+                  next
+                }
+                {
+                  if ($0 ~ /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=/) {
+                    k=$0; sub(/^[[:space:]]*/, "", k); sub(/=.*/, "", k);
+                    if (k in new_keys) next;
+                  }
+                  print $0
+                }
+              ' /tmp/ai-web-free.env.new "${APP_DIR}/.env" > /tmp/ai-web-free.env.merged
+              cat /tmp/ai-web-free.env.new >> /tmp/ai-web-free.env.merged
+              mv -f /tmp/ai-web-free.env.merged "${APP_DIR}/.env"
+              rm -f /tmp/ai-web-free.env.new
+              echo "[deploy] 已智能合并更新 ${APP_DIR}/.env (支持极简引导层 Secret)"
+            else
+              mv -f /tmp/ai-web-free.env.new "${APP_DIR}/.env"
+              echo "[deploy] 已初始化生成 ${APP_DIR}/.env"
+            fi
             chmod 600 "${APP_DIR}/.env"
-            echo "[deploy] 已全量覆盖更新 ${APP_DIR}/.env"
           fi
 
           # 运行幂等环境初始化与 systemd 单元覆盖

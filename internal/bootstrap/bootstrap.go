@@ -55,6 +55,7 @@ func Init() (*App, error) {
 	browserfp.Init()
 
 	cfg := config.Load()
+	config.CaptureInitialEnvSnapshot()
 
 	// ─── 初始化持久化数据库与物化同步模式判断 ──────────────────────
 	materializeActive := cfg.DBMaterializeEnabled && db.IsRemoteDSN(cfg.DatabaseURL)
@@ -88,6 +89,9 @@ func Init() (*App, error) {
 	}
 
 	activeProfile := config.NormalizeProfile(cfg.AppProfile)
+	if database != nil {
+		seedAndApplySystemSettings(database, &cfg, activeProfile)
+	}
 	proxies, proxyMetas := loadProxyListForProfile(database, activeProfile)
 	proxyPool := proxy.NewPool(proxies)
 	proxyPool.SetActiveProfile(activeProfile)
@@ -828,6 +832,17 @@ func Init() (*App, error) {
 						_ = gwStore.ReloadFromDB()
 					}
 				}
+				if changedTables["system_setting_records"] > 0 {
+					applyDBSystemSettings(database, &cfg, curProf)
+					provider.ApplyConfig(reg, &cfg)
+					applyPoolPolicy(accountPool, "chatgpt", accounts.TypeFree)
+					applyPoolPolicy(accountPool, "chatgpt", accounts.TypePUID)
+					accountPool.Rebalance()
+					if cfg.ProxyURL != "" && !proxyPool.Contains(cfg.ProxyURL) {
+						proxyPool.Replace(append(proxyPool.List(), cfg.ProxyURL))
+					}
+					log.Printf("[DB Sync] 检测到远程系统配置变更，已自动热重载内存配置与号池策略 (profile=%s)", curProf)
+				}
 			},
 			OnStatusChange: func(st db.SyncStatus) {
 				detail := fmt.Sprintf("状态 %s · Outbox %d 条 · 推送 %d / 拉取 %d", st.State, st.OutboxPending, st.TotalPushed, st.TotalPulled)
@@ -1173,6 +1188,97 @@ func loadProxyListForProfile(database *gorm.DB, profile string) ([]string, map[s
 func loadProxyList(database *gorm.DB) []string {
 	list, _ := loadProxyListForProfile(database, "home")
 	return list
+}
+
+// seedAndApplySystemSettings 首次启动时将 .env 中的非空业务配置一次性写入 DB（updated_by="env_seed"），
+// 并按 DB Profile > DB Global > .env > Default 优先级覆盖运行时 *config.Config 与进程环境变量。
+func seedAndApplySystemSettings(database *gorm.DB, cfg *config.Config, activeProfile string) {
+	if database == nil || cfg == nil {
+		return
+	}
+	secret := config.ResolveSettingsSecret(cfg)
+	globalRecs, err := db.LoadSystemSettingsByScope(database, "global")
+	if err != nil {
+		log.Printf("[Settings] 加载全局系统配置失败: %v", err)
+		return
+	}
+	var profileRecs map[string]db.SystemSettingRecord
+	normProf := config.NormalizeProfile(activeProfile)
+	if normProf != "" && normProf != "global" {
+		profileRecs, _ = db.LoadSystemSettingsByScope(database, normProf)
+	}
+
+	var seedItems []db.SystemSettingUpsertItem
+	for _, spec := range config.Catalog() {
+		if spec.ReadOnlyBootstrap {
+			continue
+		}
+		if _, exists := globalRecs[spec.Key]; exists {
+			continue
+		}
+		if _, exists := profileRecs[spec.Key]; exists {
+			continue
+		}
+		if envVal, ok := config.LookupInitialEnv(spec.Key); ok && strings.TrimSpace(envVal) != "" {
+			seedItems = append(seedItems, db.SystemSettingUpsertItem{
+				Key:      spec.Key,
+				Category: spec.Category,
+				Value:    envVal,
+				IsSecret: spec.IsSecret,
+			})
+		}
+	}
+	if len(seedItems) > 0 {
+		if err := db.UpsertSystemSettings(database, "global", seedItems, secret, "env_seed"); err != nil {
+			log.Printf("[Settings] 从 .env 迁移业务配置至数据库失败: %v", err)
+		} else {
+			log.Printf("[Settings] 已自动将 %d 项 .env 业务配置首次迁移写入数据库系统配置中心 (scope=global)", len(seedItems))
+		}
+	}
+
+	applyDBSystemSettings(database, cfg, normProf)
+}
+
+func applyDBSystemSettings(database *gorm.DB, cfg *config.Config, activeProfile string) {
+	if database == nil || cfg == nil {
+		return
+	}
+	secret := config.ResolveSettingsSecret(cfg)
+	globalRecs, err := db.LoadSystemSettingsByScope(database, "global")
+	if err != nil {
+		log.Printf("[Settings] 读取系统配置失败: %v", err)
+		return
+	}
+	globalVals := make(map[string]string, len(globalRecs))
+	for k, rec := range globalRecs {
+		val, decErr := db.DecodeSettingValue(rec, secret)
+		if decErr != nil {
+			log.Printf("[Settings] 解密全局配置 %s 失败: %v", k, decErr)
+			continue
+		}
+		globalVals[k] = val
+	}
+
+	profileVals := make(map[string]string)
+	normProf := config.NormalizeProfile(activeProfile)
+	if normProf != "" && normProf != "global" {
+		if profRecs, err := db.LoadSystemSettingsByScope(database, normProf); err == nil {
+			for k, rec := range profRecs {
+				val, decErr := db.DecodeSettingValue(rec, secret)
+				if decErr != nil {
+					log.Printf("[Settings] 解密 Profile=%s 配置 %s 失败: %v", normProf, k, decErr)
+					continue
+				}
+				profileVals[k] = val
+			}
+		}
+	}
+
+	effective, _ := config.BuildEffectiveMap(globalVals, profileVals)
+	config.ApplyEffectiveMap(cfg, effective)
+	if len(globalVals) > 0 || len(profileVals) > 0 {
+		log.Printf("[Settings] 已加载并应用数据库系统配置（global=%d 项, profile[%s]=%d 项）", len(globalVals), normProf, len(profileVals))
+	}
 }
 
 func loadDotEnv() {

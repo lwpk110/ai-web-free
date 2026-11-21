@@ -30,6 +30,7 @@ export type RouteKey =
   | "deals"
   | "logs"
   | "ops-logs"
+  | "settings"
   | "chat"
   | "image"
   | "drama"
@@ -93,6 +94,13 @@ export const NAV_ITEMS: NavItemConfig[] = [
     label: "前后端运维日志",
     hash: "#/ops-logs",
     description: "实时聚合 Go 后台控制台日志与前端报错堆栈，快速排错",
+  },
+  {
+    id: "settings",
+    group: "ops",
+    label: "系统配置中心",
+    hash: "#/settings",
+    description: "数据库持久化的全局与多环境 Profile 参数中心，支持密钥加密、即看即改与零重启热重载",
   },
   {
     id: "chat",
