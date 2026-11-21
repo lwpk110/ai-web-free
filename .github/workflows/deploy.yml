@@ -1,0 +1,187 @@
+name: Deploy to VPS
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-production-vps
+  cancel-in-progress: false
+
+jobs:
+  build-test-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build embedded React frontend & OpenUI prompt
+        working-directory: web
+        run: |
+          npm ci
+          npx tsc --noEmit
+          npm run build
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run Go unit tests
+        run: go test ./...
+
+      - name: Run Python script unit tests
+        run: python3 -m unittest discover -s scripts -p "test_*.py" -v
+
+      - name: Build static Linux binary (CGO_ENABLED=0)
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: amd64
+        run: |
+          mkdir -p dist_bundle/deploy/systemd dist_bundle/scripts/deploy
+          go build -trimpath -ldflags="-s -w" -o dist_bundle/ai-web-free .
+          cp deploy/systemd/ai-web-free.service dist_bundle/deploy/systemd/
+          cp deploy/systemd/mihomo.service dist_bundle/deploy/systemd/
+          cp scripts/deploy/setup_vps.sh dist_bundle/scripts/deploy/
+          chmod +x dist_bundle/ai-web-free dist_bundle/scripts/deploy/setup_vps.sh
+          tar -czf deploy_bundle.tar.gz -C dist_bundle .
+
+      - name: Deploy bundle, full .env, and systemd units to VPS
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_PORT: ${{ secrets.VPS_PORT }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_SSH_PASSWORD: ${{ secrets.VPS_SSH_PASSWORD }}
+          VPS_ENV_CONTENT: ${{ secrets.VPS_ENV_CONTENT }}
+        run: |
+          if [ -z "${VPS_HOST}" ] || { [ -z "${VPS_SSH_KEY}" ] && [ -z "${VPS_SSH_PASSWORD}" ]; }; then
+            echo "⚠️ 未检测到 GitHub Secrets (VPS_HOST 与 VPS_SSH_KEY/VPS_SSH_PASSWORD)，已完成全量测试与静态二进制构建，跳过远端 SSH 部署。"
+            echo "请在仓库 Settings -> Secrets and variables -> Actions 中配置 VPS_HOST、VPS_SSH_PASSWORD（或 VPS_SSH_KEY）、VPS_ENV_CONTENT 后自动生效。"
+            exit 0
+          fi
+
+          SSH_PORT="${VPS_PORT:-22}"
+          SSH_USER="${VPS_USER:-root}"
+
+          mkdir -p ~/.ssh
+          ssh-keyscan -p "${SSH_PORT}" -H "${VPS_HOST}" >> ~/.ssh/known_hosts 2>/dev/null || true
+
+          USE_KEY=0
+          if [ -n "${VPS_SSH_KEY}" ]; then
+            printf '%s\n' "${VPS_SSH_KEY}" > ~/.ssh/id_deploy
+            chmod 600 ~/.ssh/id_deploy
+            if ssh -i ~/.ssh/id_deploy -p "${SSH_PORT}" -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=15 "${SSH_USER}@${VPS_HOST}" "true" >/dev/null 2>&1; then
+              USE_KEY=1
+              echo ">>> 已使用 SSH 私钥成功认证 (${SSH_USER}@${VPS_HOST}:${SSH_PORT})"
+            else
+              echo "⚠️ SSH 私钥认证失败，尝试回退到密码登录..."
+            fi
+          fi
+
+          if [ "${USE_KEY}" -eq 1 ]; then
+            SSH_CMD=(ssh -i ~/.ssh/id_deploy -p "${SSH_PORT}" -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=15)
+            SCP_CMD=(scp -i ~/.ssh/id_deploy -P "${SSH_PORT}" -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=15)
+          elif [ -n "${VPS_SSH_PASSWORD}" ]; then
+            if ! command -v sshpass >/dev/null 2>&1; then
+              sudo apt-get update -qq && sudo apt-get install -y -qq sshpass
+            fi
+            export SSHPASS="${VPS_SSH_PASSWORD}"
+            SSH_CMD=(sshpass -e ssh -p "${SSH_PORT}" -o StrictHostKeyChecking=no -o PubkeyAuthentication=no -o ConnectTimeout=15)
+            SCP_CMD=(sshpass -e scp -P "${SSH_PORT}" -o StrictHostKeyChecking=no -o PubkeyAuthentication=no -o ConnectTimeout=15)
+            echo ">>> 已切换为 SSH 密码认证通道 (${SSH_USER}@${VPS_HOST}:${SSH_PORT})"
+          else
+            echo "❌ 错误: SSH 私钥认证失败且未配置 VPS_SSH_PASSWORD 兜底密码" >&2
+            exit 1
+          fi
+
+          echo ">>> 1/4 上传构建产物包与生产 .env 到 VPS (${SSH_USER}@${VPS_HOST}:${SSH_PORT})"
+          "${SCP_CMD[@]}" deploy_bundle.tar.gz "${SSH_USER}@${VPS_HOST}:/tmp/ai-web-free-bundle.tar.gz"
+
+          if [ -n "${VPS_ENV_CONTENT}" ]; then
+            printf '%s\n' "${VPS_ENV_CONTENT}" > /tmp/vps_prod.env
+            "${SCP_CMD[@]}" /tmp/vps_prod.env "${SSH_USER}@${VPS_HOST}:/tmp/ai-web-free.env.new"
+            rm -f /tmp/vps_prod.env
+          fi
+
+          echo ">>> 2/4 在 VPS 执行原子覆盖、systemd 同步与滚动重启"
+          "${SSH_CMD[@]}" "${SSH_USER}@${VPS_HOST}" 'bash -s' <<'REMOTE_EOF'
+          set -euo pipefail
+          APP_DIR="/opt/ai-web-free"
+          STAGE_DIR="$(mktemp -d /tmp/ai-web-free-stage.XXXXXX)"
+
+          tar -xzf /tmp/ai-web-free-bundle.tar.gz -C "${STAGE_DIR}"
+          rm -f /tmp/ai-web-free-bundle.tar.gz
+
+          mkdir -p "${APP_DIR}/deploy/systemd" "${APP_DIR}/scripts/deploy" "${APP_DIR}/data/storage"
+          cp -f "${STAGE_DIR}/deploy/systemd/ai-web-free.service" "${APP_DIR}/deploy/systemd/ai-web-free.service"
+          cp -f "${STAGE_DIR}/deploy/systemd/mihomo.service" "${APP_DIR}/deploy/systemd/mihomo.service"
+          cp -f "${STAGE_DIR}/scripts/deploy/setup_vps.sh" "${APP_DIR}/scripts/deploy/setup_vps.sh"
+          chmod +x "${APP_DIR}/scripts/deploy/setup_vps.sh"
+
+          # 全量覆盖 .env 配置文件（来自 GitHub Secret VPS_ENV_CONTENT）
+          if [ -f /tmp/ai-web-free.env.new ]; then
+            mv -f /tmp/ai-web-free.env.new "${APP_DIR}/.env"
+            chmod 600 "${APP_DIR}/.env"
+            echo "[deploy] 已全量覆盖更新 ${APP_DIR}/.env"
+          fi
+
+          # 运行幂等环境初始化与 systemd 单元覆盖
+          APP_DIR="${APP_DIR}" bash "${APP_DIR}/scripts/deploy/setup_vps.sh"
+
+          # 备份上一版二进制以便健康检查失败时快速回滚
+          if [ -f "${APP_DIR}/ai-web-free" ]; then
+            cp -f "${APP_DIR}/ai-web-free" "${APP_DIR}/ai-web-free.bak"
+          fi
+
+          mv -f "${STAGE_DIR}/ai-web-free" "${APP_DIR}/ai-web-free.new"
+          chmod +x "${APP_DIR}/ai-web-free.new"
+          mv -f "${APP_DIR}/ai-web-free.new" "${APP_DIR}/ai-web-free"
+          rm -rf "${STAGE_DIR}"
+
+          systemctl daemon-reload
+          systemctl restart ai-web-free.service
+
+          # 读取配置的服务端口（默认 18080）
+          PORT="18080"
+          if [ -f "${APP_DIR}/.env" ]; then
+            ENV_PORT="$(grep -E '^SERVER_PORT=' "${APP_DIR}/.env" | tail -n 1 | cut -d'=' -f2- | tr -d ' "\r' || true)"
+            if [ -n "${ENV_PORT}" ]; then
+              PORT="${ENV_PORT}"
+            fi
+          fi
+
+          echo "[deploy] 正在等待网关端口 127.0.0.1:${PORT} 健康检查就绪..."
+          HEALTHY=0
+          for i in $(seq 1 15); do
+            if curl -fsS --max-time 3 "http://127.0.0.1:${PORT}/admin/api/v1/auth/status" >/dev/null 2>&1; then
+              HEALTHY=1
+              break
+            fi
+            sleep 2
+          done
+
+          if [ "${HEALTHY}" -eq 1 ]; then
+            echo "✅ [deploy] 新版本服务已成功启动并通过健康检查 (127.0.0.1:${PORT})"
+            exit 0
+          fi
+
+          echo "❌ [deploy] 新版本健康检查超时，正在自动回滚上一版二进制..." >&2
+          journalctl -u ai-web-free.service -n 60 --no-pager >&2 || true
+          if [ -f "${APP_DIR}/ai-web-free.bak" ]; then
+            mv -f "${APP_DIR}/ai-web-free.bak" "${APP_DIR}/ai-web-free"
+            systemctl restart ai-web-free.service || true
+          fi
+          exit 1
+          REMOTE_EOF

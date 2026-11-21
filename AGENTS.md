@@ -52,7 +52,7 @@
 | `internal/httpstream/`, `internal/sseparser/`, `internal/toolcall/` | SSE 流式解析、OpenAI 增量输出、`<tool_call>` 解析与纠偏恢复 |
 | `conversion/`, `typings/`, `httpclient/`, `middlewares/`, `util/` | OpenAI ↔ ChatGPT 请求/响应转换、数据结构、TLS HTTP 客户端封装、鉴权/CORS 中间件与工具函数 |
 | `web/` | Vite + React 19 + TypeScript 前端、`scripts/export-prompt.mjs` 与 `embed.go` |
-| `scripts/` | 独立 Python 卡密辅助脚本（`kami_login.py` 及对应单测 `test_kami_login.py`）与 ADR 归档单测（`test_grill_me_adr.py`） |
+| `scripts/` | 分类维护的开发与运维脚本（`dev/` 本地联调、`deploy/` 部署与隧道、`ops/` 同步与卡密工具、`registrar/` 自动注册机、`tests/` Python 单测，详见 `scripts/README.md`） |
 | `openspec/specs/` | UI 与号池运维系统设计规范 |
 | `.agents/` | 项目级 Antigravity 钩子（`hooks.json`、`hooks/grill_me_adr.py`）与技能（`skills/grill-me-adr/SKILL.md`） |
 | `docs/adr/` | 由 `/grill-me` 访谈自动归档生成的架构决策记录（ADR）及索引 |

@@ -22,3 +22,5 @@
 | ADR-0014 | 本项目最终目的是agent 驱动，不管是外部还是内部的agent,那么是否所有的api都需要mcp工程化 | Accepted | 2026-11-16 | [ADR-0014-20261116-本项目最终目的是agent-驱动-不管是外部还是内部的agent-那么是.md](./ADR-0014-20261116-本项目最终目的是agent-驱动-不管是外部还是内部的agent-那么是.md) |
 | ADR-0015 | GPT Free 与 Grok Free 自动注册机与持久化号池架构方案 | Accepted | 2026-11-18 | [ADR-0015-20261118-gpt-free-与-grok-free-自动注册机与持久化号池架构方案.md](./ADR-0015-20261118-gpt-free-与-grok-free-自动注册机与持久化号池架构方案.md) |
 | ADR-0016 | 现在由于出现开发偏差，现在免费的集成云数据库，首选pg 有哪些稳定可靠的可以选 | Accepted | 2026-11-19 | [ADR-0016-20261119-现在由于出现开发偏差-现在免费的集成云数据库-首选pg-有哪些稳定可靠的.md](./ADR-0016-20261119-现在由于出现开发偏差-现在免费的集成云数据库-首选pg-有哪些稳定可靠的.md) |
+| ADR-0017 | 基于 DeepSeek Harness (dsh) 插件体系模块化重构内置 Agent 架构 | Proposed | 2026-11-19 | [ADR-0017-20261119-基于-deepseek-harness-dsh-插件体系模块化重构内置-agent-架构.md](./ADR-0017-20261119-基于-deepseek-harness-dsh-插件体系模块化重构内置-agent-架构.md) |
+| ADR-0018 | CI/CD 自动发布、多环境 Profile 代理池与 Clash/Mihomo 多端口网关架构 | Accepted | 2026-11-21 | [ADR-0018-20261121-cicd-自动发布-多环境-profile-代理池与-clash-mihomo-多端口网关架构.md](./ADR-0018-20261121-cicd-自动发布-多环境-profile-代理池与-clash-mihomo-多端口网关架构.md) |

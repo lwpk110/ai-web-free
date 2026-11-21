@@ -208,7 +208,7 @@ QINIU_UPLOAD_URL=https://upload.qiniup.com
 | :--- | :--- | :--- |
 | **全量/增量备份** | `./ai-web-free backup` | `make backup` (或 `make sync-push`) |
 | **基础恢复 (DB + .env)** | `./ai-web-free restore` | `make restore` (或 `make sync-pull`) |
-| **全量多媒体拉取** | `./ai-web-free restore --all` | `go run scripts/sync_qiniu.go pull --all` |
+| **全量多媒体拉取** | `./ai-web-free restore --all` | `go run scripts/ops/sync_qiniu.go pull --all` |
 | **查看 CLI 用法** | `./ai-web-free help` | `make help` |
 
 > **备份特性**：

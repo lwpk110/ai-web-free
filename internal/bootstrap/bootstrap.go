@@ -87,8 +87,12 @@ func Init() (*App, error) {
 		log.Printf("[Bootstrap] 已启用本地 SQLite 物化层 (%s)，云数据库 (%s) 将在后台异步双向同步", primaryDSN, db.MaskDSN(cfg.DatabaseURL))
 	}
 
-	proxies := loadProxyList(database)
+	activeProfile := config.NormalizeProfile(cfg.AppProfile)
+	proxies, proxyMetas := loadProxyListForProfile(database, activeProfile)
 	proxyPool := proxy.NewPool(proxies)
+	proxyPool.SetActiveProfile(activeProfile)
+	proxyPool.SetNodeMetas(proxyMetas)
+	log.Printf("[Bootstrap] 当前运行环境 Profile=%s，已加载 %d 个环境专属代理节点", activeProfile, len(proxies))
 
 	// ─── 加载账号 ────────────────────────────────────────────────
 
@@ -133,8 +137,14 @@ func Init() (*App, error) {
 			_ = db.SaveRestrictionsBatchToDB(database, newDisabled, "disabled")
 		}
 	}
-	// 加载账号粘性代理绑定关系（保证重启后账号出口 IP 不漂移）
+	// 加载当前 Profile 专属的账号粘性代理绑定关系（与本地 account_proxies.txt 合并，保证不同 Profile 切换时出口 IP 独立且不互相污染）
 	accountProxyMap := accounts.LoadAccountProxiesFromFile("account_proxies.txt")
+	if database != nil {
+		for k, u := range db.LoadAccountProfileProxies(database, activeProfile) {
+			accountProxyMap[k] = u
+		}
+	}
+	newProfileBindings := make(map[string]string)
 
 	assignStickyProxy := func(acct *accounts.Account) {
 		key := strings.ToLower(strings.TrimSpace(acct.Email))
@@ -150,11 +160,20 @@ func Init() (*App, error) {
 				return
 			}
 		}
-		// 无历史绑定或原绑定节点不可用时分配新节点并建立粘性映射
+		// 若账号自身的历史 Proxy 在当前 Profile 代理池内且健康，直接复用并记录到当前 Profile 粘性表
+		if acct.Proxy != "" && proxyPool.Contains(acct.Proxy) && proxyPool.IsHealthy(acct.Proxy) {
+			if key != "" {
+				accountProxyMap[key] = acct.Proxy
+				newProfileBindings[key] = acct.Proxy
+			}
+			return
+		}
+		// 无历史绑定或原绑定节点不属于当前 Profile 时，从当前 Profile 代理池分配新节点并建立 Profile 粘性映射
 		newProxy := proxyPool.Allocate()
 		acct.Proxy = newProxy
 		if key != "" && newProxy != "" {
 			accountProxyMap[key] = newProxy
+			newProfileBindings[key] = newProxy
 		}
 	}
 
@@ -376,6 +395,9 @@ func Init() (*App, error) {
 			log.Printf("[Bootstrap] 已成功将 %d 个新增/更新号池账号同步持久化至 SQLite 数据库", len(accountsToPersist))
 		}
 	}
+	if database != nil && len(newProfileBindings) > 0 {
+		_ = db.SaveAccountProfileProxiesBatch(database, activeProfile, newProfileBindings)
+	}
 
 	accountPool := accounts.NewPool(accs)
 
@@ -594,6 +616,124 @@ func Init() (*App, error) {
 		cfg.PromptSyncIntervalHours > 0,
 	)
 
+	stopClashSync := func() {}
+	clashSyncEnabled := strings.TrimSpace(cfg.ClashSubURL) != "" && cfg.ClashSyncIntervalHours > 0
+	if clashSyncEnabled {
+		clashStop := make(chan struct{})
+		stopClashSync = func() { close(clashStop) }
+		clashInterval := time.Duration(cfg.ClashSyncIntervalHours) * time.Hour
+		runClashSyncOnce := func() {
+			targetProf := db.NormalizeProfileName(cfg.ClashSubProfile)
+			existingPorts := make(map[string]int)
+			if database != nil {
+				if existing, err := db.LoadProxyRecordsByProfile(database, targetProf); err == nil {
+					for _, r := range existing {
+						if r.Source == "clash_sub" && r.NodeName != "" && r.Port > 0 {
+							existingPorts[r.NodeName] = r.Port
+						}
+					}
+				}
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+			defer cancel()
+			res, err := proxy.SyncClashSubscription(ctx, proxy.ClashSyncOptions{
+				SubURL:          cfg.ClashSubURL,
+				TargetProfile:   targetProf,
+				ListenHost:      cfg.ClashMultiportHost,
+				StartPort:       cfg.ClashMultiportStart,
+				MaxPorts:        cfg.ClashMultiportMax,
+				ExcludeRegex:    cfg.ClashExcludeRegex,
+				PriorityRegions: cfg.ClashPriorityRegions,
+				ConfigPath:      cfg.MihomoConfigPath,
+				MihomoAPIURL:    cfg.MihomoAPIURL,
+				MihomoAPISecret: cfg.MihomoAPISecret,
+				WriteConfig:     true,
+				ReloadMihomo:    true,
+				ExistingPorts:   existingPorts,
+			})
+			if err != nil {
+				log.Printf("[ClashSync] 自动同步机场订阅失败: %v", err)
+				healthTracker.MarkTick("clash_multiport_sync", "同步失败: "+err.Error())
+				return
+			}
+			clashRecords := make([]db.ProxyNodeRecord, 0, len(res.MappedNodes))
+			for _, item := range res.MappedNodes {
+				clashRecords = append(clashRecords, db.ProxyNodeRecord{
+					Profile:  targetProf,
+					URL:      item.ProxyURL,
+					NodeName: item.NodeName,
+					Region:   item.Region,
+					Source:   "clash_sub",
+					Port:     item.Port,
+					Protocol: "http",
+					Status:   "active",
+				})
+			}
+			if database != nil {
+				_ = db.ReplaceClashProxiesByProfile(database, targetProf, clashRecords)
+			}
+			if proxyPool.ActiveProfile() == targetProf {
+				records, _ := db.LoadProxyRecordsByProfile(database, targetProf)
+				urls := make([]string, 0, len(records))
+				metas := make(map[string]proxy.NodeMeta, len(records))
+				for _, r := range records {
+					urls = append(urls, r.URL)
+					metas[r.URL] = proxy.NodeMeta{
+						Profile:  r.Profile,
+						NodeName: r.NodeName,
+						Region:   r.Region,
+						Source:   r.Source,
+						Port:     r.Port,
+					}
+				}
+				proxyPool.Replace(urls)
+				proxyPool.SetNodeMetas(metas)
+				accountPool.ReconcileProxies(
+					func(u string) bool { return !proxyPool.Contains(u) || !proxyPool.IsHealthy(u) },
+					func(excl map[string]bool) string { return proxyPool.AllocateHealthy(excl) },
+				)
+			}
+			detail := fmt.Sprintf("已同步 %d 个多端口节点 (%d..%d) 至 Profile %s", res.MappedCount, res.StartPort, res.EndPort, targetProf)
+			log.Printf("[ClashSync] %s", detail)
+			healthTracker.MarkTick("clash_multiport_sync", detail)
+		}
+		go func() {
+			firstTimer := time.NewTimer(5 * time.Second)
+			ticker := time.NewTicker(clashInterval)
+			defer firstTimer.Stop()
+			defer ticker.Stop()
+			for {
+				select {
+				case <-clashStop:
+					return
+				case <-firstTimer.C:
+					runClashSyncOnce()
+				case <-ticker.C:
+					runClashSyncOnce()
+				}
+			}
+		}()
+		healthTracker.RegisterService(
+			"clash_multiport_sync",
+			"Clash 订阅多端口同步器",
+			"scheduler",
+			clashInterval.String(),
+			fmt.Sprintf("自动拉取机场订阅并映射端口 %d..%d 至 Profile %s", cfg.ClashMultiportStart, cfg.ClashMultiportStart+cfg.ClashMultiportMax-1, cfg.ClashSubProfile),
+			true,
+			true,
+		)
+	} else {
+		healthTracker.RegisterService(
+			"clash_multiport_sync",
+			"Clash 订阅多端口同步器",
+			"scheduler",
+			"",
+			"未启用自动定时同步（未设置 CLASH_SUB_URL 或 CLASH_SYNC_INTERVAL_HOURS<=0，支持管理台手动触发）",
+			false,
+			false,
+		)
+	}
+
 	gwSecret := strings.TrimSpace(os.Getenv("GATEWAY_KEY_SECRET"))
 	if gwSecret == "" {
 		gwSecret = cfg.AdminToken
@@ -613,21 +753,49 @@ func Init() (*App, error) {
 			BatchSize:    cfg.DBSyncBatchSize,
 			Timeout:      cfg.DBSyncTimeout,
 			OnRemoteChanged: func(changedTables map[string]int) {
+				curProf := proxyPool.ActiveProfile()
 				if changedTables["proxy_node_records"] > 0 {
-					if nextProxies, err := db.LoadProxiesFromDB(database); err == nil {
+					if nextRecords, err := db.LoadProxyRecordsByProfile(database, curProf); err == nil {
+						nextProxies := make([]string, 0, len(nextRecords))
+						nextMetas := make(map[string]proxy.NodeMeta, len(nextRecords))
+						for _, r := range nextRecords {
+							u := strings.TrimSpace(r.URL)
+							if u == "" {
+								continue
+							}
+							nextProxies = append(nextProxies, u)
+							nextMetas[u] = proxy.NodeMeta{
+								Profile:  r.Profile,
+								NodeName: r.NodeName,
+								Region:   r.Region,
+								Source:   r.Source,
+								Port:     r.Port,
+							}
+						}
 						proxyPool.Replace(nextProxies)
+						proxyPool.SetNodeMetas(nextMetas)
 					}
 				}
-				if changedTables["pool_account_records"] > 0 || changedTables["account_restriction_records"] > 0 {
+				if changedTables["pool_account_records"] > 0 || changedTables["account_restriction_records"] > 0 || changedTables["account_profile_proxies"] > 0 {
 					if reloaded, err := accounts.LoadAccountsFromDB(database, profiles); err == nil {
 						latestBanned := db.LoadRestrictionsFromDB(database, "banned")
 						latestDisabled := db.LoadRestrictionsFromDB(database, "disabled")
+						profProxies := db.LoadAccountProfileProxies(database, curProf)
 						for _, acct := range reloaded {
-							if acct.Proxy == "" {
-								acct.Proxy = proxyPool.Allocate()
-							}
 							keyID := strings.ToLower(strings.TrimSpace(acct.ChatGPTAccountID))
 							keyEmail := strings.ToLower(strings.TrimSpace(acct.Email))
+							stickyKey := keyEmail
+							if stickyKey == "" {
+								stickyKey = keyID
+							}
+							if stickyKey == "" {
+								stickyKey = acct.ID
+							}
+							if pURL, ok := profProxies[stickyKey]; ok && proxyPool.Contains(pURL) && proxyPool.IsHealthy(pURL) {
+								acct.Proxy = pURL
+							} else if acct.Proxy == "" || !proxyPool.Contains(acct.Proxy) {
+								acct.Proxy = proxyPool.Allocate()
+							}
 							banReason := ""
 							disableReason := ""
 							if keyID != "" {
@@ -746,6 +914,10 @@ func Init() (*App, error) {
 			stopPromptSync()
 			if cfg.PromptSyncIntervalHours > 0 {
 				healthTracker.MarkRunning("prompt_plaza_sync", false, "已停止")
+			}
+			stopClashSync()
+			if clashSyncEnabled {
+				healthTracker.MarkRunning("clash_multiport_sync", false, "已停止")
 			}
 			kamiWorker.Stop()
 		},
@@ -927,41 +1099,55 @@ func writeFileAtomic(path string, data []byte) {
 	}
 }
 
-// loadProxyList 从 SQLite 数据库 / proxies.txt / PROXY_URL / http_proxy 加载代理列表并双向对齐
-func loadProxyList(database *gorm.DB) []string {
+// loadProxyListForProfile 按指定 Runtime Profile 从数据库 / proxies.txt / PROXY_URL / http_proxy 加载代理列表并双向对齐
+func loadProxyListForProfile(database *gorm.DB, profile string) ([]string, map[string]proxy.NodeMeta) {
+	normProfile := db.NormalizeProfileName(profile)
 	var proxies []string
 	seen := make(map[string]bool)
+	metas := make(map[string]proxy.NodeMeta)
 
-	addProxy := func(raw string) {
+	addProxy := func(raw string, meta proxy.NodeMeta) {
 		clean := strings.TrimSpace(raw)
 		if clean == "" || strings.HasPrefix(clean, "#") || seen[clean] {
 			return
 		}
 		seen[clean] = true
 		proxies = append(proxies, clean)
+		if meta.Profile == "" {
+			meta.Profile = normProfile
+		}
+		metas[clean] = meta
 	}
 
-	// 1. 优先从 SQLite 数据库加载
+	// 1. 优先从数据库读取当前 Profile 的代理节点
 	var dbProxyCount int
 	if database != nil {
-		if dbProxies, err := db.LoadProxiesFromDB(database); err == nil {
-			dbProxyCount = len(dbProxies)
-			for _, p := range dbProxies {
-				addProxy(p)
+		if dbRecords, err := db.LoadProxyRecordsByProfile(database, normProfile); err == nil {
+			dbProxyCount = len(dbRecords)
+			for _, r := range dbRecords {
+				addProxy(r.URL, proxy.NodeMeta{
+					Profile:  r.Profile,
+					NodeName: r.NodeName,
+					Region:   r.Region,
+					Source:   r.Source,
+					Port:     r.Port,
+				})
 			}
 		}
 	}
 
 	// 2. 合并 PROXY_URL 环境变量
 	if p := os.Getenv("PROXY_URL"); p != "" {
-		addProxy(p)
+		addProxy(p, proxy.NodeMeta{Profile: normProfile, Source: "env_seed"})
 	}
 
-	// 3. 合并 proxies.txt
-	if _, err := os.Stat("proxies.txt"); err == nil {
-		if data, err := os.ReadFile("proxies.txt"); err == nil {
-			for _, line := range strings.Split(string(data), "\n") {
-				addProxy(line)
+	// 3. 合并 proxies.txt（仅在当前 Profile 数据库尚无专属节点或为默认 home Profile 时导入，避免把本地 proxies.txt 混入其他 Profile）
+	if dbProxyCount == 0 || normProfile == "home" {
+		if _, err := os.Stat("proxies.txt"); err == nil {
+			if data, err := os.ReadFile("proxies.txt"); err == nil {
+				for _, line := range strings.Split(string(data), "\n") {
+					addProxy(line, proxy.NodeMeta{Profile: normProfile, Source: "manual"})
+				}
 			}
 		}
 	}
@@ -969,19 +1155,24 @@ func loadProxyList(database *gorm.DB) []string {
 	// 4. 合并 http_proxy 环境变量
 	if len(proxies) == 0 {
 		if p := os.Getenv("http_proxy"); p != "" {
-			addProxy(p)
+			addProxy(p, proxy.NodeMeta{Profile: normProfile, Source: "env_seed"})
 		}
 	}
 
-	// 5. 仅在有新增代理节点时持久化至数据库（无数据库时才回退至 proxies.txt）
+	// 5. 仅在有新增代理节点时持久化至数据库当前 Profile（无数据库时才回退至 proxies.txt）
 	if database != nil && len(proxies) > dbProxyCount {
-		_ = db.SaveProxiesToDB(database, proxies)
+		_ = db.SaveProxiesByProfile(database, normProfile, proxies)
 	} else if database == nil && len(proxies) > 0 {
 		content := strings.Join(proxies, "\n") + "\n"
 		_ = os.WriteFile("proxies.txt", []byte(content), 0644)
 	}
 
-	return proxies
+	return proxies, metas
+}
+
+func loadProxyList(database *gorm.DB) []string {
+	list, _ := loadProxyListForProfile(database, "home")
+	return list
 }
 
 func loadDotEnv() {

@@ -285,6 +285,8 @@ func RegisterRouterWithDeps(deps RouterDeps) *gin.Engine {
 		adminGroup.DELETE("/ops-logs", adminHandler.ClearOpsLogs)
 		adminGroup.GET("/proxies", adminHandler.ListProxies)
 		adminGroup.POST("/proxies/probe", adminHandler.ProbeProxies)
+		adminGroup.POST("/proxies/profile", adminHandler.SwitchProxyProfile)
+		adminGroup.POST("/proxies/clash-sync", adminHandler.SyncClashProxies)
 		adminGroup.POST("/proxies", adminHandler.UpdateProxies)
 		adminGroup.GET("/providers", adminHandler.ListProviders)
 		adminGroup.GET("/providers/:provider/stats", adminHandler.ProviderStats)

@@ -141,6 +141,7 @@ func CoreModels() []any {
 		&AccountRuntimeState{},
 		&PoolAccountRecord{},
 		&ProxyNodeRecord{},
+		&AccountProfileProxyRecord{},
 		&AccountRestrictionRecord{},
 		&CustomVoiceModelRecord{},
 		&ProviderChannelRecord{},
@@ -300,6 +301,8 @@ func openDialectorAndMigrate(ctx context.Context, dsn string, allowMemoryFallbac
 			}
 			return nil, fmt.Errorf("failed to auto migrate database schemas: %w", mErr)
 		}
+		// 兼容旧版 proxy_node_records(url) 全局唯一索引，移除它以允许不同 Profile 复用相同代理 URL
+		_ = db.WithContext(ctx).Exec(`DROP INDEX IF EXISTS idx_proxy_node_records_url`).Error
 		if useFingerprint && schemaFingerprint != "" {
 			_ = db.WithContext(ctx).Clauses(clause.OnConflict{UpdateAll: true}).Create(&SchemaMetaRecord{
 				Key:   "schema_fingerprint",

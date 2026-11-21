@@ -67,6 +67,18 @@ type Config struct {
 	QiniuDomain              string
 	QiniuRegion              string
 	QiniuUploadURL           string
+	AppProfile               string
+	ClashSubURL              string
+	ClashSubProfile          string
+	ClashMultiportHost       string
+	ClashMultiportStart      int
+	ClashMultiportMax        int
+	ClashExcludeRegex        string
+	ClashPriorityRegions     string
+	MihomoConfigPath         string
+	MihomoAPIURL             string
+	MihomoAPISecret          string
+	ClashSyncIntervalHours   int
 }
 
 func Load() Config {
@@ -129,7 +141,28 @@ func Load() Config {
 		QiniuDomain:              os.Getenv("QINIU_DOMAIN"),
 		QiniuRegion:              getEnv("QINIU_REGION", "z0"),
 		QiniuUploadURL:           getEnv("QINIU_UPLOAD_URL", "https://upload.qiniup.com"),
+		AppProfile:               NormalizeProfile(getEnvWithFallback("APP_PROFILE", "PROFILE", "home")),
+		ClashSubURL:              strings.TrimSpace(os.Getenv("CLASH_SUB_URL")),
+		ClashSubProfile:          NormalizeProfile(getEnv("CLASH_SUB_PROFILE", "vps")),
+		ClashMultiportHost:       getEnv("CLASH_MULTIPORT_HOST", "127.0.0.1"),
+		ClashMultiportStart:      getIntEnv("CLASH_MULTIPORT_START", 20001),
+		ClashMultiportMax:        getIntEnv("CLASH_MULTIPORT_MAX", 40),
+		ClashExcludeRegex:        getEnv("CLASH_EXCLUDE_REGEX", `(?i)(剩余|流量|到期|官网|重置|群|套餐|网址|失联|维护|测试|CN|中国|HK|香港|MO|澳门|RU|俄罗斯|BY|白俄罗斯|IR|伊朗|KP|朝鲜)`),
+		ClashPriorityRegions:     getEnv("CLASH_PRIORITY_REGIONS", "US,JP,SG,TW,KR,DE,UK,NL,CA,AU"),
+		MihomoConfigPath:         getEnv("MIHOMO_CONFIG_PATH", "/etc/mihomo/config.yaml"),
+		MihomoAPIURL:             getEnv("MIHOMO_API_URL", "http://127.0.0.1:9090"),
+		MihomoAPISecret:          strings.TrimSpace(os.Getenv("MIHOMO_API_SECRET")),
+		ClashSyncIntervalHours:   getIntEnv("CLASH_SYNC_INTERVAL_HOURS", 12),
 	}
+}
+
+// NormalizeProfile 规范化运行时 Profile 名称（空值默认回退为 "home"）。
+func NormalizeProfile(raw string) string {
+	p := strings.ToLower(strings.TrimSpace(raw))
+	if p == "" {
+		return "home"
+	}
+	return p
 }
 
 func getEnv(key, defaultVal string) string {
