@@ -6,7 +6,11 @@ import "./styles.css";
 import { initFrontendOpsLogger } from "./lib/ops-logger";
 import { App } from "./App";
 
-initFrontendOpsLogger();
+try {
+  initFrontendOpsLogger();
+} catch (err) {
+  console.error("Failed to initialize frontend ops logger:", err);
+}
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

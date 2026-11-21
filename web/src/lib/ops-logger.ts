@@ -145,44 +145,51 @@ export function subscribeFrontendOpsLogs(cb: () => void): () => void {
 export function initFrontendOpsLogger(): void {
   if (initialized || typeof window === "undefined") return;
   initialized = true;
-  rawFetch = window.fetch.bind(window);
+  rawFetch = typeof window.fetch === "function" ? window.fetch.bind(window) : null;
 
-  const origError = console.error.bind(console);
-  const origWarn = console.warn.bind(console);
+  try {
+    const origError = console.error.bind(console);
+    console.error = (...args: unknown[]) => {
+      origError(...args);
+      try {
+        const parts = args.map(formatArg);
+        const msg = parts[0] || "console.error";
+        const detail = parts.length > 1 ? parts.slice(1).join("\n") : undefined;
+        recordFrontendOpsLog({
+          level: "error",
+          module: "console.error",
+          message: msg,
+          detail,
+        });
+      } catch {
+        // ignore
+      }
+    };
+  } catch {
+    // ignore read-only console.error
+  }
 
-  console.error = (...args: unknown[]) => {
-    origError(...args);
-    try {
-      const parts = args.map(formatArg);
-      const msg = parts[0] || "console.error";
-      const detail = parts.length > 1 ? parts.slice(1).join("\n") : undefined;
-      recordFrontendOpsLog({
-        level: "error",
-        module: "console.error",
-        message: msg,
-        detail,
-      });
-    } catch {
-      // ignore
-    }
-  };
-
-  console.warn = (...args: unknown[]) => {
-    origWarn(...args);
-    try {
-      const parts = args.map(formatArg);
-      const msg = parts[0] || "console.warn";
-      const detail = parts.length > 1 ? parts.slice(1).join("\n") : undefined;
-      recordFrontendOpsLog({
-        level: "warn",
-        module: "console.warn",
-        message: msg,
-        detail,
-      });
-    } catch {
-      // ignore
-    }
-  };
+  try {
+    const origWarn = console.warn.bind(console);
+    console.warn = (...args: unknown[]) => {
+      origWarn(...args);
+      try {
+        const parts = args.map(formatArg);
+        const msg = parts[0] || "console.warn";
+        const detail = parts.length > 1 ? parts.slice(1).join("\n") : undefined;
+        recordFrontendOpsLog({
+          level: "warn",
+          module: "console.warn",
+          message: msg,
+          detail,
+        });
+      } catch {
+        // ignore
+      }
+    };
+  } catch {
+    // ignore read-only console.warn
+  }
 
   window.addEventListener("error", (event) => {
     try {
@@ -224,7 +231,12 @@ export function initFrontendOpsLogger(): void {
   });
 
   const baseFetch = rawFetch;
-  window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+  if (!baseFetch) return;
+
+  const wrappedFetch: typeof window.fetch = async (
+    input: RequestInfo | URL,
+    init?: RequestInit
+  ) => {
     const url =
       typeof input === "string"
         ? input
@@ -271,4 +283,20 @@ export function initFrontendOpsLogger(): void {
       throw err;
     }
   };
+
+  try {
+    const desc = Object.getOwnPropertyDescriptor(window, "fetch");
+    if (!desc || desc.writable) {
+      window.fetch = wrappedFetch;
+    } else if (desc.configurable) {
+      Object.defineProperty(window, "fetch", {
+        configurable: true,
+        enumerable: desc.enumerable ?? true,
+        writable: true,
+        value: wrappedFetch,
+      });
+    }
+  } catch {
+    // Sandboxed iframe environments may expose a getter-only window.fetch; skip fetch wrapping safely.
+  }
 }
