@@ -71,4 +71,16 @@ func TestTieredStorageEngine(t *testing.T) {
 	if !engine.Exists(ctx, relPath) {
 		t.Errorf("expected engine.Exists to be true")
 	}
+
+	if fp, ok := engine.LocalFilePath(relPath); !ok || fp == "" {
+		t.Errorf("expected LocalFilePath to hit L1 disk cache for %s", relPath)
+	}
+
+	listed, err := engine.ListPrefix(ctx, "images/")
+	if err != nil {
+		t.Fatalf("ListPrefix failed: %v", err)
+	}
+	if len(listed) < 2 {
+		t.Errorf("expected at least 2 local cached images in ListPrefix, got %v", listed)
+	}
 }

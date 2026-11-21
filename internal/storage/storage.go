@@ -30,6 +30,11 @@ type PrefixLister interface {
 	ListPrefix(ctx context.Context, prefix string) ([]string, error)
 }
 
+// LocalPathResolver 可选扩展接口：若对象已命中本地磁盘 L1 缓存，返回物理路径以支持零拷贝流式传输与 HTTP Range (206)。
+type LocalPathResolver interface {
+	LocalFilePath(path string) (string, bool)
+}
+
 func resolveExtForMime(category, mimeType string) string {
 	lower := strings.ToLower(strings.TrimSpace(mimeType))
 	if idx := strings.Index(lower, ";"); idx > 0 {
@@ -199,17 +204,32 @@ func (s *LocalStorageEngine) Delete(ctx context.Context, path string) error {
 	return nil
 }
 
-func (s *LocalStorageEngine) Exists(ctx context.Context, path string) bool {
+func (s *LocalStorageEngine) LocalFilePath(path string) (string, bool) {
+	if s == nil {
+		return "", false
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	cleanPath := filepath.Clean(strings.TrimSpace(path))
-	if cleanPath == "" || cleanPath == "." || strings.HasPrefix(cleanPath, "..") {
-		return false
+	if cleanPath == "" || cleanPath == "." || strings.HasPrefix(cleanPath, "..") || filepath.IsAbs(cleanPath) {
+		return "", false
 	}
 	fullPath := filepath.Join(s.baseDir, cleanPath)
+	baseClean := filepath.Clean(s.baseDir)
+	if fullPath != baseClean && !strings.HasPrefix(fullPath, baseClean+string(os.PathSeparator)) {
+		return "", false
+	}
 	info, err := os.Stat(fullPath)
-	return err == nil && !info.IsDir() && info.Size() > 0
+	if err != nil || info.IsDir() || info.Size() <= 0 {
+		return "", false
+	}
+	return fullPath, true
+}
+
+func (s *LocalStorageEngine) Exists(ctx context.Context, path string) bool {
+	_, ok := s.LocalFilePath(path)
+	return ok
 }
 
 func (s *LocalStorageEngine) ListPrefix(ctx context.Context, prefix string) ([]string, error) {

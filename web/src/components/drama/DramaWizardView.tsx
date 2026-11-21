@@ -12,6 +12,7 @@ import {
   Video,
 } from "lucide-react";
 import React, { useState } from "react";
+import { toThumbImageUrl } from "../../lib/mediaUrl";
 import {
   getActiveShotBranch,
   STYLE_PRESETS,
@@ -208,7 +209,7 @@ export const DramaWizardView: React.FC<DramaWizardViewProps> = ({
                   >
                     <div className="h-24 w-24 shrink-0 overflow-hidden rounded-lg border border-[var(--border-default)] bg-[var(--bg-muted)] flex items-center justify-center">
                       {ch.data.portraitUrl ? (
-                        <img src={ch.data.portraitUrl} alt={ch.data.name} className="h-full w-full object-cover" />
+                        <img src={toThumbImageUrl(ch.data.portraitUrl, 480)} alt={ch.data.name} loading="lazy" decoding="async" className="h-full w-full object-cover" />
                       ) : (
                         <span className="text-xs text-[var(--text-muted)]">无定妆图</span>
                       )}
@@ -260,7 +261,7 @@ export const DramaWizardView: React.FC<DramaWizardViewProps> = ({
                     >
                       <div className="h-24 w-28 shrink-0 overflow-hidden rounded-lg border border-[var(--border-default)] bg-[var(--bg-muted)] flex items-center justify-center">
                         {sc.data.imageUrl ? (
-                          <img src={sc.data.imageUrl} alt={sc.data.name} className="h-full w-full object-cover" />
+                          <img src={toThumbImageUrl(sc.data.imageUrl, 480)} alt={sc.data.name} loading="lazy" decoding="async" className="h-full w-full object-cover" />
                         ) : (
                           <span className="text-[11px] text-[var(--text-muted)]">空镜图</span>
                         )}
@@ -307,7 +308,7 @@ export const DramaWizardView: React.FC<DramaWizardViewProps> = ({
                   >
                     <div className="h-36 overflow-hidden rounded-lg border border-[var(--border-default)] bg-zinc-950 flex items-center justify-center">
                       {branch.imageUrl ? (
-                        <img src={branch.imageUrl} alt={`Shot ${sh.data.index}`} className="h-full w-full object-cover" />
+                        <img src={toThumbImageUrl(branch.imageUrl, 480)} alt={`Shot ${sh.data.index}`} loading="lazy" decoding="async" className="h-full w-full object-cover" />
                       ) : (
                         <span className="text-[11px] text-zinc-400">#{sh.data.index} 待生图</span>
                       )}

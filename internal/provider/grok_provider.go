@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -717,20 +718,21 @@ func (p *GrokProvider) modelCatalogTarget() (string, string) {
 func (p *GrokProvider) RefreshModels(ctx context.Context) ([]string, error) {
 	cookie, proxyURL := p.modelCatalogTarget()
 	body := []byte(`{"locale":"en-US"}`)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/rest/models", bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", grokBrowserUserAgent)
-	req.Header.Set("Origin", p.baseURL)
-	req.Header.Set("Referer", p.baseURL+"/")
-	if cookie != "" {
-		req.Header.Set("Cookie", cookie)
-	}
-
-	resp, err := p.createHTTPClient(proxyURL).Do(req)
+	resp, _, err := p.doRequestWithProxyFallback(ctx, proxyURL, func() (*http.Request, error) {
+		req, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/rest/models", bytes.NewReader(body))
+		if reqErr != nil {
+			return nil, reqErr
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("User-Agent", grokBrowserUserAgent)
+		req.Header.Set("Origin", p.baseURL)
+		req.Header.Set("Referer", p.baseURL+"/")
+		if cookie != "" {
+			req.Header.Set("Cookie", cookie)
+		}
+		return req, nil
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -977,6 +979,10 @@ func (p *GrokProvider) reportStatus(idx int, success bool, isRateLimit bool, err
 
 func (p *GrokProvider) createHTTPClient(proxyURL string) *http.Client {
 	transport := &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout:   4 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
 		MaxIdleConns:       10,
 		IdleConnTimeout:    30 * time.Second,
 		DisableCompression: false,
@@ -990,6 +996,76 @@ func (p *GrokProvider) createHTTPClient(proxyURL string) *http.Client {
 		Transport: transport,
 		Timeout:   120 * time.Second,
 	}
+}
+
+func isGrokProxyTransportError(err error) bool {
+	if err == nil {
+		return false
+	}
+	lower := strings.ToLower(err.Error())
+	for _, kw := range []string{
+		"proxyconnect",
+		"connection refused",
+		"socks",
+		"no such host",
+		"i/o timeout",
+		"dial tcp",
+	} {
+		if strings.Contains(lower, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+// doRequestWithProxyFallback 优先使用账号粘性代理发起请求；若代理本身不可达，上报代理池熔断并依次尝试健康备选代理与直连兜底。
+func (p *GrokProvider) doRequestWithProxyFallback(ctx context.Context, primaryProxy string, buildReq func() (*http.Request, error)) (*http.Response, string, error) {
+	candidates := []string{primaryProxy}
+	if primaryProxy == "" {
+		req, err := buildReq()
+		if err != nil {
+			return nil, "", err
+		}
+		resp, err := p.createHTTPClient("").Do(req)
+		return resp, "", err
+	}
+
+	seen := map[string]bool{primaryProxy: true}
+	var lastErr error
+	for idx := 0; idx < len(candidates); idx++ {
+		proxyURL := candidates[idx]
+		req, err := buildReq()
+		if err != nil {
+			return nil, proxyURL, err
+		}
+		start := time.Now()
+		resp, err := p.createHTTPClient(proxyURL).Do(req)
+		if err == nil {
+			if proxyURL != "" && p.proxyPool != nil {
+				p.proxyPool.ReportSuccess(proxyURL, time.Since(start).Milliseconds())
+			}
+			return resp, proxyURL, nil
+		}
+		lastErr = err
+		if proxyURL != "" && isGrokProxyTransportError(err) {
+			if p.proxyPool != nil {
+				p.proxyPool.ReportFailure(proxyURL, err.Error())
+				altProxy := p.proxyPool.AllocateHealthy(seen)
+				if altProxy != "" && !seen[altProxy] && p.proxyPool.IsHealthy(altProxy) {
+					seen[altProxy] = true
+					candidates = append(candidates, altProxy)
+					continue
+				}
+			}
+			if !seen[""] {
+				seen[""] = true
+				candidates = append(candidates, "")
+			}
+			continue
+		}
+		return nil, proxyURL, err
+	}
+	return nil, primaryProxy, lastErr
 }
 
 // Descriptor 返回供应商插件元信息
@@ -1332,16 +1408,20 @@ func (p *GrokProvider) executeGrokProbe(id string) (map[string]interface{}, erro
 	cookie := target.Cookie
 	p.mu.RUnlock()
 
-	client := p.createHTTPClient(proxyURL)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, p.baseURL+"/rest/app-chat/conversations?limit=1", nil)
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-	req.Header.Set("Cookie", cookie)
-	req.Header.Set("Referer", p.baseURL+"/")
 
 	start := time.Now()
-	resp, err := client.Do(req)
+	resp, _, err := p.doRequestWithProxyFallback(ctx, proxyURL, func() (*http.Request, error) {
+		req, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, p.baseURL+"/rest/app-chat/conversations?limit=1", nil)
+		if reqErr != nil {
+			return nil, reqErr
+		}
+		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+		req.Header.Set("Cookie", cookie)
+		req.Header.Set("Referer", p.baseURL+"/")
+		return req, nil
+	})
 	latency := time.Since(start).Milliseconds()
 	if err != nil {
 		errMsg := fmt.Sprintf("网络连接异常: %v", err)
@@ -1650,20 +1730,19 @@ func (p *GrokProvider) ChatCompletion(ctx context.Context, originalReq officialt
 	}
 
 	reqURL := p.baseURL + "/rest/app-chat/conversations/new"
-	req, err := http.NewRequestWithContext(ctx, "POST", reqURL, bytes.NewReader(bodyBytes))
-	if err != nil {
-		return nil, nil, err
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", grokBrowserUserAgent)
-	req.Header.Set("Origin", p.baseURL)
-	req.Header.Set("Referer", p.baseURL+"/")
-	req.Header.Set("Cookie", lease.Cookie)
-	req.Header.Set("Accept", "text/event-stream")
-
-	client := p.createHTTPClient(lease.Proxy)
-	resp, err := client.Do(req)
+	resp, _, err := p.doRequestWithProxyFallback(ctx, lease.Proxy, func() (*http.Request, error) {
+		req, reqErr := http.NewRequestWithContext(ctx, "POST", reqURL, bytes.NewReader(bodyBytes))
+		if reqErr != nil {
+			return nil, reqErr
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("User-Agent", grokBrowserUserAgent)
+		req.Header.Set("Origin", p.baseURL)
+		req.Header.Set("Referer", p.baseURL+"/")
+		req.Header.Set("Cookie", lease.Cookie)
+		req.Header.Set("Accept", "text/event-stream")
+		return req, nil
+	})
 	if err != nil {
 		p.reportOutcomeByID(lease.ID, false, 0, err.Error())
 		return nil, nil, err
@@ -1899,27 +1978,27 @@ func (p *GrokProvider) downloadGrokImageAsset(ctx context.Context, rawURL, cooki
 	p.mu.RUnlock()
 	targetURL := resolveGrokAssetURL(assetBaseURL, rawURL)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("User-Agent", grokBrowserUserAgent)
-	req.Header.Set("Referer", p.baseURL+"/")
-	req.Header.Set("Origin", p.baseURL)
-	if cookie != "" {
-		req.Header.Set("Cookie", cookie)
-	}
-
-	client := p.createHTTPClient(proxyURL)
-	resp, err := client.Do(req)
+	resp, effectiveProxy, err := p.doRequestWithProxyFallback(ctx, proxyURL, func() (*http.Request, error) {
+		req, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
+		if reqErr != nil {
+			return nil, reqErr
+		}
+		req.Header.Set("User-Agent", grokBrowserUserAgent)
+		req.Header.Set("Referer", p.baseURL+"/")
+		req.Header.Set("Origin", p.baseURL)
+		if cookie != "" {
+			req.Header.Set("Cookie", cookie)
+		}
+		return req, nil
+	})
 	if err != nil || (resp != nil && resp.StatusCode == http.StatusForbidden) {
 		if resp != nil {
 			_ = resp.Body.Close()
 		}
 		// 备用：若标准 net/http 遭遇 403 挑战，使用 Bogdanfinn TLS 客户端穿透
 		tlsClient := bogdanfinn.NewStdClient()
-		if proxyURL != "" {
-			_ = tlsClient.SetProxy(proxyURL)
+		if effectiveProxy != "" {
+			_ = tlsClient.SetProxy(effectiveProxy)
 		}
 		headers := httpclient.Headers{
 			"User-Agent": grokBrowserUserAgent,
@@ -1967,7 +2046,7 @@ func (p *GrokProvider) GenerateImageAsset(ctx context.Context, prompt, requested
 	}
 
 	excluded := make(map[string]bool)
-	maxAttempts := 5
+	maxAttempts := 10
 	p.mu.RLock()
 	if totalAccs := len(p.accounts); totalAccs > 0 && totalAccs < maxAttempts {
 		maxAttempts = totalAccs
@@ -2022,30 +2101,19 @@ func (p *GrokProvider) GenerateImageAsset(ctx context.Context, prompt, requested
 		}
 
 		reqURL := p.baseURL + "/rest/app-chat/conversations/new"
-		req, err := http.NewRequestWithContext(ctx, "POST", reqURL, bytes.NewReader(bodyBytes))
-		if err != nil {
-			lastErr = err
-			span := GrokImageAttemptSpan{
-				AccountID: lease.ID,
-				Email:     lease.Email,
-				Proxy:     lease.Proxy,
-				Status:    500,
-				Error:     err.Error(),
+		resp, effectiveProxy, err := p.doRequestWithProxyFallback(ctx, lease.Proxy, func() (*http.Request, error) {
+			req, reqErr := http.NewRequestWithContext(ctx, "POST", reqURL, bytes.NewReader(bodyBytes))
+			if reqErr != nil {
+				return nil, reqErr
 			}
-			res.Spans = append(res.Spans, span)
-			traceParts = append(traceParts, fmt.Sprintf("%s(500:req_err)", lease.ID))
-			break
-		}
-
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Accept", "text/event-stream")
-		req.Header.Set("User-Agent", grokBrowserUserAgent)
-		req.Header.Set("Origin", p.baseURL)
-		req.Header.Set("Referer", p.baseURL+"/")
-		req.Header.Set("Cookie", lease.Cookie)
-
-		client := p.createHTTPClient(lease.Proxy)
-		resp, err := client.Do(req)
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Accept", "text/event-stream")
+			req.Header.Set("User-Agent", grokBrowserUserAgent)
+			req.Header.Set("Origin", p.baseURL)
+			req.Header.Set("Referer", p.baseURL+"/")
+			req.Header.Set("Cookie", lease.Cookie)
+			return req, nil
+		})
 		if err != nil {
 			p.reportOutcomeByID(lease.ID, false, 0, err.Error())
 			lastErr = err
@@ -2129,8 +2197,8 @@ func (p *GrokProvider) GenerateImageAsset(ctx context.Context, prompt, requested
 			continue
 		}
 
-		// 使用当前已登录账号的鉴权 Cookie 与粘性代理下载图像字节
-		imgBytes, dlErr := p.downloadGrokImageAsset(ctx, rawImageURL, lease.Cookie, lease.Proxy)
+		// 使用当前已登录账号的鉴权 Cookie 与实际生效出口下载图像字节
+		imgBytes, dlErr := p.downloadGrokImageAsset(ctx, rawImageURL, lease.Cookie, effectiveProxy)
 		if dlErr != nil {
 			p.reportOutcomeByID(lease.ID, false, 200, dlErr.Error())
 			lastErr = dlErr

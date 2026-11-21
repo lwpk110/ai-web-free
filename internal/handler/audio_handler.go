@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"ai-web-free/internal/config"
 	"ai-web-free/internal/db"
 	"ai-web-free/internal/provider"
+	"ai-web-free/internal/storage"
 	officialtypes "ai-web-free/typings/official"
 
 	"github.com/gin-gonic/gin"
@@ -1085,13 +1087,27 @@ func (h *AudioHandler) PreviewVoice(c *gin.Context) {
 	refresh := parseBoolHeader(c.Query("refresh"))
 	store := h.getVoiceCatalogStore()
 	if !refresh && store.Enabled() {
-		if cachedBytes, hit, err := store.ReadSample(c.Request.Context(), rawID); err == nil && hit {
-			c.Header("Content-Type", "audio/mpeg")
+		var eng storage.StorageEngine
+		if h.runtime != nil {
+			eng = h.runtime.StorageEngine
+		}
+		if eng != nil {
 			c.Header("X-Voice-Cache", "hit")
 			c.Header("X-TTS-Provider", "local_cache")
 			c.Header("X-TTS-Voice", rawID)
-			c.Header("Cache-Control", "public, max-age=3600")
-			c.Data(http.StatusOK, "audio/mpeg", cachedBytes)
+			if serveLocalMediaFile(c, eng, store.SampleRelPath(rawID), "public, max-age=3600") {
+				return
+			}
+			// 未命中本地文件时清理预置头，按下方逻辑继续检查
+			c.Writer.Header().Del("X-Voice-Cache")
+			c.Writer.Header().Del("X-TTS-Provider")
+			c.Writer.Header().Del("X-TTS-Voice")
+		}
+		if cachedBytes, hit, err := store.ReadSample(c.Request.Context(), rawID); err == nil && hit {
+			c.Header("X-Voice-Cache", "hit")
+			c.Header("X-TTS-Provider", "local_cache")
+			c.Header("X-TTS-Voice", rawID)
+			serveRangeMediaBytes(c, provider.SanitizeVoiceID(rawID)+".mp3", "audio/mpeg", "public, max-age=3600", time.Time{}, cachedBytes)
 			return
 		}
 	}
@@ -1117,12 +1133,10 @@ func (h *AudioHandler) PreviewVoice(c *gin.Context) {
 			cacheHeader = "stored"
 		}
 	}
-	c.Header("Content-Type", "audio/mpeg")
 	c.Header("X-Voice-Cache", cacheHeader)
 	c.Header("X-TTS-Provider", usedProv)
 	c.Header("X-TTS-Voice", usedVoice)
-	c.Header("Cache-Control", "public, max-age=3600")
-	c.Data(http.StatusOK, "audio/mpeg", audioBytes)
+	serveRangeMediaBytes(c, provider.SanitizeVoiceID(rawID)+".mp3", "audio/mpeg", "public, max-age=3600", time.Time{}, audioBytes)
 }
 
 // PullLocalVoicesRequest 将音色目录与精选试听样音拉取到本地缓存的请求体。
@@ -1442,25 +1456,60 @@ func (h *AudioHandler) ListAudioHistory(c *gin.Context) {
 		return
 	}
 	var list []db.AudioGenerationRecord
-	_ = gormDB.Order("created_at desc").Limit(100).Find(&list).Error
+	_ = gormDB.Omit("blob_data").Order("created_at desc").Limit(100).Find(&list).Error
 	c.JSON(200, gin.H{"records": list, "total": len(list)})
 }
 
-// GetAudioFile 根据音频 ID 直取二进制音频流: GET /v1/audio/files/:id
+// GetAudioFile 根据音频 ID 直取二进制音频流（优先本地 data 缓存并支持 Range 206）: GET /v1/audio/files/:id
 func (h *AudioHandler) GetAudioFile(c *gin.Context) {
-	id := c.Param("id")
+	rawID := filepath.Base(strings.TrimSpace(c.Param("id")))
+	id := strings.TrimSuffix(rawID, filepath.Ext(rawID))
+	if id == "" || id == "." || strings.Contains(id, "..") {
+		c.Status(http.StatusBadRequest)
+		return
+	}
+
+	const cacheCtl = "public, max-age=604800"
+	c.Header("Access-Control-Allow-Origin", "*")
+	c.Header("Cross-Origin-Resource-Policy", "cross-origin")
+
+	var eng storage.StorageEngine
+	if h.runtime != nil {
+		eng = h.runtime.StorageEngine
+	}
+	if eng != nil {
+		for _, candidate := range []string{"audio/" + id + ".mp3", "audio/" + rawID} {
+			if serveLocalMediaFile(c, eng, candidate, cacheCtl) {
+				return
+			}
+		}
+	}
+
 	gormDB := db.GetDB()
-	if gormDB == nil {
-		c.Status(404)
-		return
+	if gormDB != nil {
+		var rec db.AudioGenerationRecord
+		if err := gormDB.Where("id = ?", id).First(&rec).Error; err == nil && len(rec.BlobData) > 0 {
+			// 回写到本地 L1 缓存（异步），后续请求直接走磁盘零拷贝与 Range
+			if mse, ok := eng.(storage.MediaStorageEngine); ok && mse != nil {
+				blobCopy := make([]byte, len(rec.BlobData))
+				copy(blobCopy, rec.BlobData)
+				go func(audioID string, payload []byte) {
+					_, _, _ = mse.SaveInCategory(context.Background(), "audio", audioID, payload, "audio/mpeg")
+				}(id, blobCopy)
+			}
+			serveRangeMediaBytes(c, id+".mp3", "audio/mpeg", cacheCtl, rec.CreatedAt, rec.BlobData)
+			return
+		}
 	}
-	var rec db.AudioGenerationRecord
-	if err := gormDB.Where("id = ?", id).First(&rec).Error; err != nil || len(rec.BlobData) == 0 {
-		c.Status(404)
-		return
+
+	if mse, ok := eng.(storage.MediaStorageEngine); ok && mse != nil {
+		if data, err := mse.Read(c.Request.Context(), "audio/"+id+".mp3"); err == nil && len(data) > 0 {
+			serveRangeMediaBytes(c, id+".mp3", detectMediaMimeFromExt(".mp3", data), cacheCtl, time.Time{}, data)
+			return
+		}
 	}
-	c.Header("Content-Type", "audio/mpeg")
-	c.Data(200, "audio/mpeg", rec.BlobData)
+
+	c.Status(http.StatusNotFound)
 }
 
 // SynthesizeSpeechData 供内部后台服务直接调用 TTS 合成并返回音频字节。

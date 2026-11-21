@@ -300,7 +300,7 @@ func (h *DramaHandler) ListProjects(c *gin.Context) {
 		return
 	}
 	var records []db.DramaProjectRecord
-	if err := h.db.Order("updated_at desc").Limit(100).Find(&records).Error; err != nil {
+	if err := h.db.Omit("project_json", "layout_json", "graph_json").Order("updated_at desc").Limit(100).Find(&records).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -686,15 +686,19 @@ func (h *DramaHandler) CacheMedia(c *gin.Context) {
 // ServeCachedAudio GET /storage/audio/:filename
 func (h *DramaHandler) ServeCachedAudio(c *gin.Context) {
 	c.Header("Access-Control-Allow-Origin", "*")
+	c.Header("Cross-Origin-Resource-Policy", "cross-origin")
 	filename := filepath.Base(strings.TrimSpace(c.Param("filename")))
 	if filename == "" || filename == "." || strings.Contains(filename, "..") {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid audio filename"})
 		return
 	}
+	const cacheCtl = "public, max-age=31536000, immutable"
+	if serveLocalMediaFile(c, h.storageEngine, "audio/"+filename, cacheCtl) {
+		return
+	}
 	if mse, ok := h.storageEngine.(storage.MediaStorageEngine); ok && mse != nil {
 		if data, err := mse.Read(c.Request.Context(), "audio/"+filename); err == nil && len(data) > 0 {
-			c.Header("Cache-Control", "public, max-age=31536000, immutable")
-			c.Data(http.StatusOK, detectMediaMimeFromExt(filepath.Ext(filename), data), data)
+			serveRangeMediaBytes(c, filename, detectMediaMimeFromExt(filepath.Ext(filename), data), cacheCtl, time.Time{}, data)
 			return
 		}
 	}

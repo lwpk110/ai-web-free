@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { Suspense, lazy, useEffect, useState } from "react";
 import {
   Check,
   Copy,
@@ -8,6 +8,7 @@ import {
   Image as ImageIcon,
   LayoutGrid,
   ListChecks,
+  Loader2,
   Lock,
   Menu,
   Mic,
@@ -40,19 +41,53 @@ import {
   NAV_ITEMS,
   type RouteKey,
 } from "./components/ui";
-import { GenerativeWorkbench } from "./views/GenerativeWorkbench";
-import { PromptChatAssistantHost } from "./components/PromptChatAssistant";
-import { ImageStudio } from "./views/ImageStudio";
-import { LogsView } from "./views/LogsView";
-import { NetworkView } from "./views/NetworkView";
-import { GatewayView } from "./views/GatewayView";
-import { OpsLogsView } from "./views/OpsLogsView";
-import { OverviewView } from "./views/OverviewView";
-import { PoolConsole } from "./views/PoolConsole";
-import { ShortDramaStudio } from "./views/ShortDramaStudio";
-import { TTSStudio } from "./views/TTSStudio";
-import { VideoStudio } from "./views/VideoStudio";
-import { DealsView } from "./views/DealsView";
+
+const GenerativeWorkbench = lazy(() =>
+  import("./views/GenerativeWorkbench").then((m) => ({ default: m.GenerativeWorkbench }))
+);
+const PromptChatAssistantHost = lazy(() =>
+  import("./components/PromptChatAssistant").then((m) => ({ default: m.PromptChatAssistantHost }))
+);
+const ImageStudio = lazy(() =>
+  import("./views/ImageStudio").then((m) => ({ default: m.ImageStudio }))
+);
+const LogsView = lazy(() =>
+  import("./views/LogsView").then((m) => ({ default: m.LogsView }))
+);
+const NetworkView = lazy(() =>
+  import("./views/NetworkView").then((m) => ({ default: m.NetworkView }))
+);
+const GatewayView = lazy(() =>
+  import("./views/GatewayView").then((m) => ({ default: m.GatewayView }))
+);
+const OpsLogsView = lazy(() =>
+  import("./views/OpsLogsView").then((m) => ({ default: m.OpsLogsView }))
+);
+const OverviewView = lazy(() =>
+  import("./views/OverviewView").then((m) => ({ default: m.OverviewView }))
+);
+const PoolConsole = lazy(() =>
+  import("./views/PoolConsole").then((m) => ({ default: m.PoolConsole }))
+);
+const ShortDramaStudio = lazy(() =>
+  import("./views/ShortDramaStudio").then((m) => ({ default: m.ShortDramaStudio }))
+);
+const TTSStudio = lazy(() =>
+  import("./views/TTSStudio").then((m) => ({ default: m.TTSStudio }))
+);
+const VideoStudio = lazy(() =>
+  import("./views/VideoStudio").then((m) => ({ default: m.VideoStudio }))
+);
+const DealsView = lazy(() =>
+  import("./views/DealsView").then((m) => ({ default: m.DealsView }))
+);
+
+const ViewLoadingFallback: React.FC = () => (
+  <div className="flex-1 h-full min-h-[280px] flex items-center justify-center gap-2 text-xs z-text-muted">
+    <Loader2 size={16} className="animate-spin text-primary" />
+    <span>正在加载工作台模块...</span>
+  </div>
+);
 
 const THEME_STORAGE_KEY = "ai_web_free_theme_mode";
 
@@ -648,50 +683,52 @@ export const App: React.FC = () => {
           }`}
         >
           <ErrorBoundary>
-            {(chatKeepAlive || route === "chat") && (
-              <div
-                className={
-                  route === "chat"
-                    ? "flex-1 flex flex-col min-h-0 h-full"
-                    : "hidden"
-                }
-              >
-                <GenerativeWorkbench themeMode={themeMode} />
-              </div>
-            )}
-            {route !== "chat" &&
-              (fullEdge ? (
-                route === "image" ? (
-                  <ImageStudio />
-                ) : route === "tts" ? (
-                  <TTSStudio />
-                ) : route === "video" ? (
-                  <VideoStudio />
+            <Suspense fallback={<ViewLoadingFallback />}>
+              {(chatKeepAlive || route === "chat") && (
+                <div
+                  className={
+                    route === "chat"
+                      ? "flex-1 flex flex-col min-h-0 h-full"
+                      : "hidden"
+                  }
+                >
+                  <GenerativeWorkbench themeMode={themeMode} />
+                </div>
+              )}
+              {route !== "chat" &&
+                (fullEdge ? (
+                  route === "image" ? (
+                    <ImageStudio />
+                  ) : route === "tts" ? (
+                    <TTSStudio />
+                  ) : route === "video" ? (
+                    <VideoStudio />
+                  ) : (
+                    <ShortDramaStudio />
+                  )
                 ) : (
-                  <ShortDramaStudio />
-                )
-              ) : (
-              <div className={route === "deals" ? "mx-auto w-full min-w-0 max-w-[1600px]" : "max-w-7xl mx-auto"}>
-                {route === "overview" && (
-                  <OverviewView
-                    onNavigate={navigate}
-                    onOpenExport={() => setExportProvider("chatgpt")}
-                  />
-                )}
-                {route === "pools" && (
-                  <PoolConsole
-                    onOpenExport={(prov) => setExportProvider(prov)}
-                  />
-                )}
-                {route === "gateway" && <GatewayView />}
-                {route === "network" && (
-                  <NetworkView autoProbeTrigger={probeTrigger} />
-                )}
-                {route === "deals" && <DealsView />}
-                {route === "logs" && <LogsView />}
-                {route === "ops-logs" && <OpsLogsView />}
-              </div>
-            ))}
+                <div className={route === "deals" ? "mx-auto w-full min-w-0 max-w-[1600px]" : "max-w-7xl mx-auto"}>
+                  {route === "overview" && (
+                    <OverviewView
+                      onNavigate={navigate}
+                      onOpenExport={() => setExportProvider("chatgpt")}
+                    />
+                  )}
+                  {route === "pools" && (
+                    <PoolConsole
+                      onOpenExport={(prov) => setExportProvider(prov)}
+                    />
+                  )}
+                  {route === "gateway" && <GatewayView />}
+                  {route === "network" && (
+                    <NetworkView autoProbeTrigger={probeTrigger} />
+                  )}
+                  {route === "deals" && <DealsView />}
+                  {route === "logs" && <LogsView />}
+                  {route === "ops-logs" && <OpsLogsView />}
+                </div>
+              ))}
+            </Suspense>
           </ErrorBoundary>
         </main>
       </div>
@@ -718,7 +755,9 @@ export const App: React.FC = () => {
         onClose={() => setExportProvider(null)}
       />
 
-      <PromptChatAssistantHost />
+      <Suspense fallback={null}>
+        <PromptChatAssistantHost />
+      </Suspense>
     </div>
   );
 };

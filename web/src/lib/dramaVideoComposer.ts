@@ -193,11 +193,27 @@ function pickSupportedRecorderMime(): { mimeType: string; ext: string } {
   return { mimeType: "video/webm", ext: "webm" };
 }
 
+function isCrossOriginMediaUrl(url: string): boolean {
+  const trimmed = url.trim();
+  if (!trimmed || trimmed.startsWith("data:") || trimmed.startsWith("blob:")) return false;
+  if (trimmed.startsWith("/") && !trimmed.startsWith("//")) return false;
+  if (typeof window !== "undefined") {
+    try {
+      return new URL(trimmed, window.location.origin).origin !== window.location.origin;
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
 function loadHTMLImage(url: string): Promise<HTMLImageElement | null> {
   if (!url) return Promise.resolve(null);
   return new Promise((resolve) => {
     const img = new Image();
-    img.crossOrigin = "anonymous";
+    if (isCrossOriginMediaUrl(url)) {
+      img.crossOrigin = "anonymous";
+    }
     img.onload = () => resolve(img);
     img.onerror = () => resolve(null);
     img.src = url;
@@ -208,7 +224,9 @@ function loadHTMLVideo(url: string): Promise<HTMLVideoElement | null> {
   if (!url) return Promise.resolve(null);
   return new Promise((resolve) => {
     const vid = document.createElement("video");
-    vid.crossOrigin = "anonymous";
+    if (isCrossOriginMediaUrl(url)) {
+      vid.crossOrigin = "anonymous";
+    }
     vid.muted = true;
     vid.playsInline = true;
     vid.preload = "auto";

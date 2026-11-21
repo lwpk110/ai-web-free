@@ -8,6 +8,7 @@ import {
   type PromptPlazaItem,
   type ServerGalleryWork,
 } from "../../api/client";
+import { toThumbImageUrl } from "../../lib/mediaUrl";
 import { useDramaCanvasStore } from "../../stores/dramaCanvasStore";
 
 interface DramaAssetDrawerModalProps {
@@ -92,7 +93,7 @@ export const DramaAssetDrawerModal: React.FC<DramaAssetDrawerModalProps> = ({ op
                   key={item.id}
                   className="flex flex-col overflow-hidden rounded-xl border border-[var(--border-default)] bg-[var(--bg-elevated)]"
                 >
-                  <img src={item.url} alt={item.prompt} className="h-32 w-full object-cover" />
+                  <img src={toThumbImageUrl(item.url, 480)} alt={item.prompt} loading="lazy" decoding="async" className="h-32 w-full object-cover" />
                   <div className="p-2.5 flex-1 flex flex-col justify-between gap-2">
                     <p className="line-clamp-2 text-[11px] text-[var(--text-secondary)]">{item.prompt}</p>
                     <div className="grid grid-cols-3 gap-1 text-[10px]">
@@ -160,7 +161,7 @@ export const DramaAssetDrawerModal: React.FC<DramaAssetDrawerModalProps> = ({ op
                     <div className="text-[10px] text-[var(--text-muted)]">
                       {aud.provider} · {aud.voice_name || aud.voice_id}
                     </div>
-                    <audio src={aud.audio_url} controls className="mt-1.5 h-8 w-full max-w-md" />
+                    <audio src={aud.audio_url} controls preload="metadata" className="mt-1.5 h-8 w-full max-w-md" />
                   </div>
                   <button
                     type="button"

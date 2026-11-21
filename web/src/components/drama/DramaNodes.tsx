@@ -19,6 +19,7 @@ import {
   AlertCircle,
 } from "lucide-react";
 import React from "react";
+import { toThumbImageUrl } from "../../lib/mediaUrl";
 import {
   getActiveShotBranch,
   type AudioImportNodeData,
@@ -217,7 +218,7 @@ export const CharacterCanvasNode: React.FC<NodeProps> = ({ id, data, selected })
       <div className="mt-2 flex gap-2">
         <div className="h-16 w-16 shrink-0 overflow-hidden rounded-lg border border-[var(--border-default)] bg-[var(--bg-muted)] flex items-center justify-center">
           {d.portraitUrl ? (
-            <img src={d.portraitUrl} alt={d.name} className="h-full w-full object-cover" />
+            <img src={toThumbImageUrl(d.portraitUrl, 320)} alt={d.name} loading="lazy" decoding="async" className="h-full w-full object-cover" />
           ) : (
             <User className="h-5 w-5 text-[var(--text-muted)]" />
           )}
@@ -270,7 +271,7 @@ export const SceneCanvasNode: React.FC<NodeProps> = ({ id, data, selected }) => 
 
       <div className="mt-2 h-20 w-full overflow-hidden rounded-lg border border-[var(--border-default)] bg-[var(--bg-muted)] flex items-center justify-center">
         {d.imageUrl ? (
-          <img src={d.imageUrl} alt={d.name} className="h-full w-full object-cover" />
+          <img src={toThumbImageUrl(d.imageUrl, 480)} alt={d.name} loading="lazy" decoding="async" className="h-full w-full object-cover" />
         ) : (
           <div className="text-[10px] text-[var(--text-muted)] px-2 text-center line-clamp-2">
             {d.environmentPrompt}
@@ -359,7 +360,8 @@ export const ShotCanvasNode: React.FC<NodeProps> = ({ id, data, selected }) => {
         {active.renderMode === "video" && active.videoUrl ? (
           <video
             src={active.videoUrl}
-            poster={active.imageUrl}
+            poster={toThumbImageUrl(active.imageUrl, 480)}
+            preload="metadata"
             className="h-full w-full object-cover"
             muted
             loop
@@ -368,7 +370,7 @@ export const ShotCanvasNode: React.FC<NodeProps> = ({ id, data, selected }) => {
             onMouseLeave={(ev) => ev.currentTarget.pause()}
           />
         ) : active.imageUrl ? (
-          <img src={active.imageUrl} alt={`Shot ${d.index}`} className="h-full w-full object-cover" />
+          <img src={toThumbImageUrl(active.imageUrl, 480)} alt={`Shot ${d.index}`} loading="lazy" decoding="async" className="h-full w-full object-cover" />
         ) : (
           <div className="px-3 text-center text-[10px] text-zinc-400 line-clamp-3">{d.sceneAction}</div>
         )}
@@ -447,7 +449,7 @@ export const AudioImportCanvasNode: React.FC<NodeProps> = ({ id, data, selected 
       </div>
 
       {d.sourceAudioUrl && (
-        <audio src={d.sourceAudioUrl} controls className="nodrag mt-2 h-8 w-full" />
+        <audio src={d.sourceAudioUrl} controls preload="metadata" className="nodrag mt-2 h-8 w-full" />
       )}
 
       {d.transcript && (

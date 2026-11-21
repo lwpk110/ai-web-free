@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"encoding/base64"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"ai-web-free/internal/accounts"
+	"ai-web-free/internal/proxy"
 )
 
 func TestParseGrokCardAttachmentJSON(t *testing.T) {
@@ -213,5 +215,54 @@ func TestGrokGenerateImageAssetRateLimit429(t *testing.T) {
 	}
 	if !acct.IsInCooldown(time.Now()) {
 		t.Fatalf("expected account in cooldown")
+	}
+}
+
+func TestGrokGenerateImageAssetDeadProxyFallback(t *testing.T) {
+	// Bind and immediately close an ephemeral listener to obtain a guaranteed refused local port.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	deadProxy := "http://" + ln.Addr().String()
+	_ = ln.Close()
+
+	fakeImageBytes := []byte("GROK_DIRECT_FALLBACK_JPEG")
+	expectedB64 := base64.StdEncoding.EncodeToString(fakeImageBytes)
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/rest/app-chat/conversations/new":
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`data: {"result":{"response":{"cardAttachment":{"jsonData":"{\"image_chunk\":{\"imageUrl\":\"users/test/generated/fallback-1/image.jpg\"}}"}}}}` + "\n\n"))
+		case "/users/test/generated/fallback-1/image.jpg":
+			w.Header().Set("Content-Type", "image/jpeg")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(fakeImageBytes)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer ts.Close()
+
+	pxPool := proxy.NewPool([]string{deadProxy})
+	p := NewGrokProvider(pxPool, ts.URL, "", accounts.PoolPolicy{})
+	p.SetAssetBaseURL(ts.URL)
+	p.AddAccounts([]string{"sso=token-fallback; sso-rw=token-fallback"}, false)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	res, err := p.GenerateImageAsset(ctx, "fallback cat", "grok-2-image", "1024x1024", 1)
+	if err != nil {
+		t.Fatalf("expected direct fallback to succeed, got: %v", err)
+	}
+	if len(res.Images) != 1 || res.Images[0].B64JSON != expectedB64 {
+		t.Fatalf("unexpected image result: %+v", res.Images)
+	}
+	snaps := pxPool.Snapshots(nil)
+	if len(snaps) != 1 || snaps[0].TotalFailures == 0 {
+		t.Fatalf("expected dead proxy failure recorded in proxy pool, got: %+v", snaps)
 	}
 }

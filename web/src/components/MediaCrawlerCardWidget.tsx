@@ -24,6 +24,7 @@ import {
   fetchVoicePreview,
   importCrawledMedia,
 } from "../api/client";
+import { toThumbImageUrl } from "../lib/mediaUrl";
 import { CloudKeyConfigModal } from "./CloudKeyConfigModal";
 
 interface MediaCrawlerCardWidgetProps {
@@ -368,10 +369,11 @@ export function MediaCrawlerCardWidget({
                   )}
                   {item.media_kind === "image" && (
                     <img
-                      src={item.media_url}
+                      src={toThumbImageUrl(item.media_url, 480)}
                       alt={item.title}
                       className="w-full h-32 object-cover rounded-lg bg-muted/40"
                       loading="lazy"
+                      decoding="async"
                     />
                   )}
                   {item.media_kind === "video" && (

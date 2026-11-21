@@ -614,8 +614,8 @@ export const useDramaCanvasStore = create<DramaCanvasState>((set, get) => {
           serverRec = await fetchDramaProject(targetId);
         } catch {
           if (!localRec && serverList.length > 0) {
-            serverRec = serverList[0];
-            targetId = serverRec.id;
+            targetId = serverList[0].id;
+            serverRec = await fetchDramaProject(targetId).catch(() => serverList[0]);
           }
         }
 

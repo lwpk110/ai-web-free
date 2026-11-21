@@ -2,6 +2,7 @@ package handler
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
@@ -344,5 +345,74 @@ func TestPromptFavoritesPersistence(t *testing.T) {
 	_ = json.Unmarshal(w.Body.Bytes(), &listRes)
 	if len(listRes.FavoriteIDs) != 3 {
 		t.Errorf("Expected 3 favorites, got %d (%v)", len(listRes.FavoriteIDs), listRes.FavoriteIDs)
+	}
+}
+
+func TestMediaEndpointsSupportRangeAndLocalL1(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	localEng, err := storage.NewLocalStorageEngine(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewLocalStorageEngine failed: %v", err)
+	}
+	tiered := storage.NewTieredStorageEngine(localEng, nil)
+	ctx := context.Background()
+
+	if _, _, err := tiered.SaveInCategory(ctx, "images", "range_img", []byte("PNG-IMAGE-BYTES-0123456789"), "image/png"); err != nil {
+		t.Fatalf("save image failed: %v", err)
+	}
+	if _, _, err := tiered.SaveInCategory(ctx, "videos", "range_vid", []byte("MP4-VIDEO-BYTES-0123456789"), "video/mp4"); err != nil {
+		t.Fatalf("save video failed: %v", err)
+	}
+	if _, _, err := tiered.SaveInCategory(ctx, "audio", "range_aud", []byte("MP3-AUDIO-BYTES-0123456789"), "audio/mpeg"); err != nil {
+		t.Fatalf("save audio failed: %v", err)
+	}
+
+	galleryH := NewGalleryHandler(nil, tiered)
+	videoH := NewVideoHandler(nil, nil)
+	videoH.SetStorageEngine(tiered)
+	dramaH := NewDramaHandler(nil, nil, nil, tiered)
+	audioH := NewAudioHandler(nil, nil)
+	audioH.SetRuntime(&GatewayRuntime{StorageEngine: tiered})
+
+	r := gin.New()
+	r.GET("/storage/images/:filename", galleryH.ServeStaticImage)
+	r.HEAD("/storage/images/:filename", galleryH.ServeStaticImage)
+	r.GET("/v1/videos/files/:id", videoH.StreamVideoFile)
+	r.HEAD("/v1/videos/files/:id", videoH.StreamVideoFile)
+	r.GET("/storage/audio/:filename", dramaH.ServeCachedAudio)
+	r.HEAD("/storage/audio/:filename", dramaH.ServeCachedAudio)
+	r.GET("/v1/audio/files/:id", audioH.GetAudioFile)
+	r.HEAD("/v1/audio/files/:id", audioH.GetAudioFile)
+
+	for _, tc := range []struct {
+		url      string
+		wantHead string
+	}{
+		{"/storage/images/range_img.png", "PNG-"},
+		{"/v1/videos/files/range_vid", "MP4-"},
+		{"/storage/audio/range_aud.mp3", "MP3-"},
+		{"/v1/audio/files/range_aud", "MP3-"},
+	} {
+		// HEAD check
+		wHead := httptest.NewRecorder()
+		r.ServeHTTP(wHead, httptest.NewRequest(http.MethodHead, tc.url, nil))
+		if wHead.Code != http.StatusOK {
+			t.Fatalf("HEAD %s status = %d", tc.url, wHead.Code)
+		}
+		if wHead.Header().Get("Accept-Ranges") != "bytes" {
+			t.Fatalf("HEAD %s missing Accept-Ranges=bytes, got %q", tc.url, wHead.Header().Get("Accept-Ranges"))
+		}
+
+		// Range 206 check
+		wRange := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, tc.url, nil)
+		req.Header.Set("Range", "bytes=0-3")
+		r.ServeHTTP(wRange, req)
+		if wRange.Code != http.StatusPartialContent {
+			t.Fatalf("Range GET %s status = %d (want 206), body=%s", tc.url, wRange.Code, wRange.Body.String())
+		}
+		if wRange.Body.String() != tc.wantHead {
+			t.Fatalf("Range GET %s body = %q, want %q", tc.url, wRange.Body.String(), tc.wantHead)
+		}
 	}
 }

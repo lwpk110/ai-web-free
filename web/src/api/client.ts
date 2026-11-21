@@ -1146,7 +1146,7 @@ export async function fetchAdminModelsCatalog(options?: {
   apiKey?: string;
 }): Promise<ModelsCatalogResult> {
   const apiKey = options?.apiKey?.trim();
-  const useCacheParam = options?.refresh ? "" : "&use_cache=true";
+  const useCacheParam = options?.refresh ? "" : "?use_cache=true";
   if (apiKey) {
     const res = await fetch(`/v1/models${useCacheParam}`, {
       headers: { Authorization: `Bearer ${apiKey}` },
@@ -1162,7 +1162,7 @@ export async function fetchAdminModelsCatalog(options?: {
     };
   }
 
-  const refreshParam = options?.refresh ? "&refresh=true" : "";
+  const refreshParam = options?.refresh ? "?refresh=true" : "";
   try {
     const res = await adminFetch(
       `/admin/api/v1/models${refreshParam}`
