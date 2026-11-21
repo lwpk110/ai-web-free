@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 
 	"ai-web-free/httpclient/bogdanfinn"
@@ -159,6 +160,7 @@ func RegisterRouterWithDeps(deps RouterDeps) *gin.Engine {
 
 	router := gin.Default()
 	router.Use(middlewares.Cors)
+	router.Use(gzipMiddleware())
 	router.Use(func(c *gin.Context) {
 		c.Next()
 		status := c.Writer.Status()
@@ -185,25 +187,51 @@ func RegisterRouterWithDeps(deps RouterDeps) *gin.Engine {
 		serveIndex := func(c *gin.Context) {
 			indexData, readErr := fs.ReadFile(distFS, "index.html")
 			if readErr != nil {
+				if c.Request.Method == http.MethodHead {
+					c.Header("Content-Type", "application/json; charset=utf-8")
+					c.Status(http.StatusOK)
+					return
+				}
 				c.JSON(http.StatusOK, gin.H{"message": "Hello, world!"})
+				return
+			}
+			c.Header("Cache-Control", "no-cache")
+			if c.Request.Method == http.MethodHead {
+				c.Header("Content-Type", "text/html; charset=utf-8")
+				c.Header("Content-Length", strconv.Itoa(len(indexData)))
+				c.Status(http.StatusOK)
 				return
 			}
 			c.Data(http.StatusOK, "text/html; charset=utf-8", indexData)
 		}
-		router.GET("/", func(c *gin.Context) {
+		serveRoot := func(c *gin.Context) {
 			if strings.Contains(c.GetHeader("Accept"), "application/json") {
+				if c.Request.Method == http.MethodHead {
+					c.Header("Content-Type", "application/json; charset=utf-8")
+					c.Status(http.StatusOK)
+					return
+				}
 				c.JSON(200, gin.H{"message": "Hello, world!", "service": "ai-web-free"})
 				return
 			}
 			serveIndex(c)
-		})
+		}
+		router.GET("/", serveRoot)
+		router.HEAD("/", serveRoot)
 		router.GET("/index.html", serveIndex)
-		router.GET("/assets/*filepath", func(c *gin.Context) {
+		router.HEAD("/index.html", serveIndex)
+		serveAssets := func(c *gin.Context) {
+			c.Header("Cache-Control", "public, max-age=31536000, immutable")
 			fileServer.ServeHTTP(c.Writer, c.Request)
-		})
-		router.GET("/samples/*filepath", func(c *gin.Context) {
+		}
+		router.GET("/assets/*filepath", serveAssets)
+		router.HEAD("/assets/*filepath", serveAssets)
+		serveSamples := func(c *gin.Context) {
+			c.Header("Cache-Control", "public, max-age=604800")
 			fileServer.ServeHTTP(c.Writer, c.Request)
-		})
+		}
+		router.GET("/samples/*filepath", serveSamples)
+		router.HEAD("/samples/*filepath", serveSamples)
 	} else {
 		router.GET("/", func(c *gin.Context) { c.JSON(200, gin.H{"message": "Hello, world!"}) })
 	}
@@ -363,6 +391,7 @@ func RegisterRouterWithDeps(deps RouterDeps) *gin.Engine {
 		adminGroup.POST("/audio/transcriptions", audioHandler.Transcriptions)
 		adminGroup.GET("/audio/history", audioHandler.ListAudioHistory)
 		adminGroup.GET("/audio/files/:id", audioHandler.GetAudioFile)
+		adminGroup.HEAD("/audio/files/:id", audioHandler.GetAudioFile)
 		adminGroup.GET("/videos/models", videoHandler.ListModels)
 		adminGroup.POST("/videos/generations", videoHandler.Generations)
 		adminGroup.GET("/videos/tasks/:id", videoHandler.GetTask)
@@ -376,9 +405,11 @@ func RegisterRouterWithDeps(deps RouterDeps) *gin.Engine {
 		adminGroup.POST("/deals/chat", dealsHandler.Chat)
 	}
 
-	// 静态生图/音频资源强缓存分发
+	// 静态生图/音频资源强缓存分发（支持 GET 与 HEAD）
 	router.GET("/storage/images/:filename", galleryHandler.ServeStaticImage)
+	router.HEAD("/storage/images/:filename", galleryHandler.ServeStaticImage)
 	router.GET("/storage/audio/:filename", dramaHandler.ServeCachedAudio)
+	router.HEAD("/storage/audio/:filename", dramaHandler.ServeCachedAudio)
 
 	router.POST("/auth/session", authHandler.Session)
 	router.POST("/auth/refresh", authHandler.Refresh)
@@ -414,6 +445,8 @@ func RegisterRouterWithDeps(deps RouterDeps) *gin.Engine {
 	router.OPTIONS("/v1/videos/:id/content", optionsHandler)
 	router.OPTIONS("/v1/videos/models", optionsHandler)
 	router.OPTIONS("/v1/videos/files/:id", optionsHandler)
+	router.GET("/v1/audio/files/:id", audioHandler.GetAudioFile)
+	router.HEAD("/v1/audio/files/:id", audioHandler.GetAudioFile)
 	router.GET("/v1/videos/files/:id", videoHandler.StreamVideoFile)
 	router.HEAD("/v1/videos/files/:id", videoHandler.StreamVideoFile)
 	router.GET("/v1/videos/:id/content", videoHandler.StreamVideoFile)
@@ -444,7 +477,6 @@ func RegisterRouterWithDeps(deps RouterDeps) *gin.Engine {
 	authGroup.POST("/v1/audio/voices/custom/:id/clone", audioHandler.CloneCustomVoice)
 	authGroup.DELETE("/v1/audio/voices/custom/:id", audioHandler.DeleteCustomVoice)
 	authGroup.GET("/v1/audio/history", audioHandler.ListAudioHistory)
-	authGroup.GET("/v1/audio/files/:id", audioHandler.GetAudioFile)
 	authGroup.POST("/v1/media/crawl", mediaLibraryHandler.CrawlMedia)
 	authGroup.POST("/v1/media/crawl-import", mediaLibraryHandler.ImportCrawledMedia)
 	authGroup.GET("/v1/media/assets", mediaLibraryHandler.ListSystemAssets)

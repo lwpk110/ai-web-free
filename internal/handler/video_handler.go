@@ -1026,15 +1026,31 @@ func writeVideoCORSHeaders(c *gin.Context) {
 	c.Header("Cross-Origin-Resource-Policy", "cross-origin")
 }
 
-func serveVideoBytes(c *gin.Context, data []byte) {
-	c.Header("Content-Type", "video/mp4")
-	c.Header("Content-Length", fmt.Sprintf("%d", len(data)))
-	c.Header("Cache-Control", "public, max-age=604800")
-	if c.Request.Method == http.MethodHead {
-		c.Status(http.StatusOK)
-		return
+func serveVideoBytes(c *gin.Context, filename string, data []byte) {
+	if filename == "" {
+		filename = "video.mp4"
 	}
-	c.Data(http.StatusOK, "video/mp4", data)
+	serveRangeMediaBytes(c, filename, "video/mp4", "public, max-age=604800", time.Time{}, data)
+}
+
+func (h *VideoHandler) serveLocalVideoID(c *gin.Context, id string) bool {
+	if id == "" {
+		return false
+	}
+	const cacheCtl = "public, max-age=604800"
+	// 1. 优先命中 data/storage/videos/{id}.mp4（本地 L1 零拷贝流式输出，支持 Range/206）
+	if serveLocalMediaFile(c, h.storageEngine, "videos/"+id+".mp4", cacheCtl) {
+		return true
+	}
+	// 2. 优先检查传统磁盘目录 data/videos/{id}.mp4（必须在远端 Qiniu L2 回源之前命中！）
+	directFile := filepath.Join("data", "videos", id+".mp4")
+	if info, err := os.Stat(directFile); err == nil && !info.IsDir() && info.Size() > 0 {
+		c.Header("Cache-Control", cacheCtl)
+		c.Header("Cross-Origin-Resource-Policy", "cross-origin")
+		c.File(directFile)
+		return true
+	}
+	return false
 }
 
 // StreamVideoFile 本地流媒体中继与同源缓存服务: GET /v1/videos/files/:id 及 /storage/videos/:id
@@ -1046,19 +1062,17 @@ func (h *VideoHandler) StreamVideoFile(c *gin.Context) {
 		return
 	}
 
-	// 1. 优先从统一媒体存储引擎读取 videos/{id}.mp4（内存/本地通用，消除 CORS 污染）
-	if mse, ok := h.storageEngine.(storage.MediaStorageEngine); ok && mse != nil {
-		if data, err := mse.Read(c.Request.Context(), "videos/"+id+".mp4"); err == nil && len(data) > 0 {
-			serveVideoBytes(c, data)
-			return
-		}
+	// 1. 严格优先使用本地磁盘 data/ 缓存（包含 data/storage/videos 与 data/videos）
+	if h.serveLocalVideoID(c, id) {
+		return
 	}
 
-	// 2. 检查传统磁盘目录 data/videos/{id}.mp4
-	directFile := filepath.Join("data", "videos", id+".mp4")
-	if _, err := os.Stat(directFile); err == nil {
-		c.File(directFile)
-		return
+	// 2. 其次走存储引擎 Read（内存存储或 L2 七牛云按需回填并写回 L1）
+	if mse, ok := h.storageEngine.(storage.MediaStorageEngine); ok && mse != nil {
+		if data, err := mse.Read(c.Request.Context(), "videos/"+id+".mp4"); err == nil && len(data) > 0 {
+			serveVideoBytes(c, id+".mp4", data)
+			return
+		}
 	}
 
 	h.mu.RLock()
@@ -1092,16 +1106,14 @@ func (h *VideoHandler) StreamVideoFile(c *gin.Context) {
 			parts := strings.Split(task.VideoURL, "/v1/videos/files/")
 			if len(parts) == 2 {
 				subID := strings.TrimSuffix(parts[1], ".mp4")
+				if h.serveLocalVideoID(c, subID) {
+					return
+				}
 				if mse, ok := h.storageEngine.(storage.MediaStorageEngine); ok && mse != nil {
 					if data, err := mse.Read(c.Request.Context(), "videos/"+subID+".mp4"); err == nil && len(data) > 0 {
-						serveVideoBytes(c, data)
+						serveVideoBytes(c, subID+".mp4", data)
 						return
 					}
-				}
-				subFile := filepath.Join("data", "videos", subID+".mp4")
-				if _, err := os.Stat(subFile); err == nil {
-					c.File(subFile)
-					return
 				}
 			}
 		}
@@ -1126,7 +1138,7 @@ func (h *VideoHandler) StreamVideoFile(c *gin.Context) {
 								h.tasks[id].LocalURL = "/v1/videos/files/" + id
 							}
 							h.mu.Unlock()
-							serveVideoBytes(c, data)
+							serveVideoBytes(c, id+".mp4", data)
 							return
 						}
 					}

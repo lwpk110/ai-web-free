@@ -32,7 +32,10 @@ type AdminHandler struct {
 	startedAt       time.Time
 	bulkTaskMu      sync.Mutex
 	currentBulkTask *BulkActionTask
-	bulkCancelCh    chan struct{}
+	bulkCancelCh          chan struct{}
+	modelsProbeMu         sync.Mutex
+	lastModelsProbeFailAt time.Time
+	lastModelsProbeErr    string
 }
 
 func NewAdminHandler(reg *provider.Registry, proxyPool *proxy.Pool, cfg *config.Config) *AdminHandler {
@@ -1359,12 +1362,16 @@ func respondAdminModelsCatalog(
 	c.JSON(http.StatusOK, payload)
 }
 
-func (h *AdminHandler) syncDynamicModelCatalogs(pool *accounts.Pool, force bool) (bool, string) {
+func (h *AdminHandler) syncDynamicModelCatalogs(reqCtx context.Context, pool *accounts.Pool, force bool) (bool, string) {
 	if h.registry == nil {
 		return false, ""
 	}
 	refreshed := false
 	warnings := make([]string, 0)
+	probeTimeout := 2500 * time.Millisecond
+	if force {
+		probeTimeout = 8 * time.Second
+	}
 	for _, descriptor := range h.registry.ListDescriptors() {
 		plugin, ok := h.registry.Get(descriptor.ID)
 		if !ok || plugin == nil {
@@ -1384,7 +1391,7 @@ func (h *AdminHandler) syncDynamicModelCatalogs(pool *accounts.Pool, force bool)
 		if len(cached) == 0 && plugin.Stats().Active == 0 {
 			continue
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		ctx, cancel := context.WithTimeout(reqCtx, probeTimeout)
 		models, err := catalog.RefreshModels(ctx)
 		cachedAt := catalog.ModelsCachedAt()
 		cancel()
@@ -1403,6 +1410,7 @@ func (h *AdminHandler) syncDynamicModelCatalogs(pool *accounts.Pool, force bool)
 // ListModelsCatalog 返回动态获取并池级缓存的模型目录（支持 ?refresh=true 强制重新拉取）。
 func (h *AdminHandler) ListModelsCatalog(c *gin.Context) {
 	forceRefresh := c.Query("refresh") == "true" || c.Query("refresh") == "1"
+	reqCtx := c.Request.Context()
 	pool := h.accountPool()
 	hadChatGPTCache := false
 	if pool != nil {
@@ -1410,7 +1418,7 @@ func (h *AdminHandler) ListModelsCatalog(c *gin.Context) {
 			hadChatGPTCache = true
 		}
 	}
-	dynamicRefreshed, dynamicWarning := h.syncDynamicModelCatalogs(pool, forceRefresh)
+	dynamicRefreshed, dynamicWarning := h.syncDynamicModelCatalogs(reqCtx, pool, forceRefresh)
 
 	if dynamicRefreshed && hadChatGPTCache && pool != nil {
 		if cached, cachedAt := pool.CachedModels(); len(cached) > 0 {
@@ -1427,11 +1435,36 @@ func (h *AdminHandler) ListModelsCatalog(c *gin.Context) {
 
 	var lastErr string
 	if pool != nil {
+		if !forceRefresh {
+			h.modelsProbeMu.Lock()
+			inFailCooldown := !h.lastModelsProbeFailAt.IsZero() && time.Since(h.lastModelsProbeFailAt) < 60*time.Second
+			cachedFailErr := h.lastModelsProbeErr
+			h.modelsProbeMu.Unlock()
+			if inFailCooldown {
+				if cachedFailErr == "" {
+					cachedFailErr = "上游模型目录近期探测失败，已快速降级返回"
+				}
+				respondAdminModelsCatalog(c, nil, "fallback", time.Time{}, joinModelWarnings(dynamicWarning, cachedFailErr))
+				return
+			}
+		}
 		const maxProbeAccounts = 3
+		probeBudget := 2500 * time.Millisecond
+		if forceRefresh {
+			probeBudget = 8 * time.Second
+		}
+		deadline := time.Now().Add(probeBudget)
 		attempts := 0
 		excluded := make(map[string]bool)
+		timedOut := false
 		for _, kind := range []accounts.AccountType{accounts.TypeFree, accounts.TypePUID} {
-			for attempts < maxProbeAccounts {
+			for attempts < maxProbeAccounts && !timedOut {
+				remaining := time.Until(deadline)
+				if remaining <= 0 {
+					lastErr = "上游模型目录探测超时，已快速返回"
+					timedOut = true
+					break
+				}
 				acct, err := pool.AcquireForCapability(kind, "", excluded)
 				if err != nil || acct == nil {
 					break
@@ -1441,7 +1474,36 @@ func (h *AdminHandler) ListModelsCatalog(c *gin.Context) {
 				if acct.Client == nil {
 					_ = acct.InitClient()
 				}
-				models, status, listErr := chatgpt.ListModels(acct.Client, acct)
+				type listRes struct {
+					models []chatgpt.Model
+					status int
+					err    error
+				}
+				ch := make(chan listRes, 1)
+				go func(a *accounts.Account) {
+					m, st, e := chatgpt.ListModels(a.Client, a)
+					ch <- listRes{models: m, status: st, err: e}
+				}(acct)
+
+				timer := time.NewTimer(remaining)
+				var models []chatgpt.Model
+				var status int
+				var listErr error
+				select {
+				case res := <-ch:
+					timer.Stop()
+					models, status, listErr = res.models, res.status, res.err
+				case <-reqCtx.Done():
+					timer.Stop()
+					lastErr = "请求已取消"
+					timedOut = true
+				case <-timer.C:
+					lastErr = "上游模型目录探测超时，已快速返回"
+					timedOut = true
+				}
+				if timedOut {
+					break
+				}
 				if listErr == nil {
 					slugs := make([]string, 0, len(models))
 					seen := make(map[string]bool, len(models))
@@ -1453,6 +1515,10 @@ func (h *AdminHandler) ListModelsCatalog(c *gin.Context) {
 						}
 					}
 					if len(slugs) > 0 {
+						h.modelsProbeMu.Lock()
+						h.lastModelsProbeFailAt = time.Time{}
+						h.lastModelsProbeErr = ""
+						h.modelsProbeMu.Unlock()
 						pool.RecordAccountModels(acct.ID, slugs)
 						if cached, _ := pool.CachedModels(); len(cached) > 0 {
 							slugs = cached
@@ -1468,6 +1534,15 @@ func (h *AdminHandler) ListModelsCatalog(c *gin.Context) {
 					pool.ReportFailure(acct)
 				}
 			}
+			if timedOut {
+				break
+			}
+		}
+		if lastErr != "" {
+			h.modelsProbeMu.Lock()
+			h.lastModelsProbeFailAt = time.Now()
+			h.lastModelsProbeErr = lastErr
+			h.modelsProbeMu.Unlock()
 		}
 		if cached, cachedAt := pool.CachedModels(); len(cached) > 0 {
 			respondAdminModelsCatalog(c, cached, "cache", cachedAt, joinModelWarnings(dynamicWarning, lastErr))

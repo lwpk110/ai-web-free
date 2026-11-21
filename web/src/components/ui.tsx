@@ -1342,13 +1342,22 @@ export class ErrorBoundary extends Component<
         <div className="p-6 max-w-md mx-auto mt-10 rounded-2xl p-surface space-y-3 text-xs">
           <div className="font-semibold text-sm">页面模块发生渲染异常</div>
           <p className="z-text-muted">{this.state.message}</p>
-          <button
-            type="button"
-            onClick={() => this.setState({ hasError: false, message: "" })}
-            className="px-3.5 py-2 rounded-xl z-primary-btn font-medium cursor-pointer"
-          >
-            重新加载视图
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => this.setState({ hasError: false, message: "" })}
+              className="px-3.5 py-2 rounded-xl z-primary-btn font-medium cursor-pointer"
+            >
+              重新加载视图
+            </button>
+            <button
+              type="button"
+              onClick={() => window.location.reload()}
+              className="px-3.5 py-2 rounded-xl border z-border z-ghost-btn font-medium cursor-pointer"
+            >
+              刷新页面
+            </button>
+          </div>
         </div>
       );
     }

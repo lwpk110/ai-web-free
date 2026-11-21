@@ -32,6 +32,7 @@ import {
   type ScriptNodeData,
   type ShotNodeData,
 } from "../../lib/dramaPresets";
+import { toThumbImageUrl } from "../../lib/mediaUrl";
 import { useDramaCanvasStore } from "../../stores/dramaCanvasStore";
 
 interface DramaNodeInspectorProps {
@@ -303,7 +304,7 @@ export const DramaNodeInspector: React.FC<DramaNodeInspectorProps> = ({
 
         {d.portraitUrl && (
           <div className="overflow-hidden rounded-lg border border-[var(--border-default)] bg-black/20">
-            <img src={d.portraitUrl} alt={d.name} className="max-h-52 w-full object-cover" />
+            <img src={toThumbImageUrl(d.portraitUrl, 720)} alt={d.name} decoding="async" className="max-h-52 w-full object-cover" />
           </div>
         )}
 
@@ -466,7 +467,7 @@ export const DramaNodeInspector: React.FC<DramaNodeInspectorProps> = ({
         </label>
 
         {d.imageUrl && (
-          <img src={d.imageUrl} alt={d.name} className="max-h-48 w-full rounded-lg border border-[var(--border-default)] object-cover" />
+          <img src={toThumbImageUrl(d.imageUrl, 720)} alt={d.name} decoding="async" className="max-h-48 w-full rounded-lg border border-[var(--border-default)] object-cover" />
         )}
 
         <button
@@ -667,7 +668,7 @@ export const DramaNodeInspector: React.FC<DramaNodeInspectorProps> = ({
         </label>
 
         {branch.audioUrl && (
-          <audio src={branch.audioUrl} controls className="h-8 w-full" />
+          <audio src={branch.audioUrl} controls preload="metadata" className="h-8 w-full" />
         )}
 
         <div className="grid grid-cols-3 gap-1.5 pt-1">
@@ -742,7 +743,7 @@ export const DramaNodeInspector: React.FC<DramaNodeInspectorProps> = ({
           />
         </label>
 
-        {d.sourceAudioUrl && <audio src={d.sourceAudioUrl} controls className="h-8 w-full" />}
+        {d.sourceAudioUrl && <audio src={d.sourceAudioUrl} controls preload="metadata" className="h-8 w-full" />}
 
         <button
           type="button"
@@ -856,7 +857,7 @@ export const DramaNodeInspector: React.FC<DramaNodeInspectorProps> = ({
           onChange={(e) => updateNodeData<ComposerNodeData>(selectedNode.id, { bgmVolume: Number(e.target.value) })}
           className="w-full"
         />
-        {comp.bgmUrl && <audio src={comp.bgmUrl} controls className="h-8 w-full" />}
+        {comp.bgmUrl && <audio src={comp.bgmUrl} controls preload="metadata" className="h-8 w-full" />}
       </div>
 
       <button

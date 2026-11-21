@@ -33,7 +33,7 @@ import {
 import {
   editImageWithReferences,
   expandImagePrompt,
-  fetchAccounts,
+  fetchOverview,
   fetchProviderDescriptors,
   fetchPromptPlaza,
   generateImage,
@@ -48,6 +48,7 @@ import { PromptChatAssistant } from "../components/PromptChatAssistant";
 import { CloudKeyConfigModal } from "../components/CloudKeyConfigModal";
 import { dispatchChatRemix } from "../lib/chatRemixBridge";
 import { dispatchDramaCanvas } from "../lib/dramaCanvasBridge";
+import { toThumbImageUrl } from "../lib/mediaUrl";
 import { useModelsCatalog } from "../lib/models";
 import {
   base64ToBlob,
@@ -644,6 +645,7 @@ export const ImageStudio: React.FC = () => {
   const [galleryCategory, setGalleryCategory] = useState<string>("all");
   const [gallerySource, setGallerySource] = useState<string>("all");
   const [galleryProject, setGalleryProject] = useState<string>("all");
+  const [galleryVisibleLimit, setGalleryVisibleLimit] = useState(24);
   const [hydratedIdb, setHydratedIdb] = useState(false);
   const [imageCapableCount, setImageCapableCount] = useState<number | null>(
     null
@@ -809,13 +811,15 @@ export const ImageStudio: React.FC = () => {
       setFavoriteIds(ids);
     });
 
-    fetchAccounts("chatgpt")
-      .then((res) => {
+    fetchOverview()
+      .then((ov) => {
         if (!alive) return;
-        const eligible = (res.accounts || []).filter(
-          (a) => a.status === "active" && !a.image_limited
-        ).length;
-        setImageCapableCount(eligible);
+        const cgptStats = ov.providers?.find((p) => p.descriptor.id === "chatgpt")?.stats;
+        if (cgptStats) {
+          const active = cgptStats.active ?? 0;
+          const limited = cgptStats.image_limited ?? 0;
+          setImageCapableCount(Math.max(0, active - limited));
+        }
       })
       .catch(() => {});
 
@@ -836,6 +840,10 @@ export const ImageStudio: React.FC = () => {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    setGalleryVisibleLimit(24);
+  }, [galleryCategory, gallerySource, galleryProject, galleryQuery]);
 
   useEffect(() => {
     if (!didInitFilterRef.current) {
@@ -2200,6 +2208,7 @@ export const ImageStudio: React.FC = () => {
                   没有符合当前筛选条件的作品。
                 </div>
               ) : (
+              <>
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
                 {loading && (
                   <div className="p-card rounded-xl overflow-hidden flex flex-col">
@@ -2215,7 +2224,7 @@ export const ImageStudio: React.FC = () => {
                     </div>
                   </div>
                 )}
-                {filteredGalleryResults.map((item) => (
+                {filteredGalleryResults.slice(0, galleryVisibleLimit).map((item) => (
                   <div
                     key={item.id}
                     className="p-card p-card-interactive rounded-xl overflow-hidden flex flex-col justify-between group"
@@ -2226,8 +2235,10 @@ export const ImageStudio: React.FC = () => {
                         onClick={() => setLightboxItem(item)}
                       >
                         <img
-                          src={item.url}
+                          src={toThumbImageUrl(item.url, 480)}
                           alt={item.prompt}
+                          loading="lazy"
+                          decoding="async"
                           className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-[1.02]"
                         />
                         <div className="absolute inset-x-0 top-0 p-2 flex items-center justify-between gap-1.5 bg-gradient-to-b from-black/55 to-transparent text-white">
@@ -2370,6 +2381,18 @@ export const ImageStudio: React.FC = () => {
                   </div>
                 ))}
               </div>
+              {filteredGalleryResults.length > galleryVisibleLimit && (
+                <div className="flex justify-center pt-1">
+                  <button
+                    type="button"
+                    onClick={() => setGalleryVisibleLimit((n) => n + 24)}
+                    className="px-4 py-2 rounded-xl border z-border z-ghost-btn text-xs font-medium cursor-pointer"
+                  >
+                    加载更多作品（剩余 {filteredGalleryResults.length - galleryVisibleLimit} 张）
+                  </button>
+                </div>
+              )}
+              </>
             ))}
           </>
         )}

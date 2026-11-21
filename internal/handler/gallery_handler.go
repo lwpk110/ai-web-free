@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -38,7 +37,7 @@ func NewGalleryHandler(database *gorm.DB, engine storage.StorageEngine) *Gallery
 
 // ─── 静态资源托管 ──────────────────────────────────────────────────
 
-// ServeStaticImage 托管本地磁盘或数据库 Blob 中的生图文件，输出强缓存头
+// ServeStaticImage 托管本地磁盘或数据库 Blob 中的生图文件，输出强缓存头并支持 Range/HEAD
 func (h *GalleryHandler) ServeStaticImage(c *gin.Context) {
 	filename := filepath.Base(strings.TrimSpace(c.Param("filename")))
 	if filename == "" || filename == "." || strings.Contains(filename, "..") {
@@ -46,22 +45,26 @@ func (h *GalleryHandler) ServeStaticImage(c *gin.Context) {
 		return
 	}
 
-	// 1. 如果本地存储引擎存在物理文件，直接流式分发
+	const cacheCtl = "public, max-age=31536000, immutable"
 	c.Header("Access-Control-Allow-Origin", "*")
-	if local, ok := h.storageEngine.(*storage.LocalStorageEngine); ok && local != nil {
-		fullPath := filepath.Join(local.ImagesDir(), filename)
-		if info, err := os.Stat(fullPath); err == nil && !info.IsDir() && info.Size() > 0 {
-			c.Header("Cache-Control", "public, max-age=31536000, immutable")
-			c.File(fullPath)
+	c.Header("Cross-Origin-Resource-Policy", "cross-origin")
+
+	// 0. 按需返回并磁盘缓存轻量缩略图（?w=320|480|720|960），将 2MB+ 原图压缩为 ~30-60KB JPEG
+	if thumbWidth := parseRequestedThumbWidth(c.Query("w")); thumbWidth > 0 {
+		if h.serveStaticImageThumb(c, filename, thumbWidth, cacheCtl) {
 			return
 		}
 	}
 
-	// 1.5 统一媒体存储引擎兜底（支持纯内存存储或测试环境通过 MediaStorageEngine.Read 读取）
+	// 1. 优先命中本地磁盘 L1 缓存（兼容 LocalStorageEngine 与 TieredStorageEngine）
+	if serveLocalMediaFile(c, h.storageEngine, "images/"+filename, cacheCtl) {
+		return
+	}
+
+	// 1.5 统一媒体存储引擎兜底（支持纯内存存储或未命中 L1 时从 L2 按需回填）
 	if mse, ok := h.storageEngine.(storage.MediaStorageEngine); ok && mse != nil {
 		if data, err := mse.Read(c.Request.Context(), "images/"+filename); err == nil && len(data) > 0 {
-			c.Header("Cache-Control", "public, max-age=31536000, immutable")
-			c.Data(http.StatusOK, detectMediaMimeFromExt(filepath.Ext(filename), data), data)
+			serveRangeMediaBytes(c, filename, detectMediaMimeFromExt(filepath.Ext(filename), data), cacheCtl, time.Time{}, data)
 			return
 		}
 	}
@@ -72,12 +75,11 @@ func (h *GalleryHandler) ServeStaticImage(c *gin.Context) {
 		idWithoutExt := strings.TrimSuffix(filename, filepath.Ext(filename))
 		if err := h.db.Where("id = ? OR file_path LIKE ? OR url LIKE ?", idWithoutExt, "%"+filename, "%"+filename).First(&work).Error; err == nil {
 			if len(work.BlobData) > 0 {
-				c.Header("Cache-Control", "public, max-age=31536000, immutable")
 				mime := work.MimeType
 				if mime == "" {
-					mime = "image/png"
+					mime = detectMediaMimeFromExt(filepath.Ext(filename), work.BlobData)
 				}
-				c.Data(http.StatusOK, mime, work.BlobData)
+				serveRangeMediaBytes(c, filename, mime, cacheCtl, work.CreatedAt, work.BlobData)
 				return
 			}
 		}
@@ -188,7 +190,7 @@ func (h *GalleryHandler) ListWorks(c *gin.Context) {
 
 	var items []db.GalleryWork
 	offset := (page - 1) * pageSize
-	if err := query.Order("created_at desc").Offset(offset).Limit(pageSize).Find(&items).Error; err != nil {
+	if err := query.Omit("blob_data").Order("created_at desc").Offset(offset).Limit(pageSize).Find(&items).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -858,7 +860,7 @@ func (h *GalleryHandler) SearchWorks(query string, limit int) []db.GalleryWork {
 	q := strings.ToLower(strings.TrimSpace(query))
 	if h.db != nil {
 		var items []db.GalleryWork
-		tx := h.db.Model(&db.GalleryWork{}).Order("created_at desc").Limit(limit)
+		tx := h.db.Model(&db.GalleryWork{}).Omit("blob_data").Order("created_at desc").Limit(limit)
 		if q != "" {
 			pat := "%" + q + "%"
 			tx = tx.Where("LOWER(prompt) LIKE ? OR LOWER(revised_prompt) LIKE ? OR LOWER(mode) LIKE ?", pat, pat, pat)

@@ -25,6 +25,7 @@ import {
 } from "../data/videoCameraPresets";
 import { CameraMotionPreview } from "../components/CameraMotionPreview";
 import { dispatchDramaCanvas } from "../lib/dramaCanvasBridge";
+import { toThumbImageUrl } from "../lib/mediaUrl";
 import {
   Camera,
   CheckCircle2,
@@ -74,6 +75,7 @@ export function VideoStudio(): React.JSX.Element {
   const [activeTask, setActiveTask] = useState<VideoTask | null>(null);
   const [tasks, setTasks] = useState<VideoTask[]>([]);
   const [historyFilter, setHistoryFilter] = useState<"all" | "succeeded" | "pending" | "failed">("all");
+  const [visibleVideoLimit, setVisibleVideoLimit] = useState<number>(12);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [rescuingId, setRescuingId] = useState<string | null>(null);
   const [clearingFailed, setClearingFailed] = useState<boolean>(false);
@@ -99,9 +101,17 @@ export function VideoStudio(): React.JSX.Element {
   const [galleryAssets, setGalleryAssets] = useState<ServerGalleryWork[]>([]);
   const [audioAssets, setAudioAssets] = useState<AudioHistoryItem[]>([]);
 
-  const openAssetPicker = async (tab: "images" | "audio" | "videos") => {
+  const assetLoadedAtRef = React.useRef<number>(0);
+
+  const openAssetPicker = async (tab: "images" | "audio" | "videos", force = false) => {
     setAssetPickerTab(tab);
     setAssetPickerOpen(true);
+    const cacheFresh =
+      !force &&
+      assetLoadedAtRef.current > 0 &&
+      Date.now() - assetLoadedAtRef.current < 30_000 &&
+      (galleryAssets.length > 0 || audioAssets.length > 0);
+    if (cacheFresh) return;
     setAssetLoading(true);
     try {
       const [galleryRes, audioRes] = await Promise.all([
@@ -110,6 +120,7 @@ export function VideoStudio(): React.JSX.Element {
       ]);
       setGalleryAssets(galleryRes.items || []);
       setAudioAssets(audioRes.records || []);
+      assetLoadedAtRef.current = Date.now();
     } finally {
       setAssetLoading(false);
     }
@@ -759,7 +770,7 @@ export function VideoStudio(): React.JSX.Element {
               {imageUrl.trim() && (
                 <div className="relative rounded-lg border z-border bg-muted/30 p-2 flex items-center gap-3">
                   <img
-                    src={imageUrl}
+                    src={toThumbImageUrl(imageUrl, 480)}
                     alt="参考图预览"
                     className="w-16 h-16 object-cover rounded border z-border shrink-0 bg-black/10"
                   />
@@ -1242,7 +1253,10 @@ export function VideoStudio(): React.JSX.Element {
                     <button
                       key={tab.key}
                       type="button"
-                      onClick={() => setHistoryFilter(tab.key)}
+                      onClick={() => {
+                        setHistoryFilter(tab.key);
+                        setVisibleVideoLimit(12);
+                      }}
                       className={`px-2.5 py-1 rounded-lg text-[11px] transition-all cursor-pointer ${
                         active
                           ? "p-seg-active font-semibold"
@@ -1277,9 +1291,12 @@ export function VideoStudio(): React.JSX.Element {
                 );
               }
 
+              const visibleTasks = filteredTasks.slice(0, visibleVideoLimit);
+
               return (
+                <>
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4 gap-3 max-h-[640px] overflow-y-auto pr-1">
-                  {filteredTasks.map((t) => (
+                  {visibleTasks.map((t) => (
                     <div
                       key={t.task_id}
                       className="rounded-xl border z-border p-card p-card-interactive overflow-hidden flex flex-col justify-between"
@@ -1288,6 +1305,7 @@ export function VideoStudio(): React.JSX.Element {
                         <video
                           src={t.video_url}
                           controls
+                          preload="metadata"
                           className="w-full aspect-video bg-black object-cover"
                         />
                       ) : (
@@ -1433,6 +1451,16 @@ export function VideoStudio(): React.JSX.Element {
                     </div>
                   ))}
                 </div>
+                {visibleTasks.length < filteredTasks.length && (
+                  <button
+                    type="button"
+                    onClick={() => setVisibleVideoLimit((n) => n + 12)}
+                    className="w-full py-2 text-xs font-medium z-text-muted hover:z-text border z-border z-surface z-ghost-btn rounded-xl cursor-pointer transition-colors"
+                  >
+                    显示更多视频（还有 {filteredTasks.length - visibleTasks.length} 条）
+                  </button>
+                )}
+                </>
               );
             })()}
           </div>
@@ -1504,8 +1532,10 @@ export function VideoStudio(): React.JSX.Element {
                         className="rounded-xl border z-border overflow-hidden flex flex-col justify-between bg-muted/20"
                       >
                         <img
-                          src={img.url}
+                          src={toThumbImageUrl(img.url, 480)}
                           alt={img.prompt}
+                          loading="lazy"
+                          decoding="async"
                           className="w-full aspect-square object-cover bg-black/10"
                         />
                         <div className="p-2 space-y-1.5">
@@ -1565,7 +1595,7 @@ export function VideoStudio(): React.JSX.Element {
                           </div>
                           <p className="text-xs z-text-muted line-clamp-2">{rec.input_text}</p>
                           {rec.audio_url && (
-                            <audio src={rec.audio_url} controls className="h-8 w-full max-w-sm" />
+                            <audio src={rec.audio_url} controls preload="metadata" className="h-8 w-full max-w-sm" />
                           )}
                         </div>
                         <button
@@ -1600,6 +1630,7 @@ export function VideoStudio(): React.JSX.Element {
                         <video
                           src={vt.video_url}
                           controls
+                          preload="metadata"
                           className="w-full aspect-video rounded-lg bg-black object-cover"
                         />
                       )}

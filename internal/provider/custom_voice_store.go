@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"ai-web-free/internal/db"
+	"ai-web-free/internal/storage"
 	"gorm.io/gorm/clause"
 )
 
@@ -44,9 +45,12 @@ type customVoicesFile struct {
 }
 
 var (
-	customVoiceMemMu    sync.RWMutex
-	customVoiceMemCache = make(map[string][]CustomVoiceRecord)
+	customVoiceMemMu           sync.RWMutex
+	customVoiceMemCache        = make(map[string][]CustomVoiceRecord)
+	customVoiceRemoteCheckedAt = make(map[string]time.Time)
 )
+
+const customVoiceRemoteCheckTTL = 5 * time.Minute
 
 // BuildSystemCustomVoiceID 生成规范、稳定的系统自定义音色 ID（形如 `custom_<slug>`）。
 func BuildSystemCustomVoiceID(nameOrURL string) string {
@@ -79,22 +83,38 @@ func (s *VoiceCatalogStore) memKey() string {
 
 // LoadCustomVoices 从持久化目录（或进程内存兜底）读取全部自定义/克隆音色列表。
 func (s *VoiceCatalogStore) LoadCustomVoices(ctx context.Context) ([]CustomVoiceRecord, error) {
+	relPath := "voices/" + customVoicesStorageID + ".json"
 	if s != nil && s.Enabled() {
-		raw, err := s.media.Read(ctx, "voices/"+customVoicesStorageID+".json")
-		if err == nil && len(raw) > 0 {
-			var parsed customVoicesFile
-			if json.Unmarshal(raw, &parsed) == nil {
-				return parsed.Voices, nil
+		if lpr, ok := s.media.(storage.LocalPathResolver); ok {
+			if _, exists := lpr.LocalFilePath(relPath); exists {
+				raw, err := s.media.Read(ctx, relPath)
+				if err == nil && len(raw) > 0 {
+					var parsed customVoicesFile
+					if json.Unmarshal(raw, &parsed) == nil {
+						return parsed.Voices, nil
+					}
+				}
+			}
+		} else {
+			// 非磁盘引擎（如测试中的 MemoryStorageEngine）直接读取
+			raw, err := s.media.Read(ctx, relPath)
+			if err == nil && len(raw) > 0 {
+				var parsed customVoicesFile
+				if json.Unmarshal(raw, &parsed) == nil {
+					return parsed.Voices, nil
+				}
 			}
 		}
 	}
+
 	customVoiceMemMu.RLock()
 	list := customVoiceMemCache[s.memKey()]
 	out := make([]CustomVoiceRecord, len(list))
 	copy(out, list)
+	lastRemoteCheck := customVoiceRemoteCheckedAt[s.memKey()]
 	customVoiceMemMu.RUnlock()
 
-	// 内存与文件均为空时，尝试从 SQLite 数据库恢复
+	// 内存与文件均为空时，尝试从 SQLite/PostgreSQL 数据库恢复
 	if len(out) == 0 {
 		if gdb := db.GetDB(); gdb != nil {
 			var dbRecords []db.CustomVoiceModelRecord
@@ -131,6 +151,35 @@ func (s *VoiceCatalogStore) LoadCustomVoices(ctx context.Context) ([]CustomVoice
 			}
 		}
 	}
+
+	// 若启用了远端分级存储且本地/DB均无数据，异步后台探测一次远端，避免列表接口冷启动阻塞 1~2 秒。
+	if len(out) == 0 && s != nil && s.Enabled() && s.media.Type() == "tiered_qiniu" && time.Since(lastRemoteCheck) >= customVoiceRemoteCheckTTL {
+		key := s.memKey()
+		customVoiceMemMu.Lock()
+		alreadyCheckedRecently := time.Since(customVoiceRemoteCheckedAt[key]) < customVoiceRemoteCheckTTL
+		if !alreadyCheckedRecently {
+			customVoiceRemoteCheckedAt[key] = time.Now()
+		}
+		customVoiceMemMu.Unlock()
+
+		if !alreadyCheckedRecently {
+			go func(store *VoiceCatalogStore, cacheKey, path string) {
+				readCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				defer cancel()
+				raw, err := store.media.Read(readCtx, path)
+				if err != nil || len(raw) == 0 {
+					return
+				}
+				var parsed customVoicesFile
+				if json.Unmarshal(raw, &parsed) == nil {
+					customVoiceMemMu.Lock()
+					customVoiceMemCache[cacheKey] = parsed.Voices
+					customVoiceMemMu.Unlock()
+				}
+			}(s, key, relPath)
+		}
+	}
+
 	return out, nil
 }
 
@@ -140,6 +189,7 @@ func (s *VoiceCatalogStore) SaveCustomVoices(ctx context.Context, list []CustomV
 	cp := make([]CustomVoiceRecord, len(list))
 	copy(cp, list)
 	customVoiceMemCache[s.memKey()] = cp
+	customVoiceRemoteCheckedAt[s.memKey()] = time.Now()
 	customVoiceMemMu.Unlock()
 
 	// 同步持久化写入 SQLite / PostgreSQL 数据库

@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"ai-web-free/internal/accounts"
 	"ai-web-free/internal/chatgpt"
 	"ai-web-free/internal/config"
+	"ai-web-free/internal/storage"
 	chatgpt_types "ai-web-free/typings/chatgpt"
 	officialtypes "ai-web-free/typings/official"
 	"ai-web-free/util"
@@ -393,4 +395,35 @@ func responsesCompletedEvent(resp officialtypes.ResponsesResponse) string {
 	}
 	b, _ := json.Marshal(evt)
 	return string(b)
+}
+
+var defaultMediaModTime = time.Unix(1700000000, 0).UTC()
+
+func serveRangeMediaBytes(c *gin.Context, filename, contentType, cacheControl string, modTime time.Time, data []byte) {
+	if contentType != "" {
+		c.Header("Content-Type", contentType)
+	}
+	if cacheControl != "" {
+		c.Header("Cache-Control", cacheControl)
+	}
+	c.Header("Cross-Origin-Resource-Policy", "cross-origin")
+	c.Header("Accept-Ranges", "bytes")
+	if modTime.IsZero() {
+		modTime = defaultMediaModTime
+	}
+	http.ServeContent(c.Writer, c.Request, filename, modTime, bytes.NewReader(data))
+}
+
+func serveLocalMediaFile(c *gin.Context, eng storage.StorageEngine, relPath, cacheControl string) bool {
+	if lpr, ok := eng.(storage.LocalPathResolver); ok && lpr != nil {
+		if fullPath, exists := lpr.LocalFilePath(relPath); exists {
+			if cacheControl != "" {
+				c.Header("Cache-Control", cacheControl)
+			}
+			c.Header("Cross-Origin-Resource-Policy", "cross-origin")
+			c.File(fullPath)
+			return true
+		}
+	}
+	return false
 }

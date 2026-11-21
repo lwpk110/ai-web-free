@@ -16,7 +16,22 @@ import {
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
+import { toThumbImageUrl } from "../lib/mediaUrl";
 import { stripUnknownPseudoXmlTags } from "../lib/openui-html-sanitizer";
+
+function isSameOriginAsset(url: string): boolean {
+  const trimmed = url.trim();
+  if (!trimmed || trimmed.startsWith("data:") || trimmed.startsWith("blob:")) return true;
+  if (trimmed.startsWith("/") && !trimmed.startsWith("//")) return true;
+  if (typeof window !== "undefined") {
+    try {
+      return new URL(trimmed, window.location.origin).origin === window.location.origin;
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
 
 function MarkdownImageCard({ src, alt }: { src: string; alt: string }) {
   const [loaded, setLoaded] = useState(false);
@@ -30,6 +45,7 @@ function MarkdownImageCard({ src, alt }: { src: string; alt: string }) {
   const effectiveSrc = retryKey > 0
     ? (src.includes("?") ? `${src}&_r=${retryKey}` : `${src}?_r=${retryKey}`)
     : src;
+  const previewSrc = toThumbImageUrl(effectiveSrc, 960);
 
   const handleRetry = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -114,11 +130,13 @@ function MarkdownImageCard({ src, alt }: { src: string; alt: string }) {
           >
             {/* img 始终保持在 DOM 布局流中，绝不使用 display:none，确保浏览器即刻发起网络请求并触发 onLoad */}
             <img
-              key={effectiveSrc}
-              src={effectiveSrc}
+              key={previewSrc}
+              src={previewSrc}
               alt={alt || "AI 生成图片"}
-              referrerPolicy="no-referrer"
-              crossOrigin="anonymous"
+              loading="lazy"
+              decoding="async"
+              referrerPolicy={isSameOriginAsset(previewSrc) ? undefined : "no-referrer"}
+              crossOrigin={isSameOriginAsset(previewSrc) ? undefined : "anonymous"}
               onLoad={() => {
                 setLoaded(true);
                 setFailed(false);
@@ -1528,6 +1546,7 @@ function renderWidgetAst(
           <audio
             key={key}
             controls
+            preload="metadata"
             src={src}
             className="w-full max-w-md my-1 rounded-lg"
           />
