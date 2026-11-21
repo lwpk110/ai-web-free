@@ -82,6 +82,11 @@ func SaveRestrictionsBatchToDB(database *gorm.DB, restrictions map[string]string
 	}).CreateInBatches(records, 100).Error
 }
 
+// BatchSaveRestrictionsToDB 兼容别名
+func BatchSaveRestrictionsToDB(database *gorm.DB, rType string, restrictions map[string]string) error {
+	return SaveRestrictionsBatchToDB(database, restrictions, rType)
+}
+
 // DeleteRestrictionFromDB 从数据库删除指定黑名单/禁用记录
 func DeleteRestrictionFromDB(database *gorm.DB, identifier, rType string) error {
 	if database == nil {

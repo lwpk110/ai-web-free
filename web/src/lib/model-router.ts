@@ -3,6 +3,19 @@ export interface RouterHistoryMessage {
   content: string;
 }
 
+export const DEFAULT_CHAT_MODELS = [
+  "gpt-5-6",
+  "gpt-5-3",
+  "gpt-5-mini",
+  "gpt-4o",
+  "gpt-4o-mini",
+  "o3-mini",
+  "o1",
+  "gpt-6",
+  "research",
+  "auto",
+];
+
 export const DEFAULT_IMAGE_MODELS = [
   "gpt-image-2.5-sunburst",
   "gpt-image-2.5-flare",

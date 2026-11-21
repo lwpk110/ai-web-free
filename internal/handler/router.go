@@ -263,6 +263,8 @@ func RegisterRouterWithDeps(deps RouterDeps) *gin.Engine {
 		adminGroup.GET("/providers/:provider/accounts", adminHandler.ListAccounts)
 		adminGroup.POST("/providers/:provider/accounts/bulk-proxy", adminHandler.BulkUpdateAccountProxy)
 		adminGroup.POST("/providers/:provider/accounts/bulk-action", adminHandler.BulkAccountAction)
+		adminGroup.GET("/providers/:provider/accounts/bulk-action/task", adminHandler.GetBulkActionTaskHandler)
+		adminGroup.POST("/providers/:provider/accounts/bulk-action/cancel", adminHandler.CancelBulkActionTaskHandler)
 		adminGroup.GET("/providers/:provider/export", adminHandler.ExportAccounts)
 		adminGroup.POST("/providers/:provider/accounts/import", adminHandler.ImportAccounts)
 		adminGroup.POST("/providers/:provider/accounts/kami-login", adminHandler.LoginKamiAccounts)

@@ -325,3 +325,31 @@ type FreebieDeal struct {
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 }
+
+// BatchActionTaskRecord 账号池批量运维异步任务持久化模型
+type BatchActionTaskRecord struct {
+	ID                string    `gorm:"primaryKey;size:64" json:"id"`
+	Provider          string    `gorm:"size:64;index" json:"provider"`
+	Action            string    `gorm:"size:64;index" json:"action"`
+	ActionLabel       string    `gorm:"size:64" json:"action_label"`
+	Status            string    `gorm:"size:32;index" json:"status"` // running | completed | cancelled
+	Total             int       `gorm:"default:0" json:"total"`
+	Completed         int       `gorm:"default:0" json:"completed"`
+	Success           int       `gorm:"default:0" json:"success"`
+	Failed            int       `gorm:"default:0" json:"failed"`
+	Cancelled         int       `gorm:"default:0" json:"cancelled"`
+	CurrentAccountID  string    `gorm:"size:128" json:"current_account_id,omitempty"`
+	CurrentEmail      string    `gorm:"size:128" json:"current_email,omitempty"`
+	CurrentPhaseLabel string    `gorm:"size:128" json:"current_phase_label,omitempty"`
+	CurrentStartedAt  string    `gorm:"size:64" json:"current_started_at,omitempty"`
+	QueuedAccountIDs  string    `gorm:"type:text" json:"queued_account_ids,omitempty"` // JSON string
+	Results           string    `gorm:"type:text" json:"results"`                     // JSON string
+	Dismissed         bool      `gorm:"default:false;index" json:"dismissed"`
+	CreatedAt         time.Time `gorm:"index" json:"created_at"`
+	UpdatedAt         time.Time `gorm:"index" json:"updated_at"`
+}
+
+func (BatchActionTaskRecord) TableName() string {
+	return "batch_action_task_records"
+}
+

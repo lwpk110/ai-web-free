@@ -219,24 +219,34 @@ func Init() (*App, error) {
 		return nil
 	}
 
+	var accountsToPersist []*accounts.Account
+
 	// 2. access_tokens.txt — 纯 access token，不可续期
 	for _, t := range accounts.LoadTokensFromFile("access_tokens.txt") {
 		chatGPTID := accounts.ExtractChatGPTAccountID(t.Token)
 		email := accounts.ExtractEmail(t.Token)
 		if matched := findExisting(email, chatGPTID, t.Token); matched != nil {
+			changed := false
 			if matched.Token == "" {
 				matched.Token = t.Token
+				changed = true
 			}
-			if matched.TeamUserID == "" {
+			if matched.TeamUserID == "" && t.TeamID != "" {
 				matched.TeamUserID = t.TeamID
+				changed = true
 			}
-			if matched.ChatGPTAccountID == "" {
+			if matched.ChatGPTAccountID == "" && chatGPTID != "" {
 				matched.ChatGPTAccountID = chatGPTID
+				changed = true
 			}
-			if matched.Email == "" {
+			if matched.Email == "" && email != "" {
 				matched.Email = email
+				changed = true
 			}
 			applyRestrictions(matched)
+			if changed {
+				accountsToPersist = append(accountsToPersist, matched)
+			}
 			continue
 		}
 
@@ -252,13 +262,15 @@ func Init() (*App, error) {
 			acct.Status = accounts.StatusActive
 		}
 		accs = append(accs, acct)
+		accountsToPersist = append(accountsToPersist, acct)
 	}
 
-	// 3. refresh_tokens.txt — 带 refresh_token，可续期
+	// 3. refresh_tokens.txt — 带 refresh_token，可续期（冷启动不发起阻塞 HTTP 请求，由后台巡检异步换取）
 	for _, t := range accounts.LoadTokensFromFile("refresh_tokens.txt") {
 		if matched := findExisting("", "", t.Token); matched != nil {
 			if matched.RefreshToken == "" {
 				matched.RefreshToken = t.Token
+				accountsToPersist = append(accountsToPersist, matched)
 			}
 			continue
 		}
@@ -267,20 +279,21 @@ func Init() (*App, error) {
 		acct.RefreshToken = t.Token
 		acct.TeamUserID = t.TeamID
 		assignStickyProxy(acct)
-		if exchangeRefreshToken(acct) {
-			acct.ChatGPTAccountID = accounts.ExtractChatGPTAccountID(acct.Token)
-			acct.Status = accounts.StatusActive
-		} else {
+		applyRestrictions(acct)
+		if acct.Status == accounts.StatusPending {
 			acct.Status = accounts.StatusExpired
+			acct.LastError = "待首次刷新 Access Token"
 		}
 		accs = append(accs, acct)
+		accountsToPersist = append(accountsToPersist, acct)
 	}
 
-	// 4. session_tokens.txt — ChatGPT session token，用于免费账号续期
+	// 4. session_tokens.txt — ChatGPT session token，用于免费账号续期（冷启动不发起阻塞 HTTP 请求，由后台巡检异步换取）
 	for _, t := range accounts.LoadTokensFromFile("session_tokens.txt") {
 		if matched := findExisting("", "", t.Token); matched != nil {
 			if matched.SessionToken == "" {
 				matched.SessionToken = t.Token
+				accountsToPersist = append(accountsToPersist, matched)
 			}
 			continue
 		}
@@ -289,13 +302,13 @@ func Init() (*App, error) {
 		acct.SessionToken = t.Token
 		acct.TeamUserID = t.TeamID
 		assignStickyProxy(acct)
-		if exchangeSessionToken(acct) {
-			acct.ChatGPTAccountID = accounts.ExtractChatGPTAccountID(acct.Token)
-			acct.Status = accounts.StatusActive
-		} else {
+		applyRestrictions(acct)
+		if acct.Status == accounts.StatusPending {
 			acct.Status = accounts.StatusExpired
+			acct.LastError = "待首次刷新 Access Token"
 		}
 		accs = append(accs, acct)
+		accountsToPersist = append(accountsToPersist, acct)
 	}
 
 	// 5. free_tokens.txt — 设备 UUID
@@ -308,14 +321,25 @@ func Init() (*App, error) {
 		assignStickyProxy(acct)
 		acct.Status = accounts.StatusActive
 		accs = append(accs, acct)
+		accountsToPersist = append(accountsToPersist, acct)
 	}
 
 	// 6. kami_accounts.txt — 卡密账号（邮箱----密码----2FA密钥）
 	for _, k := range accounts.LoadKamiFromFile("kami_accounts.txt") {
 		if matched := findExisting(k.Email, "", ""); matched != nil {
-			matched.Password = k.Password
-			matched.TOTPSecret = k.TOTPSecret
+			changed := false
+			if matched.Password != k.Password {
+				matched.Password = k.Password
+				changed = true
+			}
+			if matched.TOTPSecret != k.TOTPSecret {
+				matched.TOTPSecret = k.TOTPSecret
+				changed = true
+			}
 			applyRestrictions(matched)
+			if changed {
+				accountsToPersist = append(accountsToPersist, matched)
+			}
 			continue
 		}
 
@@ -329,6 +353,7 @@ func Init() (*App, error) {
 			acct.LastError = "待浏览器登录提取 Token"
 		}
 		accs = append(accs, acct)
+		accountsToPersist = append(accountsToPersist, acct)
 	}
 
 	// 7. FREE_ACCOUNTS — 自动生成 UUID 账号
@@ -339,6 +364,16 @@ func Init() (*App, error) {
 			acct.Proxy = proxyPool.Allocate()
 			acct.Status = accounts.StatusActive
 			accs = append(accs, acct)
+			accountsToPersist = append(accountsToPersist, acct)
+		}
+	}
+
+	// 9. 仅将新增或更新的账号持久化增量写入 SQLite 数据库（避免启动全量覆写已有账号产生大量 SQL 往返）
+	if database != nil && len(accountsToPersist) > 0 {
+		if err := accounts.BatchSaveAccountsToDB(database, accountsToPersist); err != nil {
+			log.Printf("[Bootstrap] 同步新增账号至持久化数据库失败: %v", err)
+		} else {
+			log.Printf("[Bootstrap] 已成功将 %d 个新增/更新号池账号同步持久化至 SQLite 数据库", len(accountsToPersist))
 		}
 	}
 
@@ -349,22 +384,7 @@ func Init() (*App, error) {
 	applyPoolPolicy(accountPool, "chatgpt", accounts.TypePUID)
 	accountPool.Rebalance()
 
-	// 9. 将调谐后的全量账号持久化同步写入数据库
-	if database != nil {
-		if err := accounts.BatchSaveAccountsToDB(database, accs); err != nil {
-			log.Printf("[Bootstrap] 同步账号至持久化数据库失败: %v", err)
-		} else {
-			log.Printf("[Bootstrap] 已成功将 %d 个号池账号同步持久化至数据库", len(accs))
-		}
-	}
-
-	// 初始化 TLS Client（待命账号延迟到激活时创建）
-	for _, acct := range accs {
-		if acct.Status == accounts.StatusStandby || acct.Client != nil {
-			continue
-		}
-		_ = acct.InitClient()
-	}
+	// 启动阶段不再全量同步初始化 TLS Client，改由号池 Acquire 借出或热池轮换激活时按需懒加载（Lazy Init），消除 CPU 与内存冷启动停顿
 	stopRebalancer := accountPool.StartRebalancer(time.Minute)
 	healthTracker := health.NewTracker()
 
@@ -922,8 +942,10 @@ func loadProxyList(database *gorm.DB) []string {
 	}
 
 	// 1. 优先从 SQLite 数据库加载
+	var dbProxyCount int
 	if database != nil {
 		if dbProxies, err := db.LoadProxiesFromDB(database); err == nil {
+			dbProxyCount = len(dbProxies)
 			for _, p := range dbProxies {
 				addProxy(p)
 			}
@@ -951,10 +973,10 @@ func loadProxyList(database *gorm.DB) []string {
 		}
 	}
 
-	// 5. 持久化至 SQLite 数据库（无数据库时才回退至 proxies.txt）
-	if database != nil && len(proxies) > 0 {
+	// 5. 仅在有新增代理节点时持久化至数据库（无数据库时才回退至 proxies.txt）
+	if database != nil && len(proxies) > dbProxyCount {
 		_ = db.SaveProxiesToDB(database, proxies)
-	} else if len(proxies) > 0 {
+	} else if database == nil && len(proxies) > 0 {
 		content := strings.Join(proxies, "\n") + "\n"
 		_ = os.WriteFile("proxies.txt", []byte(content), 0644)
 	}

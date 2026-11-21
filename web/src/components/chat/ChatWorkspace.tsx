@@ -64,21 +64,20 @@ import {
 } from "../../lib/chat/chatModelAdapter";
 import { createBackendThreadListAdapter } from "../../lib/chat/threadAdapters";
 import { dispatchDramaCanvas } from "../../lib/dramaCanvasBridge";
-import { FALLBACK_CATALOG_IDS, useModelsCatalog } from "../../lib/models";
-import { DEFAULT_IMAGE_MODELS, DEFAULT_TTS_MODELS } from "../../lib/model-router";
+import {
+  getGlobalAudioModels,
+  getGlobalChatModels,
+  getGlobalImageModels,
+  useModelsCatalog,
+} from "../../lib/models";
+import {
+  DEFAULT_IMAGE_MODELS,
+  DEFAULT_TTS_MODELS,
+} from "../../lib/model-router";
 import { OpenUITextPart } from "./OpenUITextPart";
 import { ThreadSidebar } from "./ThreadSidebar";
 
 const CHAT_MODEL_STORAGE_KEY = "ai_web_free_chat_model";
-
-const FALLBACK_CHAT_MODELS = FALLBACK_CATALOG_IDS.filter(
-  (id) =>
-    !id.includes("image") &&
-    !id.includes("dall-e") &&
-    !id.includes("tts") &&
-    !id.includes("transcribe") &&
-    !id.includes("whisper")
-);
 
 function getStoredChatModel(): string {
   try {
@@ -544,16 +543,37 @@ const AssistantMessageRow: React.FC<AssistantMessageRowProps> = ({
   );
 };
 
+const SUGGESTED_MODELS = [
+  "gpt-4o",
+  "gpt-4o-mini",
+  "gpt-5-6",
+  "gpt-5-mini",
+  "o3-mini",
+  "o1",
+  "deepseek-chat",
+  "deepseek-reasoner",
+  "claude-3-7-sonnet",
+  "gemini-2.5-flash",
+  "grok-3",
+  "auto",
+];
+
 interface ChatWorkspaceInnerProps {
   themeMode: "light" | "dark";
   config: ChatRuntimeConfig;
   onUpdateConfig: (updater: (prev: ChatRuntimeConfig) => ChatRuntimeConfig) => void;
+  customModels: string[];
+  onAddCustomModel: (model: string) => void;
+  onRemoveCustomModel: (model: string) => void;
 }
 
 const ChatWorkspaceInner: React.FC<ChatWorkspaceInnerProps> = ({
   themeMode,
   config,
   onUpdateConfig,
+  customModels,
+  onAddCustomModel,
+  onRemoveCustomModel,
 }) => {
   const aui = useAui();
   const composerText = useAuiState((s) => s.composer.text);
@@ -566,6 +586,9 @@ const ChatWorkspaceInner: React.FC<ChatWorkspaceInnerProps> = ({
   const [newPresetName, setNewPresetName] = useState("");
   const [newPresetPrompt, setNewPresetPrompt] = useState("");
   const [showApiKeyBar, setShowApiKeyBar] = useState(false);
+
+  const [showCustomModelModal, setShowCustomModelModal] = useState(false);
+  const [customModelInput, setCustomModelInput] = useState("");
 
   const [showSearchModal, setShowSearchModal] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
@@ -714,14 +737,49 @@ const ChatWorkspaceInner: React.FC<ChatWorkspaceInnerProps> = ({
     return SLASH_SKILLS.filter((s) => s.command.startsWith(q));
   }, [composerText]);
 
+  const handleSaveCustomModel = (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    const trimmed = customModelInput.trim();
+    if (!trimmed) return;
+    onAddCustomModel(trimmed);
+    try {
+      window.sessionStorage.setItem(CHAT_MODEL_STORAGE_KEY, trimmed);
+    } catch {}
+    onUpdateConfig((prev) => ({ ...prev, model: trimmed }));
+    setCustomModelInput("");
+    setShowCustomModelModal(false);
+  };
+
+  const chatModelsList = useMemo(() => {
+    return config.availableChatModels.filter((m) => !customModels.includes(m));
+  }, [config.availableChatModels, customModels]);
+
+  const isOrphanModel = useMemo(() => {
+    const cur = config.model;
+    if (!cur) return false;
+    return (
+      !chatModelsList.includes(cur) &&
+      !customModels.includes(cur) &&
+      !config.availableImageModels.includes(cur) &&
+      !config.availableAudioModels.includes(cur)
+    );
+  }, [
+    config.model,
+    chatModelsList,
+    customModels,
+    config.availableImageModels,
+    config.availableAudioModels,
+  ]);
+
   const allRetryModels = useMemo(() => {
     const set = new Set([
       ...config.availableChatModels,
+      ...customModels,
       ...config.availableImageModels,
       ...config.availableAudioModels,
     ]);
     return Array.from(set);
-  }, [config]);
+  }, [config, customModels]);
 
   return (
     <div className="flex h-full w-full overflow-hidden bg-[var(--bg-canvas)]">
@@ -745,34 +803,70 @@ const ChatWorkspaceInner: React.FC<ChatWorkspaceInnerProps> = ({
               <PanelLeftOpen size={13} />
             </button>
 
-            <select
-              value={config.model}
-              onChange={(e) => {
-                const next = e.target.value;
-                try {
-                  window.sessionStorage.setItem(CHAT_MODEL_STORAGE_KEY, next);
-                } catch {}
-                onUpdateConfig((prev) => ({ ...prev, model: next }));
-              }}
-              className="h-7.5 rounded-lg border z-border bg-[var(--bg-surface)] px-2.5 text-xs font-medium z-text outline-none max-w-[175px] cursor-pointer"
-              title="选择主推理模型"
-            >
-              {config.availableChatModels.map((m) => (
-                <option key={m} value={m}>
-                  {m}
-                </option>
-              ))}
-              {config.availableImageModels.map((m) => (
-                <option key={m} value={m}>
-                  🎨 {m}
-                </option>
-              ))}
-              {config.availableAudioModels.map((m) => (
-                <option key={m} value={m}>
-                  🔊 {m}
-                </option>
-              ))}
-            </select>
+            <div className="flex items-center gap-1">
+              <select
+                value={config.model}
+                onChange={(e) => {
+                  const next = e.target.value;
+                  if (next === "__custom__") {
+                    setShowCustomModelModal(true);
+                    return;
+                  }
+                  try {
+                    window.sessionStorage.setItem(CHAT_MODEL_STORAGE_KEY, next);
+                  } catch {}
+                  onUpdateConfig((prev) => ({ ...prev, model: next }));
+                }}
+                className="h-7.5 rounded-lg border z-border bg-[var(--bg-surface)] px-2.5 text-xs font-medium z-text outline-none max-w-[175px] cursor-pointer"
+                title="选择主推理模型"
+              >
+                {isOrphanModel && (
+                  <optgroup label="📍 当前模型">
+                    <option value={config.model}>{config.model}</option>
+                  </optgroup>
+                )}
+                <optgroup label="💬 对话模型 (Chat)">
+                  {chatModelsList.map((m) => (
+                    <option key={m} value={m}>
+                      {m}
+                    </option>
+                  ))}
+                </optgroup>
+                {customModels.length > 0 && (
+                  <optgroup label="✨ 自定义模型 (Custom)">
+                    {customModels.map((m) => (
+                      <option key={m} value={m}>
+                        {m}
+                      </option>
+                    ))}
+                  </optgroup>
+                )}
+                <optgroup label="🎨 生图模型 (Image)">
+                  {config.availableImageModels.map((m) => (
+                    <option key={m} value={m}>
+                      🎨 {m}
+                    </option>
+                  ))}
+                </optgroup>
+                <optgroup label="🔊 语音模型 (Audio)">
+                  {config.availableAudioModels.map((m) => (
+                    <option key={m} value={m}>
+                      🔊 {m}
+                    </option>
+                  ))}
+                </optgroup>
+                <option value="__custom__">➕ 添加自定义模型...</option>
+              </select>
+
+              <button
+                type="button"
+                onClick={() => setShowCustomModelModal(true)}
+                className="h-7.5 w-7.5 inline-flex items-center justify-center rounded-lg border z-border z-surface z-ghost-btn z-text-sec cursor-pointer"
+                title="添加/管理自定义对话模型"
+              >
+                <Plus size={12} />
+              </button>
+            </div>
 
             <select
               value={activePresetId}
@@ -1208,6 +1302,119 @@ const ChatWorkspaceInner: React.FC<ChatWorkspaceInnerProps> = ({
           </div>
         </div>
       )}
+
+      {/* 自定义模型管理模态框 */}
+      {showCustomModelModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-xs p-4"
+          onClick={() => setShowCustomModelModal(false)}
+        >
+          <div
+            className="w-full max-w-md rounded-2xl p-surface shadow-2xl p-4 space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="text-sm font-semibold z-text">添加 / 切换自定义模型</h3>
+                <p className="text-[11px] z-text-muted mt-0.5">
+                  输入任何上游支持或反代映射的模型名称
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowCustomModelModal(false)}
+                className="p-1 rounded hover:bg-[var(--bg-muted)] z-text-muted cursor-pointer"
+              >
+                <X size={14} />
+              </button>
+            </div>
+
+            {/* 快速推荐标签 */}
+            <div>
+              <div className="text-[11px] font-medium z-text-sec mb-1.5">常用模型快捷填入:</div>
+              <div className="flex flex-wrap gap-1.5">
+                {SUGGESTED_MODELS.map((sm) => (
+                  <button
+                    key={sm}
+                    type="button"
+                    onClick={() => setCustomModelInput(sm)}
+                    className="px-2 py-0.5 rounded-md border z-border bg-[var(--bg-muted)]/50 hover:bg-[var(--bg-muted)] text-[11px] font-mono z-text-sec hover:z-text transition cursor-pointer"
+                  >
+                    {sm}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <form onSubmit={handleSaveCustomModel} className="space-y-3">
+              <div>
+                <input
+                  value={customModelInput}
+                  onChange={(e) => setCustomModelInput(e.target.value)}
+                  placeholder="输入模型 ID，如 gpt-4o, claude-3-7-sonnet..."
+                  className="w-full rounded-xl border z-border bg-[var(--bg-input)] px-3 py-2 text-xs font-mono z-text outline-none focus:border-blue-500"
+                  autoFocus
+                />
+              </div>
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowCustomModelModal(false)}
+                  className="rounded-xl border z-border px-3 py-1.5 text-xs z-text-sec hover:bg-[var(--bg-muted)] cursor-pointer"
+                >
+                  取消
+                </button>
+                <button
+                  type="submit"
+                  disabled={!customModelInput.trim()}
+                  className="rounded-xl z-primary-btn px-3.5 py-1.5 text-xs font-medium cursor-pointer disabled:opacity-50"
+                >
+                  确定并使用
+                </button>
+              </div>
+            </form>
+
+            {customModels.length > 0 && (
+              <div className="border-t z-border pt-3 space-y-1.5">
+                <div className="text-[11px] font-medium z-text-muted">已保存的自定义模型</div>
+                <div className="max-h-40 overflow-y-auto space-y-1 pr-1">
+                  {customModels.map((cm) => (
+                    <div
+                      key={cm}
+                      className="flex items-center justify-between text-xs rounded-lg px-2.5 py-1.5 bg-[var(--bg-muted)]/60 hover:bg-[var(--bg-muted)] transition"
+                    >
+                      <button
+                        type="button"
+                        onClick={() => {
+                          try {
+                            window.sessionStorage.setItem(CHAT_MODEL_STORAGE_KEY, cm);
+                          } catch {}
+                          onUpdateConfig((prev) => ({ ...prev, model: cm }));
+                          setShowCustomModelModal(false);
+                        }}
+                        className={`truncate font-mono text-left flex-1 cursor-pointer ${
+                          config.model === cm ? "font-semibold text-blue-500" : "z-text"
+                        }`}
+                        title="点击选用此模型"
+                      >
+                        {cm} {config.model === cm && "✓ (当前)"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onRemoveCustomModel(cm)}
+                        className="text-rose-500 hover:bg-rose-500/10 p-1 rounded cursor-pointer ml-2"
+                        title="删除此模型"
+                      >
+                        <Trash2 size={12} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 };
@@ -1217,22 +1424,34 @@ export interface ChatWorkspaceProps {
 }
 
 export const ChatWorkspace: React.FC<ChatWorkspaceProps> = ({ themeMode = "dark" }) => {
-  const { chatModels, imageModels, audioModels } = useModelsCatalog();
+  const {
+    chatModels,
+    imageModels,
+    audioModels,
+    customModels,
+    addCustomModel,
+    removeCustomModel,
+  } = useModelsCatalog();
 
-  const availableChatModels =
-    chatModels.length > 0 ? chatModels.map((m) => m.id) : FALLBACK_CHAT_MODELS;
-  const availableImageModels =
-    imageModels.length > 0 ? imageModels.map((m) => m.id) : DEFAULT_IMAGE_MODELS;
-  const availableAudioModels =
-    audioModels.length > 0 ? audioModels.map((m) => m.id) : DEFAULT_TTS_MODELS;
+  const availableChatModels = useMemo(() => {
+    return chatModels.map((m) => m.id);
+  }, [chatModels]);
+
+  const availableImageModels = useMemo(() => {
+    return imageModels.map((m) => m.id);
+  }, [imageModels]);
+
+  const availableAudioModels = useMemo(() => {
+    return audioModels.map((m) => m.id);
+  }, [audioModels]);
 
   const [config, setConfig] = useState<ChatRuntimeConfig>(() => ({
     model: getStoredChatModel(),
     openuiMode: true,
     autoSwitchModel: true,
-    availableChatModels: FALLBACK_CHAT_MODELS,
-    availableImageModels: DEFAULT_IMAGE_MODELS,
-    availableAudioModels: DEFAULT_TTS_MODELS,
+    availableChatModels: getGlobalChatModels().map((m) => m.id),
+    availableImageModels: getGlobalImageModels().map((m) => m.id),
+    availableAudioModels: getGlobalAudioModels().map((m) => m.id),
   }));
 
   useEffect(() => {
@@ -1283,6 +1502,9 @@ export const ChatWorkspace: React.FC<ChatWorkspaceProps> = ({ themeMode = "dark"
         themeMode={themeMode}
         config={config}
         onUpdateConfig={setConfig}
+        customModels={customModels}
+        onAddCustomModel={addCustomModel}
+        onRemoveCustomModel={removeCustomModel}
       />
     </AssistantRuntimeProvider>
   );

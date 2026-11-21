@@ -21,14 +21,18 @@ import (
 	"ai-web-free/middlewares"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 type AdminHandler struct {
-	registry  *provider.Registry
-	proxyPool *proxy.Pool
-	cfg       *config.Config
-	runtime   *GatewayRuntime
-	startedAt time.Time
+	registry        *provider.Registry
+	proxyPool       *proxy.Pool
+	cfg             *config.Config
+	runtime         *GatewayRuntime
+	startedAt       time.Time
+	bulkTaskMu      sync.Mutex
+	currentBulkTask *BulkActionTask
+	bulkCancelCh    chan struct{}
 }
 
 func NewAdminHandler(reg *provider.Registry, proxyPool *proxy.Pool, cfg *config.Config) *AdminHandler {
@@ -174,6 +178,7 @@ func (h *AdminHandler) Overview(c *gin.Context) {
 		"kami_worker":            kamiStats,
 		"login_task":             activeLoginTask,
 		"probe_task":             activeProbeTask,
+		"bulk_task":              h.ActiveBulkActionTask(),
 		"audit_summary":          auditSummary,
 		"server_health":          serverStatus.Summary,
 		"providers":              providerSummaries,
@@ -231,9 +236,10 @@ func (h *AdminHandler) ListAccounts(c *gin.Context) {
 
 	list := p.ListAccounts(typeFilter, statusFilter, search)
 	resp := gin.H{
-		"provider": providerID,
-		"stats":    p.Stats(),
-		"accounts": list,
+		"provider":  providerID,
+		"stats":     p.Stats(),
+		"accounts":  list,
+		"bulk_task": h.ActiveBulkActionTask(),
 	}
 	if cg := h.providerAsChatGPT(providerID); cg != nil {
 		resp["login_task"] = cg.ActiveKamiLoginTask()
@@ -400,6 +406,7 @@ func (h *AdminHandler) BulkAccountAction(c *gin.Context) {
 		AccountIDs []string `json:"account_ids"`
 		Action     string   `json:"action"`
 		Headless   *bool    `json:"headless"`
+		Async      *bool    `json:"async"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "请求 JSON 格式无效: " + err.Error()}})
@@ -434,6 +441,58 @@ func (h *AdminHandler) BulkAccountAction(c *gin.Context) {
 	headless := false
 	if body.Headless != nil {
 		headless = *body.Headless
+	}
+
+	// 支持异步后台任务模式（async: true），避免页面等待卡死或离开页面丢失状态
+	isAsync := false
+	if body.Async != nil && *body.Async {
+		isAsync = true
+	}
+
+	if isAsync {
+		h.bulkTaskMu.Lock()
+		if h.currentBulkTask != nil && h.currentBulkTask.Status == "running" {
+			cp := cloneBulkActionTask(h.currentBulkTask)
+			h.bulkTaskMu.Unlock()
+			c.JSON(http.StatusConflict, gin.H{
+				"error": gin.H{
+					"message": "当前已有批量操作任务正在后台运行，请等待完成后再提交新任务",
+					"task":    cp,
+				},
+			})
+			return
+		}
+
+		nowStr := time.Now().Format(time.RFC3339)
+		taskID := uuid.NewString()
+		cancelCh := make(chan struct{})
+		h.bulkCancelCh = cancelCh
+
+		task := &BulkActionTask{
+			ID:               taskID,
+			Provider:         providerID,
+			Action:           action,
+			ActionLabel:      bulkActionLabel(action),
+			Status:           "running",
+			Total:            len(ids),
+			QueuedAccountIDs: append([]string(nil), ids...),
+			Results:          make([]BulkActionTaskItemResult, 0, len(ids)),
+			CreatedAt:        nowStr,
+			UpdatedAt:        nowStr,
+		}
+		h.currentBulkTask = task
+		taskSnapshot := cloneBulkActionTask(task)
+		h.bulkTaskMu.Unlock()
+
+		go h.executeBulkActionAsync(task, providerID, action, ids, headless, p, cancelCh)
+
+		c.JSON(http.StatusOK, gin.H{
+			"provider": providerID,
+			"action":   action,
+			"task":     taskSnapshot,
+			"stats":    p.Stats(),
+		})
+		return
 	}
 
 	type actionWithOpts interface {
@@ -483,9 +542,37 @@ func (h *AdminHandler) BulkAccountAction(c *gin.Context) {
 		)
 	}
 
+	syncTask := &BulkActionTask{
+		ID:          uuid.NewString(),
+		Provider:    providerID,
+		Action:      action,
+		ActionLabel: bulkActionLabel(action),
+		Status:      "completed",
+		Total:       len(ids),
+		Completed:   len(ids),
+		Success:     successCount,
+		Failed:      len(ids) - successCount,
+		Results:     make([]BulkActionTaskItemResult, 0, len(results)),
+		CreatedAt:   time.Now().Format(time.RFC3339),
+		UpdatedAt:   time.Now().Format(time.RFC3339),
+	}
+	for _, r := range results {
+		syncTask.Results = append(syncTask.Results, BulkActionTaskItemResult{
+			ID:      r.ID,
+			OK:      r.OK,
+			Error:   r.Error,
+			Message: r.Message,
+		})
+	}
+	h.bulkTaskMu.Lock()
+	h.currentBulkTask = syncTask
+	saveBulkTaskToDB(syncTask)
+	h.bulkTaskMu.Unlock()
+
 	c.JSON(http.StatusOK, gin.H{
 		"provider": providerID,
 		"action":   action,
+		"task":     syncTask,
 		"result": gin.H{
 			"total":   len(ids),
 			"success": successCount,
@@ -889,6 +976,10 @@ func (h *AdminHandler) DismissTask(c *gin.Context) {
 	dismissed := false
 	kind := strings.ToLower(strings.TrimSpace(body.Kind))
 	if cg == nil {
+		if kind == "bulk" || kind == "batch" {
+			c.JSON(http.StatusOK, gin.H{"ok": true, "dismissed": h.DismissBulkActionTask(body.TaskID)})
+			return
+		}
 		if kind != "login" && kind != "" {
 			c.JSON(http.StatusOK, gin.H{"ok": true, "dismissed": false})
 			return
@@ -906,11 +997,16 @@ func (h *AdminHandler) DismissTask(c *gin.Context) {
 		dismissed = cg.DismissKamiLoginTask(body.TaskID)
 	case "probe":
 		dismissed = cg.DismissProbeTask(body.TaskID)
+	case "bulk", "batch":
+		dismissed = h.DismissBulkActionTask(body.TaskID)
 	default:
 		if cg.DismissKamiLoginTask(body.TaskID) {
 			dismissed = true
 		}
 		if cg.DismissProbeTask(body.TaskID) {
+			dismissed = true
+		}
+		if h.DismissBulkActionTask(body.TaskID) {
 			dismissed = true
 		}
 	}

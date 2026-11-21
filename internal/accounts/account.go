@@ -2,6 +2,7 @@ package accounts
 
 import (
 	"fmt"
+	"sync"
 	"time"
 
 	"ai-web-free/httpclient"
@@ -86,8 +87,9 @@ type Account struct {
 	PlanType         string // 来自 JWT: chatgpt_plan_type (如 free / plus / team)
 
 	// 隔离单元（每个账号独立）
+	clientMu    sync.Mutex
 	Client      httpclient.HttpClient // 专属 TLS Client
-	Proxy       string                      // 专属代理 IP
+	Proxy       string                // 专属代理 IP
 	Fingerprint BrowserFingerprint          // 专属指纹
 
 	// WSS (free/puid 有, noauth 无)
@@ -187,8 +189,27 @@ func (a *Account) SyncJWTMetadata() {
 	}
 }
 
+// EnsureClient 确保专属 TLS Client 已初始化（懒加载入口）
+func (a *Account) EnsureClient() error {
+	a.clientMu.Lock()
+	defer a.clientMu.Unlock()
+	if a.Client != nil {
+		return nil
+	}
+	return a.initClientLocked()
+}
+
 // InitClient 创建专属 TLS Client
 func (a *Account) InitClient() error {
+	a.clientMu.Lock()
+	defer a.clientMu.Unlock()
+	return a.initClientLocked()
+}
+
+func (a *Account) initClientLocked() error {
+	if a.Client != nil {
+		return nil
+	}
 	opts := []tls_client.HttpClientOption{
 		tls_client.WithCookieJar(tls_client.NewCookieJar()),
 		tls_client.WithTimeoutSeconds(600),

@@ -226,9 +226,20 @@ func loginGrokCard(ctx context.Context, card GrokCardAccount, options GrokLoginO
 		return "", errors.New("Grok 网页端登录受 Cloudflare Turnstile 防火墙拦截，无头模式已禁用。请使用配套提取工具获取 SSO Cookie 后直接导入，或关闭无头模式手动登录")
 	}
 
+	if options.BrowserPath == "" {
+		browserPath, err := resolveChromeExecutable()
+		if err != nil {
+			return "", err
+		}
+		options.BrowserPath = browserPath
+	}
+
 	proxyURL := card.Proxy
 	if proxyURL == "" {
 		proxyURL = options.ProxyURL
+	}
+	if proxyURL == "" {
+		proxyURL = AutoDetectProxy()
 	}
 
 	var defaultUA string
@@ -262,11 +273,7 @@ func loginGrokCard(ctx context.Context, card GrokCardAccount, options GrokLoginO
 	if options.Headless {
 		allocatorOptions = append(allocatorOptions, chromedp.Flag("headless", "new"))
 	} else {
-		allocatorOptions = append(allocatorOptions,
-			chromedp.VisibleWindow,
-			chromedp.Flag("new-window", true),
-			chromedp.Flag("start-maximized", true),
-		)
+		allocatorOptions = append(allocatorOptions, chromedp.VisibleWindow)
 	}
 	if proxyURL != "" {
 		allocatorOptions = append(allocatorOptions, chromedp.ProxyServer(proxyURL))

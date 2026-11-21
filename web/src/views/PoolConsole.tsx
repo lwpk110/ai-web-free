@@ -26,6 +26,7 @@ import {
 } from "lucide-react";
 import {
   cancelKamiLogin,
+  cancelBulkActionTask,
   dismissAdminTask,
   executeAccountAction,
   bulkUpdateAccountProxy,
@@ -38,6 +39,7 @@ import {
   probeAllAccounts,
   type AccountActionType,
   type AccountView,
+  type BulkActionTask,
   type KamiWorkerStats,
   type KamiLoginTask,
   type PoolStats,
@@ -129,10 +131,14 @@ export const PoolConsole: React.FC<{
   const [cancellingSelected, setCancellingSelected] = useState(false);
   const [loginTask, setLoginTask] = useState<KamiLoginTask | null>(null);
   const [probeTask, setProbeTask] = useState<ProbeTask | null>(null);
+  const [bulkTask, setBulkTask] = useState<BulkActionTask | null>(null);
   const [expandLoginDetails, setExpandLoginDetails] = useState(false);
   const [expandProbeDetails, setExpandProbeDetails] = useState(false);
+  const [expandBulkDetails, setExpandBulkDetails] = useState(false);
+  const [cancellingBulkQueue, setCancellingBulkQueue] = useState(false);
   const trackedLoginIdRef = useRef<string | null>(null);
   const trackedProbeIdRef = useRef<string | null>(null);
+  const trackedBulkIdRef = useRef<string | null>(null);
   const [updatingProxy, setUpdatingProxy] = useState(false);
   const [headlessLogin, setHeadlessLogin] = useState(false);
   const [proxyNodes, setProxyNodes] = useState<ProxyNodeStatus[]>([]);
@@ -190,7 +196,8 @@ export const PoolConsole: React.FC<{
     (
       nextLoginTask?: KamiLoginTask | null,
       nextProbeTask?: ProbeTask | null,
-      nextWorker?: KamiWorkerStats | null
+      nextWorker?: KamiWorkerStats | null,
+      nextBulkTask?: BulkActionTask | null
     ) => {
       if (nextWorker !== undefined) {
         setWorkerStats(nextWorker || null);
@@ -245,6 +252,26 @@ export const PoolConsole: React.FC<{
           }
         }
       }
+      if (nextBulkTask !== undefined) {
+        setBulkTask(nextBulkTask || null);
+        if (nextBulkTask) {
+          if (nextBulkTask.status === "running") {
+            trackedBulkIdRef.current = nextBulkTask.id;
+          } else if (
+            (nextBulkTask.status === "completed" || nextBulkTask.status === "cancelled") &&
+            trackedBulkIdRef.current === nextBulkTask.id
+          ) {
+            trackedBulkIdRef.current = null;
+            const actionName = nextBulkTask.action_label || nextBulkTask.action || "批量操作";
+            const cancelPart = nextBulkTask.cancelled ? `，${nextBulkTask.cancelled} 已取消` : "";
+            setNotice({
+              type: nextBulkTask.failed > 0 ? "info" : "success",
+              text: `${actionName}完成：${nextBulkTask.success} 成功，${nextBulkTask.failed} 失败${cancelPart}（共 ${nextBulkTask.total} 个账号）`,
+            });
+            setSelectedAccountIds(new Set());
+          }
+        }
+      }
     },
     []
   );
@@ -278,12 +305,13 @@ export const PoolConsole: React.FC<{
           applySyncedTasks(
             accRes.login_task ?? ov.login_task,
             accRes.probe_task ?? ov.probe_task,
-            accRes.kami_worker ?? ov.kami_worker
+            accRes.kami_worker ?? ov.kami_worker,
+            accRes.bulk_task ?? ov.bulk_task
           );
         } else {
           setStats(targetSummary?.stats || null);
           setAccounts([]);
-          applySyncedTasks(ov.login_task, ov.probe_task, ov.kami_worker);
+          applySyncedTasks(ov.login_task, ov.probe_task, ov.kami_worker, ov.bulk_task);
         }
         window.dispatchEvent(new Event("pool-updated"));
       } catch (e: any) {
@@ -354,8 +382,9 @@ export const PoolConsole: React.FC<{
         acc.renew_state === "running" ||
         acc.renew_state === "queued"
     );
-    return loginBusy || probeBusy || workerBusy || rowBusy;
-  }, [loginTask, probeTask, workerStats, accounts]);
+    const bulkBusy = Boolean(bulkTask && bulkTask.status === "running");
+    return loginBusy || probeBusy || workerBusy || rowBusy || bulkBusy;
+  }, [loginTask, probeTask, bulkTask, workerStats, accounts]);
 
   useEffect(() => {
     if (!hasActiveOperations) return;
@@ -648,15 +677,38 @@ export const PoolConsole: React.FC<{
     }
   };
 
-  const handleDismissTask = async (kind: "login" | "probe", taskId?: string) => {
+  const handleCancelRemainingBulk = async () => {
+    if (!bulkTask) return;
+    setCancellingBulkQueue(true);
+    try {
+      await cancelBulkActionTask(activeProvider, bulkTask.id);
+      setNotice({
+        type: "info",
+        text: "已成功取消批量操作的后续排队。",
+      });
+      await loadData(true);
+    } catch (e: any) {
+      setNotice({
+        type: "error",
+        text: `取消排队失败: ${e?.message || "未知错误"}`,
+      });
+    } finally {
+      setCancellingBulkQueue(false);
+    }
+  };
+
+  const handleDismissTask = async (kind: "login" | "probe" | "bulk", taskId?: string) => {
     try {
       await dismissAdminTask(activeProvider, { kind, task_id: taskId });
       if (kind === "login") {
         setLoginTask(null);
         setExpandLoginDetails(false);
-      } else {
+      } else if (kind === "probe") {
         setProbeTask(null);
         setExpandProbeDetails(false);
+      } else {
+        setBulkTask(null);
+        setExpandBulkDetails(false);
       }
       await loadData(true);
     } catch (e: any) {
@@ -703,6 +755,7 @@ export const PoolConsole: React.FC<{
     loginTask && (loginTask.status === "queued" || loginTask.status === "running")
   );
   const probeTaskActive = Boolean(probeTask && probeTask.status === "running");
+  const bulkTaskActive = Boolean(bulkTask && bulkTask.status === "running");
   const proxyUnavailable =
     proxyNodes.length > 0 && !proxyNodes.some((node) => node.status === "active");
   const allVisibleSelected =
@@ -852,12 +905,30 @@ export const PoolConsole: React.FC<{
       const failures: string[] = [];
 
       try {
-        const res = await bulkAccountAction(activeProvider, ids, action);
-        successCount = res.result.success;
-        failedCount = res.result.failed;
-        res.result.results
-          .filter((item) => !item.ok)
-          .forEach((item) => failures.push(`${item.id}: ${item.error || "失败"}`));
+        // 显式以异步后台任务模式执行，立即返回任务并在后台异步推进，离开页面也绝不丢失状态
+        const res = await bulkAccountAction(activeProvider, ids, action, { async: true });
+        if (res.task) {
+          trackedBulkIdRef.current = res.task.id;
+          setBulkTask(res.task);
+          setNotice({
+            type: "info",
+            text: `已提交后台${actionLabel}任务（共 ${res.task.total} 个账号），已在上方进度面板实时回显。`,
+          });
+        } else if (res.result) {
+          successCount = res.result.success;
+          failedCount = res.result.failed;
+          res.result.results
+            .filter((item) => !item.ok)
+            .forEach((item) => failures.push(`${item.id}: ${item.error || "失败"}`));
+          setNotice({
+            type: failedCount > 0 ? (successCount > 0 ? "info" : "error") : "success",
+            text: `${actionLabel}完成：成功 ${successCount}/${ids.length} 个账号${
+              failures.length
+                ? `（失败项：${failures.slice(0, 3).join("；")}${failures.length > 3 ? " 等" : ""}）`
+                : ""
+            }`,
+          });
+        }
       } catch (bulkErr: any) {
         // 若后端尚未重启或为旧版本 (404 Not Found)，平滑回退到并发客户端逐个执行
         if (
@@ -876,21 +947,20 @@ export const PoolConsole: React.FC<{
               failures.push(`${ids[idx]}: ${r.reason?.message || "失败"}`);
             }
           });
+          setNotice({
+            type: failedCount > 0 ? (successCount > 0 ? "info" : "error") : "success",
+            text: `${actionLabel}完成：成功 ${successCount}/${ids.length} 个账号${
+              failures.length
+                ? `（失败项：${failures.slice(0, 3).join("；")}${failures.length > 3 ? " 等" : ""}）`
+                : ""
+            }`,
+          });
         } else {
           throw bulkErr;
         }
       }
 
-      const isDelete = action === "delete";
-      setNotice({
-        type: failedCount > 0 ? (successCount > 0 ? "info" : "error") : "success",
-        text: `${actionLabel}完成：成功 ${successCount}/${ids.length} 个账号${
-          failures.length
-            ? `（失败项：${failures.slice(0, 3).join("；")}${failures.length > 3 ? " 等" : ""}）`
-            : ""
-        }`,
-      });
-      if (isDelete) {
+      if (action === "delete") {
         setShowBulkDeleteConfirm(false);
       }
       setShowBulkEdit(false);
@@ -1624,6 +1694,131 @@ export const PoolConsole: React.FC<{
                       ? `${item.latency_ms ?? 0}ms`
                       : item.error || "探测失败"}
                   </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {bulkTask && !bulkTask.dismissed && (
+        <div
+          className="p-card rounded-xl px-3.5 py-3 space-y-2.5 text-xs"
+          role="status"
+          aria-live="polite"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2 min-w-0">
+              {bulkTaskActive ? (
+                <Loader2 size={14} className="animate-spin shrink-0" style={{ color: "var(--pill-info-text)" }} />
+              ) : bulkTask.failed > 0 ? (
+                <AlertCircle size={14} className="shrink-0" style={{ color: "var(--pill-warn-text)" }} />
+              ) : (
+                <CheckCircle2 size={14} className="shrink-0" style={{ color: "var(--pill-success-text)" }} />
+              )}
+              <span className="font-medium">
+                {bulkTaskActive
+                  ? `${bulkTask.action_label || bulkTask.action || "批量操作"}进行中：${bulkTask.completed}/${bulkTask.total}`
+                  : `${bulkTask.action_label || bulkTask.action || "批量操作"}已完成：共处理 ${bulkTask.completed}/${bulkTask.total} 个账号`}
+              </span>
+              {bulkTaskActive && (
+                <span className="font-mono-num z-text-sec truncate">
+                  {bulkTask.current_email || bulkTask.current_account_id
+                    ? `${bulkTask.current_email || bulkTask.current_account_id} · ${bulkTask.current_phase_label || "执行中"}${formatElapsedSeconds(bulkTask.current_started_at, nowMs) ? ` (${formatElapsedSeconds(bulkTask.current_started_at, nowMs)})` : ""}`
+                    : "正在分派队列..."}
+                </span>
+              )}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
+              <span className="z-text-muted font-mono-num">
+                {`${bulkTask.success} 成功 · ${bulkTask.failed} 失败${bulkTask.cancelled ? ` · ${bulkTask.cancelled} 已取消` : ""}${(bulkTask.queued_account_ids?.length ?? 0) > 0 ? ` · ${bulkTask.queued_account_ids!.length} 排队` : ""}`}
+              </span>
+              {bulkTaskActive && (bulkTask.queued_account_ids?.length ?? 0) > 0 && (
+                <button
+                  type="button"
+                  disabled={cancellingBulkQueue}
+                  onClick={handleCancelRemainingBulk}
+                  className="px-2 py-0.5 rounded-lg border z-border hover:underline cursor-pointer disabled:opacity-50"
+                  style={{ color: "var(--pill-danger-text)" }}
+                >
+                  {cancellingBulkQueue
+                    ? "取消中..."
+                    : `取消剩余排队 (${bulkTask.queued_account_ids!.length})`}
+                </button>
+              )}
+              {(bulkTask.results?.length ?? 0) > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setExpandBulkDetails((v) => !v)}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg border z-border z-ghost-btn cursor-pointer"
+                >
+                  <span>
+                    {expandBulkDetails
+                      ? "收起明细"
+                      : `展开明细 (${bulkTask.results.length})`}
+                  </span>
+                  {expandBulkDetails ? (
+                    <ChevronUp size={12} />
+                  ) : (
+                    <ChevronDown size={12} />
+                  )}
+                </button>
+              )}
+              {!bulkTaskActive && (
+                <button
+                  type="button"
+                  onClick={() => handleDismissTask("bulk", bulkTask.id)}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg border z-border z-ghost-btn cursor-pointer"
+                  aria-label="关闭批量操作战报"
+                >
+                  <X size={12} />
+                  <span>关闭战报</span>
+                </button>
+              )}
+            </div>
+          </div>
+
+          <progress
+            className="w-full h-1.5 accent-emerald-600"
+            max={Math.max(bulkTask.total, 1)}
+            value={bulkTask.completed}
+            aria-label="批量操作进度"
+          />
+
+          {expandBulkDetails && (bulkTask.results?.length ?? 0) > 0 && (
+            <div className="max-h-44 overflow-y-auto border-t z-border pt-2 space-y-1">
+              {bulkTask.results.map((item, idx) => (
+                <div
+                  key={`${item.id || "bulk"}-${idx}`}
+                  className="flex flex-wrap items-center justify-between gap-2 py-1 px-2 rounded-lg"
+                  style={{ background: "var(--bg-input)" }}
+                >
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span
+                      className={`px-1.5 py-0.25 rounded-full border text-[11px] font-medium shrink-0 ${
+                        item.ok ? "z-pill-success" : "z-pill-danger"
+                      }`}
+                    >
+                      {item.ok ? "成功" : "失败"}
+                    </span>
+                    <span className="font-mono-num truncate max-w-[260px]">
+                      {item.email || item.id}
+                    </span>
+                  </div>
+                  {(item.message || item.error) && (
+                    <span
+                      className="font-mono-num truncate max-w-[420px]"
+                      style={{
+                        color: item.ok
+                          ? "var(--text-muted)"
+                          : "var(--pill-danger-text)",
+                      }}
+                      title={item.error || item.message || ""}
+                    >
+                      {item.error || item.message}
+                    </span>
+                  )}
                 </div>
               ))}
             </div>

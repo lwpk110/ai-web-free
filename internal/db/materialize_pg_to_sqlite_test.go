@@ -21,6 +21,9 @@ func TestMaterializePostgresToSQLite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to open source db: %v", err)
 	}
+	if sqlDB, err := srcDB.DB(); err == nil {
+		defer sqlDB.Close()
+	}
 	if err := srcDB.AutoMigrate(
 		&PoolAccountRecord{},
 		&ProxyNodeRecord{},
@@ -67,6 +70,9 @@ func TestMaterializePostgresToSQLite(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("failed to open materialized target: %v", err)
+	}
+	if sqlDB, err := dstDB.DB(); err == nil {
+		defer sqlDB.Close()
 	}
 
 	var accCount int64

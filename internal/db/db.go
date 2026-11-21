@@ -150,6 +150,7 @@ func CoreModels() []any {
 		&DramaProjectRecord{},
 		&DramaRunRecord{},
 		&FreebieDeal{},
+		&BatchActionTaskRecord{},
 	}
 }
 

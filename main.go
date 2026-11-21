@@ -171,10 +171,7 @@ func handleGrokLogin() {
 		*output = strings.TrimSuffix(*input, filepath.Ext(*input)) + "_sso.txt"
 	}
 	if *proxyURL == "" {
-		*proxyURL = os.Getenv("HTTPS_PROXY")
-		if *proxyURL == "" {
-			*proxyURL = os.Getenv("HTTP_PROXY")
-		}
+		*proxyURL = provider.AutoDetectProxy()
 	}
 
 	fmt.Printf("开始刷新 %d 个 Grok 账号，浏览器将逐个执行（无头: %t）；如改用有头模式遇到人机验证可手动完成\n", len(selected), *headless)

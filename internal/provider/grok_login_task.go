@@ -516,6 +516,15 @@ func (p *GrokProvider) runGrokLoginTask(taskID string) {
 			p.recordGrokLoginResult(taskID, *failure, "")
 			continue
 		}
+		if proxyURL == "" && p.proxyPool != nil {
+			proxyURL = p.proxyPool.AllocateHealthy(nil)
+			if proxyURL == "" {
+				proxyURL = p.proxyPool.Allocate()
+			}
+		}
+		if proxyURL == "" {
+			proxyURL = AutoDetectProxy()
+		}
 		task.CurrentEmail = card.Email
 		p.updateGrokLoginTask(taskID, func(current *KamiLoginTask) {
 			if current.CurrentAccountID == item.accountID {

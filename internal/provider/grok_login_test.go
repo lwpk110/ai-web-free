@@ -198,3 +198,22 @@ func TestWriteGrokCookieOutputCreatesParent(t *testing.T) {
 		t.Fatalf("unexpected file mode: %v", info.Mode().Perm())
 	}
 }
+
+func TestResolveChromeExecutableAndAutoDetectProxy(t *testing.T) {
+	exe, err := ResolveChromeExecutable()
+	if err != nil {
+		t.Logf("ResolveChromeExecutable returned err: %v", err)
+	} else {
+		t.Logf("ResolveChromeExecutable found browser: %s", exe)
+		if !strings.Contains(strings.ToLower(exe), "chrome") &&
+			!strings.Contains(strings.ToLower(exe), "edge") &&
+			!strings.Contains(strings.ToLower(exe), "chromium") &&
+			!strings.Contains(strings.ToLower(exe), "brave") {
+			t.Fatalf("unexpected browser executable: %s", exe)
+		}
+	}
+
+	proxy := AutoDetectProxy()
+	t.Logf("AutoDetectProxy: %s", proxy)
+}
+

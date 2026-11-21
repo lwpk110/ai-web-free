@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/url"
 	"os"
 	"os/exec"
@@ -74,14 +75,34 @@ type KamiLoginOutcome struct {
 	Error            string `json:"error,omitempty"`
 }
 
-// ResolveChromeExecutable 查找本机可用的 Chrome/Chromium 可执行文件。
+// AutoDetectProxy 探测本机或环境变量中可用的代理地址。
+func AutoDetectProxy() string {
+	for _, env := range []string{"PROXY_URL", "HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"} {
+		if val := strings.TrimSpace(os.Getenv(env)); val != "" {
+			return val
+		}
+	}
+	for _, addr := range []string{"127.0.0.1:10809", "127.0.0.1:7890", "127.0.0.1:10808"} {
+		conn, err := net.DialTimeout("tcp", addr, 150*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			return "http://" + addr
+		}
+	}
+	return ""
+}
+
+// ResolveChromeExecutable 查找本机可用的 Chrome/Chromium/Edge 可执行文件。
 func ResolveChromeExecutable() (string, error) {
 	if envPath := strings.TrimSpace(os.Getenv("CHROME_PATH")); envPath != "" {
 		if st, err := os.Stat(envPath); err == nil && !st.IsDir() {
 			return envPath, nil
 		}
 	}
-	for _, bin := range []string{"google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "chrome.exe", "chromium.exe"} {
+	for _, bin := range []string{
+		"google-chrome", "google-chrome-stable", "chromium", "chromium-browser",
+		"chrome.exe", "chromium.exe", "msedge.exe", "brave.exe",
+	} {
 		if p, err := exec.LookPath(bin); err == nil {
 			return p, nil
 		}
@@ -89,19 +110,34 @@ func ResolveChromeExecutable() (string, error) {
 	candidates := []string{}
 	switch runtime.GOOS {
 	case "windows":
-		for _, base := range []string{os.Getenv("ProgramFiles"), os.Getenv("ProgramFiles(x86)"), os.Getenv("LocalAppData")} {
-			if base != "" {
-				candidates = append(candidates, filepath.Join(base, "Google", "Chrome", "Application", "chrome.exe"))
+		bases := []string{
+			os.Getenv("ProgramFiles"),
+			os.Getenv("ProgramFiles(x86)"),
+			os.Getenv("ProgramW6432"),
+			os.Getenv("LocalAppData"),
+		}
+		for _, base := range bases {
+			if base == "" {
+				continue
 			}
+			candidates = append(candidates,
+				filepath.Join(base, "Google", "Chrome", "Application", "chrome.exe"),
+				filepath.Join(base, "Microsoft", "Edge", "Application", "msedge.exe"),
+				filepath.Join(base, "BraveSoftware", "Brave-Browser", "Application", "brave.exe"),
+			)
 		}
 	case "darwin":
 		candidates = append(candidates,
 			"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+			"/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+			"/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
 			"/Applications/Chromium.app/Contents/MacOS/Chromium",
 		)
 		if home, err := os.UserHomeDir(); err == nil {
 			candidates = append(candidates,
 				filepath.Join(home, "Applications", "Google Chrome.app", "Contents", "MacOS", "Google Chrome"),
+				filepath.Join(home, "Applications", "Microsoft Edge.app", "Contents", "MacOS", "Microsoft Edge"),
+				filepath.Join(home, "Applications", "Brave Browser.app", "Contents", "MacOS", "Brave Browser"),
 				filepath.Join(home, "Applications", "Chromium.app", "Contents", "MacOS", "Chromium"),
 			)
 		}
@@ -125,7 +161,7 @@ func ResolveChromeExecutable() (string, error) {
 			}
 		}
 	}
-	return "", errors.New("未找到 Chrome/Chromium 可执行文件，请安装 Chrome/Chromium、将其加入 PATH 或设置 CHROME_PATH")
+	return "", errors.New("未找到 Chrome/Chromium/Edge 可执行文件，请安装 Chrome/Chromium/Edge、将其加入 PATH 或设置 CHROME_PATH")
 }
 
 func resolveChromeExecutable() (string, error) {

@@ -273,6 +273,36 @@ export interface ProbeTask {
   updated_at: string;
 }
 
+export interface BulkActionTaskItemResult {
+  id: string;
+  email?: string;
+  ok: boolean;
+  error?: string;
+  message?: string;
+}
+
+export interface BulkActionTask {
+  id: string;
+  provider: string;
+  action: string;
+  action_label?: string;
+  status: "running" | "completed" | "cancelled" | string;
+  total: number;
+  completed: number;
+  success: number;
+  failed: number;
+  cancelled?: number;
+  current_account_id?: string;
+  current_email?: string;
+  current_phase_label?: string;
+  current_started_at?: string;
+  queued_account_ids?: string[];
+  results: BulkActionTaskItemResult[];
+  created_at: string;
+  updated_at: string;
+  dismissed?: boolean;
+}
+
 export interface AuditSummary {
   capacity: number;
   buffered_count: number;
@@ -430,6 +460,7 @@ export interface OverviewResponse {
   kami_worker?: KamiWorkerStats;
   login_task?: KamiLoginTask | null;
   probe_task?: ProbeTask | null;
+  bulk_task?: BulkActionTask | null;
   audit_summary?: AuditSummary;
   server_health?: ServerHealthSummary;
   providers: ProviderSummary[];
@@ -543,6 +574,7 @@ export async function fetchAccounts(
   stats: PoolStats;
   login_task?: KamiLoginTask | null;
   probe_task?: ProbeTask | null;
+  bulk_task?: BulkActionTask | null;
   kami_worker?: KamiWorkerStats;
 }> {
   const params = new URLSearchParams();
@@ -589,11 +621,12 @@ export async function bulkAccountAction(
   provider: string,
   accountIds: string[],
   action: AccountActionType,
-  options?: { headless?: boolean }
+  options?: { headless?: boolean; async?: boolean }
 ): Promise<{
   provider: string;
   action: string;
-  result: {
+  task?: BulkActionTask;
+  result?: {
     total: number;
     success: number;
     failed: number;
@@ -610,6 +643,7 @@ export async function bulkAccountAction(
         account_ids: accountIds,
         action,
         headless: options?.headless,
+        async: options?.async,
       }),
     }
   );
@@ -628,6 +662,22 @@ export async function bulkAccountAction(
     err.status = res.status;
     throw err;
   }
+  return res.json();
+}
+
+export async function cancelBulkActionTask(
+  provider = "chatgpt",
+  taskId?: string
+): Promise<{ ok: boolean }> {
+  const res = await adminFetch(
+    `/admin/api/v1/providers/${encodeURIComponent(provider)}/accounts/bulk-action/cancel`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ task_id: taskId }),
+    }
+  );
+  if (!res.ok) throw new Error(`Cancel bulk task failed: HTTP ${res.status}`);
   return res.json();
 }
 
@@ -753,7 +803,7 @@ export async function cancelKamiLogin(
 
 export async function dismissAdminTask(
   provider = "chatgpt",
-  payload: { kind?: "login" | "probe"; task_id?: string }
+  payload: { kind?: "login" | "probe" | "bulk"; task_id?: string }
 ): Promise<{ ok: boolean; dismissed: boolean }> {
   const res = await adminFetch(
     `/admin/api/v1/providers/${encodeURIComponent(provider)}/tasks/dismiss`,

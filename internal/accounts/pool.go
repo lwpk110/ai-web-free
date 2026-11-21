@@ -115,11 +115,17 @@ func (p *Pool) AcquireForCapability(acctType AccountType, capName string, exclud
 // AcquireMatching 按类型优先级与自定义过滤器取号（分组调度使用），match 为 nil 表示不过滤。
 func (p *Pool) AcquireMatching(types []AccountType, match func(*Account) bool, capName string, exclude map[string]bool) (*Account, error) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
+	var picked *Account
 	for _, t := range types {
 		if a := p.acquireLocked(t, match, capName, exclude); a != nil {
-			return a, nil
+			picked = a
+			break
 		}
+	}
+	p.mu.Unlock()
+	if picked != nil {
+		_ = picked.EnsureClient()
+		return picked, nil
 	}
 	return nil, ErrNoAvailable
 }
@@ -358,10 +364,15 @@ func (p *Pool) StartHealthCheck(interval time.Duration, renew TokenRenewer) func
 	}
 	stop := make(chan struct{})
 	go func() {
+		// 启动 500ms 后异步执行首次健康巡检与 Token 刷新，避免阻塞服务冷启动
+		firstCheck := time.NewTimer(500 * time.Millisecond)
+		defer firstCheck.Stop()
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
 			select {
+			case <-firstCheck.C:
+				p.runHealthCheck(renew)
 			case <-ticker.C:
 				p.runHealthCheck(renew)
 			case <-stop:
