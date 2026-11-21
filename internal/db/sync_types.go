@@ -403,6 +403,7 @@ func DefaultSyncTables() []SyncTableSpec {
 		NewTypedSyncTable[DramaProjectRecord](),
 		NewTypedSyncTable[DramaRunRecord](),
 		NewTypedSyncTable[FreebieDeal](),
+		NewTypedSyncTable[SystemSettingRecord](),
 	}
 }
 

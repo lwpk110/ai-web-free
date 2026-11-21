@@ -17,6 +17,7 @@ import {
   PanelLeftOpen,
   Search,
   Server,
+  SlidersHorizontal,
   Sparkles,
   Sun,
   Terminal,
@@ -63,6 +64,9 @@ const GatewayView = lazy(() =>
 const OpsLogsView = lazy(() =>
   import("./views/OpsLogsView").then((m) => ({ default: m.OpsLogsView }))
 );
+const SettingsView = lazy(() =>
+  import("./views/SettingsView").then((m) => ({ default: m.SettingsView }))
+);
 const OverviewView = lazy(() =>
   import("./views/OverviewView").then((m) => ({ default: m.OverviewView }))
 );
@@ -108,6 +112,7 @@ function resolveRouteFromHash(): RouteKey {
   if (h.startsWith("network")) return "network";
   if (h.startsWith("deals")) return "deals";
   if (h.startsWith("ops-logs")) return "ops-logs";
+  if (h.startsWith("settings")) return "settings";
   if (h.startsWith("logs")) return "logs";
   if (h.startsWith("chat")) return "chat";
   if (h.startsWith("image")) return "image";
@@ -133,6 +138,8 @@ function renderNavIcon(id: RouteKey) {
       return <ListChecks size={15} className="shrink-0" />;
     case "ops-logs":
       return <Terminal size={15} className="shrink-0" />;
+    case "settings":
+      return <SlidersHorizontal size={15} className="shrink-0" />;
     case "chat":
       return <Sparkles size={15} className="shrink-0" />;
     case "image":
@@ -726,6 +733,7 @@ export const App: React.FC = () => {
                   {route === "deals" && <DealsView />}
                   {route === "logs" && <LogsView />}
                   {route === "ops-logs" && <OpsLogsView />}
+                  {route === "settings" && <SettingsView />}
                 </div>
               ))}
             </Suspense>

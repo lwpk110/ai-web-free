@@ -3355,3 +3355,114 @@ export async function fetchDealsStatus(): Promise<DealsStatus> {
   }
   return data;
 }
+
+// ─── 系统配置中心 (System Config Center, ADR-0019) ───────────────────────
+
+export interface SystemSettingItem {
+  key: string;
+  label: string;
+  description: string;
+  group_title: string;
+  placeholder?: string;
+  category: "multimodal" | "proxy" | "pool" | "gateway" | "storage" | "bootstrap" | string;
+  type: "string" | "int" | "float" | "bool" | "duration" | string;
+  default_value: string;
+  is_secret: boolean;
+  is_featured: boolean;
+  profile_overridable: boolean;
+  read_only: boolean;
+  effective_value: string;
+  scope_value: string;
+  global_value: string;
+  source: "profile" | "global" | "env" | "default" | string;
+  has_scope_override: boolean;
+  has_global_value: boolean;
+  is_configured: boolean;
+  updated_at?: string;
+  updated_by?: string;
+}
+
+export interface SystemSettingsResponse {
+  scope: string;
+  active_profile: string;
+  available_scopes: string[];
+  items: SystemSettingItem[];
+  bootstrap_env_template: string;
+}
+
+export async function fetchSystemSettings(scope = "global"): Promise<SystemSettingsResponse> {
+  const params = new URLSearchParams();
+  if (scope) params.set("scope", scope);
+  const res = await adminFetch(`/admin/api/v1/settings?${params.toString()}`);
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error?.message || `加载系统配置失败: HTTP ${res.status}`);
+  }
+  return data;
+}
+
+export async function updateSystemSettings(payload: {
+  scope: string;
+  values?: Record<string, string>;
+  dotenv?: string;
+}): Promise<SystemSettingsResponse> {
+  const res = await adminFetch("/admin/api/v1/settings", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error?.message || `保存系统配置失败: HTTP ${res.status}`);
+  }
+  return data;
+}
+
+export async function deleteSystemSettingOverride(
+  scope: string,
+  key: string
+): Promise<SystemSettingsResponse> {
+  const params = new URLSearchParams({ scope, key });
+  const res = await adminFetch(`/admin/api/v1/settings?${params.toString()}`, {
+    method: "DELETE",
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error?.message || `恢复默认配置失败: HTTP ${res.status}`);
+  }
+  return data;
+}
+
+export async function revealSystemSetting(
+  scope: string,
+  key: string
+): Promise<{ key: string; scope: string; value: string; found: boolean }> {
+  const res = await adminFetch("/admin/api/v1/settings/reveal", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ scope, key }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error?.message || `读取明文失败: HTTP ${res.status}`);
+  }
+  return data;
+}
+
+export async function exportSystemSettings(params: {
+  scope: string;
+  format: "dotenv" | "json";
+  includeSecrets?: boolean;
+}): Promise<{ scope: string; format: string; content: string }> {
+  const qs = new URLSearchParams({
+    scope: params.scope,
+    format: params.format,
+    include_secrets: params.includeSecrets ? "true" : "false",
+  });
+  const res = await adminFetch(`/admin/api/v1/settings/export?${qs.toString()}`);
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error?.message || `导出配置失败: HTTP ${res.status}`);
+  }
+  return data;
+}

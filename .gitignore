@@ -67,6 +67,10 @@ web/node_modules/
 !/docs/*.md
 !/docs/adr/
 !/docs/adr/**
+!/docs/architecture/
+!/docs/architecture/**
+!/docs/screenshots/
+!/docs/screenshots/**
 __pycache__/
 *.pyc
 .neon

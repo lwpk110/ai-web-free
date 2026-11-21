@@ -374,3 +374,21 @@ func (BatchActionTaskRecord) TableName() string {
 	return "batch_action_task_records"
 }
 
+// SystemSettingRecord 系统配置中心持久化模型（支持 global 与 profile 两级作用域及 AES-GCM 敏感加密）
+type SystemSettingRecord struct {
+	ID          string    `gorm:"primaryKey;size:128" json:"id"`               // "<scope>:<key>"
+	Scope       string    `gorm:"size:32;default:'global';index" json:"scope"` // "global" | "home" | "office" | "vps" | 自定义
+	Key         string    `gorm:"size:96;index" json:"key"`
+	Category    string    `gorm:"size:32;index" json:"category"`               // gateway | multimodal | pool | proxy | storage
+	Value       string    `gorm:"type:text" json:"value,omitempty"`
+	ValueCipher string    `gorm:"type:text" json:"-"`
+	IsSecret    bool      `gorm:"default:false" json:"is_secret"`
+	UpdatedBy   string    `gorm:"size:32;default:'admin'" json:"updated_by"`
+	CreatedAt   time.Time `gorm:"index" json:"created_at"`
+	UpdatedAt   time.Time `gorm:"index" json:"updated_at"`
+}
+
+func (SystemSettingRecord) TableName() string {
+	return "system_setting_records"
+}
+
