@@ -4,7 +4,7 @@
 
 ## 1. 项目概览
 
-- **定位**：OpenAI 兼容的多供应商免费号池与逆向网关（Go 1.26 后端 + `go:embed` 内嵌 React/TypeScript 管理台）。
+- **定位**：OpenAI 兼容的多供应商免费号池与逆向网关（Go 1.27 后端 + `go:embed` 内嵌 React/TypeScript 管理台）。
 - **核心入口**：
   - `main.go` / `api/router.go`：调用 `bootstrap.Init()` 初始化号池、代理池、Provider 插件与 Gin 路由。
   - 协议覆盖：`/v1/chat/completions`（含 `<tool_call>` 工具调用模拟）、`/v1/responses`、`/v1/files`、`/v1/images/{generations,edits,variations}`、`/v1/audio/{speech,transcriptions,translations}`、`/v1/models`、`/auth/*`、`/backend-api/conversation`，以及 `/admin/api/v1/*` 管理端接口。
