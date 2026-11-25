@@ -10,7 +10,7 @@
 #
 # 注意:必须先 COPY go.mod/go.sum 再 go mod download,
 # 这样 buildx 才能在 go.sum 变化时失效此层缓存,触发重新下载。
-ARG GO_VERSION=1.26.0
+ARG GO_VERSION=1.27.4
 
 # ---- 阶段 1: 编译 ----
 FROM golang:${GO_VERSION}-alpine AS build

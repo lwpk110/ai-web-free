@@ -36,6 +36,8 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # 4. 启动 Go 后端
+# 清除可能指向旧版本 Go 的 GOROOT，避免与 go.mod 要求的工具链版本冲突
+unset GOROOT
 echo ">> 启动 Go 后端: http://localhost:${PORT}"
 SERVER_PORT="${PORT}" go run . &
 BACKEND_PID=$!

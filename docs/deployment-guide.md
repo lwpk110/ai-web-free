@@ -134,7 +134,7 @@ sudo journalctl -u ai-web-free -f
 
 ### 1. Dockerfile 说明
 项目根目录下的 `Dockerfile` 采用多阶段纯静态编译：
-- **构建阶段**：基于 `node:20` 构建前端，基于 `golang:1.24` 编译纯静态 Go 二进制。
+- **构建阶段**：基于 `golang:1.27.4-alpine` 编译纯静态 Go 二进制（前端静态资源通过 `go:embed` 内嵌）。
 - **运行阶段**：基于安全极简的 `gcr.io/distroless/static-debian12:nonroot` 镜像，无 shell、无漏洞面、镜像体积仅约 30MB。
 
 ### 2. 单容器运行

@@ -2,6 +2,8 @@ PORT ?= 18080
 WEB_PORT ?= 5173
 IMAGE ?= ai-web-free:latest
 CGO_ENABLED ?= 0
+# 避免宿主机环境变量中残留旧版本 GOROOT 导致 GOTOOLCHAIN=auto 切换后出现 compile version mismatch
+unexport GOROOT
 
 ifeq ($(OS),Windows_NT)
   BIN ?= ai-web-free.exe
